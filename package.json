@@ -6,7 +6,8 @@
   "description": "Lightweight chat-native control plane for local coding agents.",
   "scripts": {
     "dev": "tsx src/main.ts",
-    "smoke:fake": "tsx src/main.ts --config examples/config.example.yaml --fake-message \"!status\"",
+    "smoke:fake": "tsx src/main.ts --config examples/config.smoke.yaml --fake-message \"!status\"",
+    "smoke:pi-rpc": "tsx src/smoke/pi-rpc-state.ts --config examples/config.smoke.yaml",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json"
   },

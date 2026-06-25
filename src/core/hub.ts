@@ -3,6 +3,7 @@ import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
+import type { AgentBackend, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry } from "./session-registry.js";
@@ -11,6 +12,7 @@ import type { AgentName, HubSession } from "./types.js";
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
+  private readonly workers = new Map<string, AgentBackend>();
 
   constructor(
     private readonly config: HubConfig,
@@ -28,6 +30,11 @@ export class RemoteAgentHub {
 
   private async handleEvent(event: InboundChatEvent): Promise<void> {
     try {
+      if (!this.isAuthorizedTarget(event)) {
+        await this.channel.sendText(event.target, "Unauthorized chat/user.");
+        return;
+      }
+
       const command = parseCommand(event.text);
 
       switch (command.type) {
@@ -42,6 +49,12 @@ export class RemoteAgentHub {
           return;
         case "abort":
           await this.handleAbort(event);
+          return;
+        case "approve":
+          await this.handleApprovalDecision(event, command.id, "allowed");
+          return;
+        case "deny":
+          await this.handleApprovalDecision(event, command.id, "denied");
           return;
         case "prompt":
           await this.handlePrompt(event, command.text);
@@ -76,7 +89,7 @@ export class RemoteAgentHub {
       details: { agent, cwd },
     });
 
-    await this.channel.sendText(
+    await this.sendChunkedText(
       event.target,
       `Created session ${shortId(session)}\nagent: ${session.agent}\ncwd: ${session.cwd}`,
     );
@@ -85,11 +98,11 @@ export class RemoteAgentHub {
   private async handleStatus(event: InboundChatEvent): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
     if (!session) {
-      await this.channel.sendText(event.target, "No active session.");
+      await this.sendChunkedText(event.target, "No active session.");
       return;
     }
 
-    await this.channel.sendText(
+    await this.sendChunkedText(
       event.target,
       `Session ${shortId(session)}\nagent: ${session.agent}\nstatus: ${session.status}\ncwd: ${session.cwd}`,
     );
@@ -97,34 +110,37 @@ export class RemoteAgentHub {
 
   private async handleCwd(event: InboundChatEvent): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
-    await this.channel.sendText(event.target, session ? session.cwd : "No active session.");
+    await this.sendChunkedText(event.target, session ? session.cwd : "No active session.");
   }
 
   private async handleAbort(event: InboundChatEvent): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
     if (!session) {
-      await this.channel.sendText(event.target, "No active session to abort.");
+      await this.sendChunkedText(event.target, "No active session to abort.");
       return;
     }
 
+    const worker = this.workers.get(session.id);
+    await worker?.abort();
+    this.workers.delete(session.id);
     this.sessions.updateStatus(session.id, "stopped");
     await this.audit.write({
       type: "session.aborted",
       sessionId: session.id,
       target: event.target,
     });
-    await this.channel.sendText(event.target, `Stopped session ${shortId(session)}.`);
+    await this.sendChunkedText(event.target, `Stopped session ${shortId(session)}.`);
   }
 
   private async handlePrompt(event: InboundChatEvent, text: string): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
     if (!session) {
-      await this.channel.sendText(event.target, "No active session. Start one with `!new pi <cwd>`.");
+      await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
       return;
     }
 
     if (session.status === "running") {
-      await this.channel.sendText(event.target, "Session is already running. Use `!abort` before sending another turn.");
+      await this.sendChunkedText(event.target, "Session is already running. Use `!abort` before sending another turn.");
       return;
     }
 
@@ -135,11 +151,48 @@ export class RemoteAgentHub {
       details: { length: text.length },
     });
 
-    const backend = new PiRpcBackend(this.config);
-    void backend;
-    await this.channel.sendText(
+    const backend = this.getWorker(session);
+    this.sessions.updateStatus(session.id, "running");
+
+    try {
+      const processId = await backend.start(session);
+      this.sessions.setBackendProcess(session.id, processId);
+      await this.audit.write({
+        type: "worker.started",
+        sessionId: session.id,
+        target: event.target,
+        details: { processId },
+      });
+
+      await backend.send({ text });
+      await this.consumeAgentEvents(session, backend);
+    } catch (error) {
+      this.sessions.updateStatus(session.id, "error");
+      await this.audit.write({
+        type: "worker.error",
+        sessionId: session.id,
+        target: event.target,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+      await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async handleApprovalDecision(
+    event: InboundChatEvent,
+    approvalId: string,
+    decision: "allowed" | "denied",
+  ): Promise<void> {
+    const updated = this.sessions.updateApprovalStatus(approvalId, decision);
+    await this.audit.write({
+      type: "approval.decided",
+      target: event.target,
+      details: { approvalId, decision, updated },
+    });
+
+    await this.sendChunkedText(
       event.target,
-      "Prompt routing is ready at the hub boundary. Pi RPC event decoding is the next implementation step.",
+      updated ? `Approval ${approvalId} ${decision}.` : `No pending approval found for ${approvalId}.`,
     );
   }
 
@@ -148,6 +201,139 @@ export class RemoteAgentHub {
       throw new Error(`Unsupported agent for Iteration 1: ${value}`);
     }
     return value;
+  }
+
+  private getWorker(session: HubSession): AgentBackend {
+    const existing = this.workers.get(session.id);
+    if (existing) {
+      return existing;
+    }
+
+    const backend = new PiRpcBackend(this.config);
+    this.workers.set(session.id, backend);
+    return backend;
+  }
+
+  private async consumeAgentEvents(session: HubSession, backend: AgentBackend): Promise<void> {
+    let streamedText = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      void backend.abort();
+    }, this.config.agent_turn_timeout_ms);
+
+    try {
+      for await (const agentEvent of backend.events()) {
+        const finished = await this.handleAgentEvent(session, agentEvent, streamedText);
+        if (agentEvent.type === "text_delta") {
+          streamedText += agentEvent.text;
+        }
+        if (finished) {
+          this.sessions.updateStatus(session.id, "idle");
+          await this.audit.write({
+            type: "worker.completed",
+            sessionId: session.id,
+            details: { streamedTextLength: streamedText.length },
+          });
+          return;
+        }
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (timedOut) {
+      this.sessions.updateStatus(session.id, "error");
+      await this.audit.write({
+        type: "worker.timeout",
+        sessionId: session.id,
+        details: { timeoutMs: this.config.agent_turn_timeout_ms },
+      });
+      await this.sendChunkedText(
+        {
+          platform: session.platform,
+          chatId: session.chatId,
+          ...(session.threadId ? { threadId: session.threadId } : {}),
+          ...(session.userId ? { userId: session.userId } : {}),
+        },
+        `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`,
+      );
+    }
+  }
+
+  private async handleAgentEvent(session: HubSession, event: AgentEvent, streamedText: string): Promise<boolean> {
+    const target = {
+      platform: session.platform,
+      chatId: session.chatId,
+      ...(session.threadId ? { threadId: session.threadId } : {}),
+      ...(session.userId ? { userId: session.userId } : {}),
+    };
+
+    switch (event.type) {
+      case "text_delta":
+        return false;
+      case "final": {
+        const finalText = streamedText.length > 0 && event.text === "Pi completed." ? streamedText : event.text;
+        await this.sendChunkedText(target, finalText);
+        return true;
+      }
+      case "tool_call":
+        await this.sendChunkedText(target, `Tool started: ${event.name}${event.preview ? `\n${event.preview}` : ""}`);
+        return false;
+      case "tool_result":
+        if (event.text) {
+          await this.sendChunkedText(target, `Tool result: ${event.name}\n${event.text}`);
+        }
+        return false;
+      case "approval_request": {
+        const approvalId = this.sessions.createApproval({
+          sessionId: session.id,
+          agent: session.agent,
+          actionKind: "unknown",
+          cwd: session.cwd,
+          title: "Pi approval request",
+          preview: JSON.stringify(event.raw).slice(0, 1000),
+          risk: "medium",
+          raw: event.raw,
+        });
+        this.sessions.updateStatus(session.id, "waiting_approval");
+        await this.sendChunkedText(target, `Approval requested: ${approvalId}`);
+        return false;
+      }
+      case "status":
+        this.sessions.updateStatus(session.id, event.state === "running" ? "running" : event.state === "error" ? "error" : "idle");
+        return false;
+    }
+  }
+
+  private async sendChunkedText(target: InboundChatEvent["target"], text: string): Promise<void> {
+    const maxLength = 3900;
+    if (text.length <= maxLength) {
+      await this.channel.sendText(target, text);
+      return;
+    }
+
+    for (let start = 0; start < text.length; start += maxLength) {
+      await this.channel.sendText(target, text.slice(start, start + maxLength));
+    }
+  }
+
+  private isAuthorizedTarget(event: InboundChatEvent): boolean {
+    if (event.target.platform === "fake") {
+      return true;
+    }
+
+    if (event.target.platform === "telegram") {
+      const allowedChatIds = this.config.channels.telegram.allowed_chat_ids;
+      if (allowedChatIds.length > 0 && !allowedChatIds.includes(event.target.chatId)) {
+        return false;
+      }
+
+      const telegramUserIds = Object.values(this.config.users).flatMap((user) => user.telegram_ids);
+      return telegramUserIds.length === 0 || (event.target.userId !== undefined && telegramUserIds.includes(event.target.userId));
+    }
+
+    return false;
   }
 }
 

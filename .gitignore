@@ -3,6 +3,7 @@ dist/
 *.tsbuildinfo
 .env
 .remote-agent-hub/
+.remote-agent-hub-smoke/
 .pi/
 npm-debug.log*
 yarn-debug.log*

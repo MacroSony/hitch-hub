@@ -4,21 +4,19 @@ import type { ChannelAdapter, InboundChatEvent, SendOptions } from "./types.js";
 export class FakeChannelAdapter implements ChannelAdapter {
   private readonly events: InboundChatEvent[];
 
-  constructor(message: string) {
+  constructor(messages: string[]) {
     const target: ChatTarget = {
       platform: "fake",
       chatId: "local",
       userId: "local-user",
     };
 
-    this.events = [
-      {
+    this.events = messages.map((message) => ({
         id: crypto.randomUUID(),
         target,
         text: message,
         receivedAt: new Date().toISOString(),
-      },
-    ];
+      }));
   }
 
   async *receive(): AsyncIterable<InboundChatEvent> {

@@ -27,30 +27,30 @@ Checklist:
 - [x] Add config loading with schema validation.
 - [x] Add SQLite session registry with a minimal `HubSession` table.
 - [x] Add a local fake channel adapter for repeatable testing without IM credentials.
-- [~] Add Telegram adapter shell with long polling, inbound text parsing, and outbound text send.
-- [~] Verify the Pi RPC protocol shape by running a controlled local smoke test.
+- [x] Add Telegram adapter shell with long polling, inbound text parsing, and outbound text send.
+- [x] Verify the Pi RPC protocol shape by running a controlled local smoke test.
 - [x] Implement Pi worker spawn with explicit `cwd`.
-- [ ] Map inbound text to a Pi prompt/follow-up.
-- [ ] Map Pi text/final/status events into normalized hub events.
-- [ ] Implement one-active-turn-per-session enforcement.
+- [x] Map inbound text to a Pi prompt/follow-up.
+- [x] Map Pi text/final/status events into normalized hub events.
+- [x] Implement one-active-turn-per-session enforcement.
 - [x] Implement `!new`, `!status`, `!cwd`, and `!abort`.
 - [x] Add cwd allowlist checks before worker start.
-- [ ] Add user/chat allowlist checks before command handling.
-- [ ] Add approval request data model and persistence, even if no backend approval flow is fully wired yet.
-- [~] Add audit log entries for session creation, worker start/stop, inbound prompts, aborts, and approval decisions.
-- [ ] Add basic delivery chunking for long text responses.
+- [x] Add user/chat allowlist checks before command handling.
+- [x] Add approval request data model and persistence, even if no backend approval flow is fully wired yet.
+- [x] Add audit log entries for session creation, worker start/stop, inbound prompts, aborts, and approval decisions.
+- [x] Add basic delivery chunking for long text responses.
 - [x] Document required local environment variables and config in `examples/config.example.yaml`.
 - [x] Run a local fake-adapter smoke test.
-- [ ] Run a Telegram smoke test if credentials are available.
+- [!] Run a Telegram smoke test if credentials are available.
 
 Exit criteria:
 
 - [x] A user can create a Pi-backed session for an allowed cwd.
-- [ ] A text message reaches Pi and a response is delivered back through the channel adapter.
+- [x] A text message reaches Pi and a response is delivered back through the channel adapter.
 - [x] Session state survives process restart.
 - [x] Unsafe cwd/user/chat inputs are rejected before worker start.
-- [ ] Long output does not break delivery.
-- [ ] The implementation leaves a clear path for Iteration 2 media handling and real approvals.
+- [x] Long output does not break delivery.
+- [x] The implementation leaves a clear path for Iteration 2 media handling and real approvals.
 
 Notes:
 
@@ -82,3 +82,29 @@ Test results:
 - `npm.cmd run dev -- --config examples/config.example.yaml --fake-message "!new pi ."`: passed; created a persisted Pi session.
 - `npm.cmd run dev -- --config examples/config.example.yaml --fake-message "!cwd"`: passed after session creation; returned the workspace cwd.
 - `npm.cmd run dev -- --config examples/config.example.yaml --fake-message "!new pi C:\Windows"`: passed; rejected cwd outside allowed roots.
+
+### Checkpoint 2: Pi RPC, Telegram Polling, Approvals, and Timeouts
+
+Committed: this commit
+
+Changes:
+
+- Implemented protocol-compliant JSONL parsing for Pi RPC stdout.
+- Mapped Pi RPC `prompt`, `message_update`, `agent_end`, tool, and extension UI events into hub events.
+- Implemented Telegram `getUpdates` long polling for inbound text messages.
+- Added approval request persistence and `!approve` / `!deny` decision recording.
+- Added worker start/completion/error/timeout audit events.
+- Added basic long-text chunking.
+- Added isolated smoke-test config.
+- Added configurable agent turn timeout to avoid hanging on provider/auth waits.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; returned `No active session.` using isolated smoke state.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!deny missing"`: passed; returned `No pending approval found for missing.`
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi ." --fake-message "Say only OK."`: passed as an environment-limited prompt smoke; Pi emitted an approval request, the hub persisted/rendered it, then the configured 5000ms turn timeout aborted cleanly.
+- Telegram smoke test: skipped because `TELEGRAM_BOT_TOKEN` is absent.
+- Live model-answer smoke test: blocked by absent common provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`); the timeout path was verified instead.

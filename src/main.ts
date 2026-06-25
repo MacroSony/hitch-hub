@@ -6,12 +6,12 @@ import { RemoteAgentHub } from "./core/hub.js";
 
 type CliArgs = {
   configPath: string;
-  fakeMessage?: string;
+  fakeMessages: string[];
 };
 
 function parseArgs(argv: string[]): CliArgs {
   let configPath = "examples/config.example.yaml";
-  let fakeMessage: string | undefined;
+  const fakeMessages: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -31,13 +31,13 @@ function parseArgs(argv: string[]): CliArgs {
       if (!value) {
         throw new Error("--fake-message requires text");
       }
-      fakeMessage = value;
+      fakeMessages.push(value);
       index += 1;
       continue;
     }
   }
 
-  return fakeMessage === undefined ? { configPath } : { configPath, fakeMessage };
+  return { configPath, fakeMessages };
 }
 
 async function main(): Promise<void> {
@@ -46,15 +46,19 @@ async function main(): Promise<void> {
   mkdirSync(config.dataDir, { recursive: true });
 
   const adapter =
-    args.fakeMessage !== undefined
-      ? new FakeChannelAdapter(args.fakeMessage)
+    args.fakeMessages.length > 0
+      ? new FakeChannelAdapter(args.fakeMessages)
       : createConfiguredAdapter(config.channels.telegram);
 
   const hub = new RemoteAgentHub(config, adapter);
   await hub.run();
 }
 
-function createConfiguredAdapter(telegram: { enabled: boolean; bot_token_env: string }): TelegramAdapter {
+function createConfiguredAdapter(telegram: {
+  enabled: boolean;
+  bot_token_env: string;
+  allowed_chat_ids: string[];
+}): TelegramAdapter {
   if (!telegram.enabled) {
     throw new Error("No channel configured. Use --fake-message for local smoke tests or enable Telegram.");
   }
@@ -64,7 +68,7 @@ function createConfiguredAdapter(telegram: { enabled: boolean; bot_token_env: st
     throw new Error(`Telegram bot token env var is not set: ${telegram.bot_token_env}`);
   }
 
-  return new TelegramAdapter(token);
+  return new TelegramAdapter(token, telegram.allowed_chat_ids);
 }
 
 main().catch((error: unknown) => {

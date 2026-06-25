@@ -23,6 +23,7 @@ const piAgentSchema = z.object({
 
 export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
+  agent_turn_timeout_ms: z.number().int().positive().default(300_000),
   users: z.record(z.string(), userSchema).default({}),
   channels: z
     .object({

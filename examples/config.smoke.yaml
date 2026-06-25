@@ -1,8 +1,8 @@
-data_dir: .remote-agent-hub
-agent_turn_timeout_ms: 60000
+data_dir: .remote-agent-hub-smoke
+agent_turn_timeout_ms: 5000
 
 users:
-  james:
+  smoke:
     telegram_ids: []
     allowed_roots:
       - C:\Users\James\programming
