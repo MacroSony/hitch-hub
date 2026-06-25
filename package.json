@@ -1,0 +1,25 @@
+{
+  "name": "remote-agent-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lightweight chat-native control plane for local coding agents.",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "smoke:fake": "tsx src/main.ts --config examples/config.example.yaml --fake-message \"!status\"",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

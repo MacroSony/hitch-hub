@@ -1,0 +1,23 @@
+data_dir: .remote-agent-hub
+
+users:
+  james:
+    telegram_ids: []
+    allowed_roots:
+      - C:\Users\James\programming
+
+channels:
+  fake:
+    enabled: true
+  telegram:
+    enabled: false
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    allowed_chat_ids: []
+
+agents:
+  pi:
+    command: pi
+    default_args:
+      - --mode
+      - rpc
+    default_policy: ask
