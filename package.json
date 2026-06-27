@@ -1,9 +1,9 @@
 {
-  "name": "remote-agent-hub",
+  "name": "hitch-hub",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Lightweight chat-native control plane for local coding agents.",
+  "description": "Hitch: a lightweight chat-native control plane for local coding agents.",
   "scripts": {
     "dev": "tsx src/main.ts",
     "smoke:fake": "tsx src/main.ts --config examples/config.smoke.yaml --fake-message \"!status\"",
