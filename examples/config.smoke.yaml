@@ -19,6 +19,7 @@ channels:
 agents:
   pi:
     command: pi
+    config_scope: hitch
     default_args:
       - --mode
       - rpc

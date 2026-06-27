@@ -91,19 +91,21 @@ export class PiRpcBackend implements AgentBackend {
 
     const piConfig = this.config.agents.pi;
     const spawnSpec = resolveSpawnSpec(piConfig.command, piConfig.default_args);
-    const piAgentDir = path.join(this.config.dataDir, "pi", "agent");
-    const piSessionDir = path.join(this.config.dataDir, "pi", "sessions");
-    mkdirSync(piAgentDir, { recursive: true });
-    mkdirSync(piSessionDir, { recursive: true });
+    const env = { ...process.env };
+
+    if (piConfig.config_scope === "hitch") {
+      const piAgentDir = path.join(this.config.dataDir, "pi", "agent");
+      const piSessionDir = path.join(this.config.dataDir, "pi", "sessions");
+      mkdirSync(piAgentDir, { recursive: true });
+      mkdirSync(piSessionDir, { recursive: true });
+      env.PI_CODING_AGENT_DIR = piAgentDir;
+      env.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
+      env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
+    }
 
     this.proc = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: session.cwd,
-      env: {
-        ...process.env,
-        PI_CODING_AGENT_DIR: piAgentDir,
-        PI_CODING_AGENT_SESSION_DIR: piSessionDir,
-        PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
-      },
+      env,
       windowsHide: true,
     });
 

@@ -52,6 +52,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `default_cwd`: where `!new pi` starts by default
 - `users.*.allowed_roots`: directories Hitch may launch workers in
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
+- `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 
@@ -124,6 +125,11 @@ Run a local fake command sequence:
 
 Hitch intentionally does not expose Pi, Codex, OpenCode, or other agent servers directly. The hub owns chat authorization, cwd binding, session state, and delivery behavior.
 
+Pi config behavior:
+
+- `config_scope: system` starts Pi like your terminal Pi and leaves `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and `PI_OFFLINE` untouched.
+- `config_scope: hitch` stores Pi config/session state under `data_dir/pi/...` and defaults `PI_OFFLINE=1` unless already set.
+- Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
 ## Roadmap
 
 - Robust Telegram usage testing

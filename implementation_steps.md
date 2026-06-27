@@ -210,3 +210,23 @@ Notes:
 
 - The first media path passes cached image/file references to Pi as prompt text. Native Pi image-content wiring should be added after verifying the current Pi RPC image message shape against a live media update.
 - Outbound artifact upload is intentionally left for the next media checkpoint.
+
+### Checkpoint 6: Pi Config Scope Selection
+
+Committed: this commit
+
+Changes:
+
+- Added `agents.pi.config_scope` with `hitch` and `system` modes.
+- Kept `hitch` mode as the isolated behavior that stores Pi state under `data_dir/pi/...`.
+- Added `system` mode so Hitch leaves Pi config/session environment variables untouched and uses the normal system Pi configuration.
+- Updated example configs and README notes for the new Pi config behavior.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; text-only channel behavior still works with the isolated smoke config.
+- `npm.cmd run smoke:pi-rpc`: passed with `examples/config.smoke.yaml`; Pi RPC `get_state` returned `success=true` using `config_scope: hitch`.
+- `npm.cmd run smoke:media-cache`: passed; duplicate content reused the same SHA-256 cache path under `data_dir/media/inbound`.
+- `npm.cmd run smoke:pi-rpc -- --config examples/config.example.yaml`: passed; Pi RPC `get_state` returned `success=true` using `config_scope: system`. Pi emitted expected sandbox warnings when trying to touch global Pi settings outside the workspace.

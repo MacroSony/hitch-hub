@@ -19,6 +19,7 @@ const piAgentSchema = z.object({
   command: z.string().default("pi"),
   default_args: z.array(z.string()).default(["--mode", "rpc"]),
   default_policy: z.enum(["ask", "deny", "allow"]).default("ask"),
+  config_scope: z.enum(["hitch", "system"]).default("hitch"),
 });
 
 export const configSchema = z.object({
@@ -49,6 +50,7 @@ export const configSchema = z.object({
         command: "pi",
         default_args: ["--mode", "rpc"],
         default_policy: "ask",
+        config_scope: "hitch",
       }),
     })
     .default({
@@ -56,6 +58,7 @@ export const configSchema = z.object({
         command: "pi",
         default_args: ["--mode", "rpc"],
         default_policy: "ask",
+        config_scope: "hitch",
       },
     }),
 });

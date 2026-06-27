@@ -1,7 +1,8 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { loadConfig } from "../config/load-config.js";
+import type { HubConfig } from "../config/schema.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
 
 type CliArgs = {
@@ -46,6 +47,22 @@ function resolvePiSpawn(command: string, args: string[]): { command: string; arg
   };
 }
 
+function buildPiEnv(config: HubConfig): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  if (config.agents.pi.config_scope !== "hitch") {
+    return env;
+  }
+
+  const piAgentDir = path.join(config.dataDir, "pi", "agent");
+  const piSessionDir = path.join(config.dataDir, "pi", "sessions");
+  mkdirSync(piAgentDir, { recursive: true });
+  mkdirSync(piSessionDir, { recursive: true });
+  env.PI_CODING_AGENT_DIR = piAgentDir;
+  env.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
+  env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
+  return env;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args.configPath);
@@ -54,12 +71,7 @@ async function main(): Promise<void> {
 
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      PI_CODING_AGENT_DIR: path.join(process.cwd(), ".pi", "agent"),
-      PI_CODING_AGENT_SESSION_DIR: path.join(process.cwd(), ".pi", "sessions"),
-      PI_OFFLINE: "1",
-    },
+    env: buildPiEnv(config),
     windowsHide: true,
   });
 
