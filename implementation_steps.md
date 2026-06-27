@@ -9,6 +9,23 @@ Status legend:
 - `[x]` Done
 - `[!]` Blocked or needs a decision
 
+## Design Decision: Agent Config Ownership
+
+Hitch should default to using system-level agent configuration. The product boundary is that Hitch is a remote control and session hub around local agents, not a replacement config/auth/plugin manager for those agents.
+
+Default ownership:
+
+- Hitch owns Telegram credentials, chat/user authorization, allowed roots, default cwd, session lifecycle, approval routing, media caching, and remote command handling.
+- The agent owns provider auth, default model/provider selection, plugins, extensions, MCP servers, and other native agent preferences.
+- Hitch may pass launch-time overrides such as `--model` or `--provider`, but should not permanently rewrite native agent configuration.
+
+Config scope policy:
+
+- `config_scope: system` is the recommended default for normal use. It starts Pi like a terminal-launched Pi and inherits the user's existing system Pi config, auth, sessions, plugins, and preferences.
+- `config_scope: hitch` remains useful for smoke tests, demos, isolated bot profiles, and future controlled automation environments where Hitch-owned agent state is intentional.
+
+This keeps the mental model simple: Hitch is the transport, authorization, cwd, session, and approval layer; the selected agent remains the source of truth for agent-specific behavior.
+
 ## Iteration 1: Minimal Local Control Path
 
 Goal: prove that the hub can receive a text request, route it to a real agent worker in a chosen workspace, stream the result back through a channel boundary, and record enough state to make the next iteration safe.
@@ -60,7 +77,7 @@ Notes:
 
 ### Checkpoint 1: Project Skeleton and Fake Adapter
 
-Committed: this commit
+Committed: `e5be426`
 
 Changes:
 
@@ -85,7 +102,7 @@ Test results:
 
 ### Checkpoint 2: Pi RPC, Telegram Polling, Approvals, and Timeouts
 
-Committed: this commit
+Committed: `f205b38`
 
 Changes:
 
@@ -185,7 +202,7 @@ Test results:
 
 ### Checkpoint 5: Inbound Media Cache Foundation
 
-Committed: this commit
+Committed: `2c4fcab`
 
 Changes:
 

@@ -8,17 +8,20 @@ It lets you connect chat apps such as Telegram to local coding agents such as Pi
 
 Hitch is early. The current implementation focuses on the first useful control path:
 
-- Telegram long polling adapter
+- Telegram long polling adapter for text, captions, photos, and documents
 - Local fake adapter for repeatable testing
 - Pi RPC backend
-- SQLite session registry
+- SQLite session and approval registry
 - cwd allowlist checks
 - Basic audit logging
-- Approval request persistence
+- Approval request persistence and text command decision recording
 - Configurable default cwd
+- SHA-256 inbound media cache for Telegram photos/documents
+- Cached media references passed to Pi prompts as local file paths
 - Basic text chunking and timeout handling
 
 See `implementation_steps.md` for the current iteration checklist and checkpoint test results.
+See `CURRENT_STATE.md` for the current implemented feature and usage inventory.
 
 ## Requirements
 
@@ -73,6 +76,8 @@ Then send commands to the Telegram bot:
 !status
 !cwd
 !abort
+!approve <approval-id>
+!deny <approval-id>
 ```
 
 Path behavior:
@@ -81,6 +86,13 @@ Path behavior:
 - `!new pi test` resolves to `default_cwd\test`
 - `!new pi C:\path\to\repo` uses the absolute path directly
 - cwd values outside allowed roots are rejected
+
+Media behavior:
+
+- Telegram photos and documents from allowed chats are cached under `data_dir/media/inbound`
+- Cached files are deduplicated by SHA-256
+- Cached media is passed to Pi as local file path references appended to the prompt
+- Native Pi image-content messages and outbound artifact uploads are not implemented yet
 
 ## Local Testing
 
@@ -108,6 +120,12 @@ Run the Pi RPC protocol smoke test:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-rpc
 ```
 
+Run the media-cache smoke test:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:media-cache
+```
+
 Check Telegram credentials without printing the token:
 
 ```powershell
@@ -130,11 +148,12 @@ Pi config behavior:
 - `config_scope: system` starts Pi like your terminal Pi and leaves `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and `PI_OFFLINE` untouched.
 - `config_scope: hitch` stores Pi config/session state under `data_dir/pi/...` and defaults `PI_OFFLINE=1` unless already set.
 - Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
+
 ## Roadmap
 
 - Robust Telegram usage testing
-- Media and file attachment handling
+- Native Pi image-content input
+- Outbound artifact upload and delivery tracking
 - Real approval rendering with Telegram buttons
 - Discord adapter
 - Additional agent backends
-- Artifact upload and delivery tracking
