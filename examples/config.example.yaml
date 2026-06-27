@@ -1,12 +1,12 @@
 data_dir: .remote-agent-hub
-default_cwd: C:\Users\James\programming
+default_cwd: ..
 agent_turn_timeout_ms: 60000
 
 users:
-  james:
+  local:
     telegram_ids: []
     allowed_roots:
-      - C:\Users\James\programming
+      - ..
 
 channels:
   fake:
@@ -14,7 +14,7 @@ channels:
   telegram:
     enabled: true
     bot_token_env: TELEGRAM_BOT_TOKEN
-    allowed_chat_ids: ["7439339656"]
+    allowed_chat_ids: []
 
 agents:
   pi:

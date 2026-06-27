@@ -111,7 +111,7 @@ Test results:
 
 ### Checkpoint 3: Default Cwd and Extension Notification Cleanup
 
-Committed: pending
+Committed: `7c879d7`
 
 Changes:
 
@@ -139,3 +139,46 @@ Test results:
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi"`: passed; cwd resolved to `C:\Users\James\programming`.
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi AgentHub"`: passed; cwd resolved to `C:\Users\James\programming\AgentHub`.
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi AgentHub" --fake-message "Say only OK."`: passed; no false approval was rendered, and the finite fake-adapter process exited cleanly after Pi reported missing provider auth.
+
+## Iteration 2: Public Hygiene and Media MVP
+
+Goal: make the public repository safer to share, add repeatable Telegram health checks, and then begin the media path with cached inbound Telegram attachments.
+
+Scope:
+
+- Keep Telegram + Pi as the only supported runtime pair.
+- Keep outbound artifact upload for a later checkpoint unless it falls out naturally from inbound media work.
+- Do not add Discord, second agent backends, or dashboard UI in this iteration.
+
+Checklist:
+
+- [x] Replace public example config values with portable placeholders.
+- [x] Add Telegram health smoke scripts that do not print bot tokens.
+- [x] Fix package-lock project naming after the Hitch rename.
+- [x] Record checkpoint test results.
+- [ ] Add normalized inbound attachment types.
+- [ ] Add a media cache under `data_dir`.
+- [ ] Parse Telegram photos/documents from allowed chats.
+- [ ] Download Telegram files into the media cache with SHA-256 metadata.
+- [ ] Pass cached image/file references through the hub to Pi prompts.
+- [ ] Verify text-only behavior still works.
+
+### Checkpoint 4: Public Hygiene and Telegram Health Checks
+
+Committed: pending
+
+Changes:
+
+- Replaced personal paths and chat IDs in public example configs with portable relative defaults.
+- Added Telegram `getMe` and `getUpdates` smoke scripts that report only bot metadata and visible update counts.
+- Fixed `package-lock.json` package naming after the Hitch rename.
+- Updated README usage examples to avoid machine-specific paths.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; returned the existing persisted smoke session at the portable repo cwd.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
+- `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.

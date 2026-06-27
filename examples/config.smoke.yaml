@@ -1,12 +1,12 @@
 data_dir: .remote-agent-hub-smoke
-default_cwd: C:\Users\James\programming
+default_cwd: ..
 agent_turn_timeout_ms: 5000
 
 users:
   smoke:
     telegram_ids: []
     allowed_roots:
-      - C:\Users\James\programming
+      - ..
 
 channels:
   fake:

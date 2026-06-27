@@ -53,6 +53,8 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.allowed_roots`: directories Hitch may launch workers in
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
 
+For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
+
 ## Usage
 
 Start the hub:
@@ -66,7 +68,7 @@ Then send commands to the Telegram bot:
 ```text
 !new pi
 !new pi AgentHub
-!new pi C:\Users\James\programming\AgentHub
+!new pi C:\path\to\repo
 !status
 !cwd
 !abort
@@ -105,10 +107,17 @@ Run the Pi RPC protocol smoke test:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-rpc
 ```
 
+Check Telegram credentials without printing the token:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:telegram-getme
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:telegram-updates
+```
+
 Run a local fake command sequence:
 
 ```powershell
-& 'C:\Program Files\nodejs\npm.cmd' run dev -- --config examples/config.smoke.yaml --fake-message "!new pi AgentHub" --fake-message "!cwd"
+& 'C:\Program Files\nodejs\npm.cmd' run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "!cwd"
 ```
 
 ## Notes
