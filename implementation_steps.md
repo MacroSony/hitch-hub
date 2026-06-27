@@ -247,3 +247,28 @@ Test results:
 - `npm.cmd run smoke:pi-rpc`: passed with `examples/config.smoke.yaml`; Pi RPC `get_state` returned `success=true` using `config_scope: hitch`.
 - `npm.cmd run smoke:media-cache`: passed; duplicate content reused the same SHA-256 cache path under `data_dir/media/inbound`.
 - `npm.cmd run smoke:pi-rpc -- --config examples/config.example.yaml`: passed; Pi RPC `get_state` returned `success=true` using `config_scope: system`. Pi emitted expected sandbox warnings when trying to touch global Pi settings outside the workspace.
+
+### Checkpoint 7: Telegram Resilience and Busy Session Cleanup
+
+Committed: this commit
+
+Changes:
+
+- Added retry/backoff around transient Telegram `fetch` failures for polling, sends, `getFile`, and file downloads.
+- Kept fatal Telegram auth/config errors fatal while allowing random network failures to retry without crashing the hub.
+- Changed hub event handling to use tracked background tasks, so Telegram can keep receiving `!status` and `!abort` while a Pi turn is active.
+- Added safe outbound send handling so a failed error reply does not crash the hub process.
+- Added Pi backend liveness checks and removed dead workers after process exit.
+- Marked a session idle when the Pi event stream exits without a clean `agent_end`, preventing stale `running` sessions after tool cancellation paths.
+- Improved the busy-session response to show when the active turn last updated and point users to `!status` or `!abort`.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; returned the persisted smoke session status.
+- `npm.cmd run smoke:media-cache`: passed; duplicate content reused the same SHA-256 cache path under `data_dir/media/inbound`.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
+- `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=1`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "Say only OK." --fake-message "!abort"`: passed; the hub created a session and processed `!abort` without hanging behind the prompt task.

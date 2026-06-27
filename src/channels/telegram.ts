@@ -49,8 +49,24 @@ export class TelegramAdapter implements ChannelAdapter {
   ) {}
 
   async *receive(): AsyncIterable<InboundChatEvent> {
+    let retryDelayMs = 1_000;
+
     while (true) {
-      const updates = await this.getUpdates();
+      let updates: TelegramUpdate[];
+      try {
+        updates = await this.getUpdates();
+        retryDelayMs = 1_000;
+      } catch (error) {
+        if (error instanceof TelegramFatalError) {
+          throw error;
+        }
+        process.stderr.write(
+          `[hitch] Telegram receive failed: ${formatError(error)}. Retrying in ${retryDelayMs}ms.\n`,
+        );
+        await sleep(retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+        continue;
+      }
 
       for (const update of updates) {
         this.updateOffset = Math.max(this.updateOffset, update.update_id + 1);
@@ -71,7 +87,20 @@ export class TelegramAdapter implements ChannelAdapter {
           ...(message.from?.id !== undefined ? { userId: String(message.from.id) } : {}),
         };
 
-        const attachments = await this.downloadAttachments(message);
+        let attachments: HubAttachment[] = [];
+        try {
+          attachments = await this.downloadAttachments(message);
+        } catch (error) {
+          process.stderr.write(
+            `[hitch] Telegram attachment download failed for message ${message.message_id}: ${formatError(error)}\n`,
+          );
+          await this.sendText(
+            target,
+            `Attachment download failed: ${error instanceof Error ? error.message : String(error)}`,
+          ).catch((sendError: unknown) => {
+            process.stderr.write(`[hitch] Telegram send failed after attachment error: ${formatError(sendError)}\n`);
+          });
+        }
         const text = message.text ?? message.caption ?? "";
         if (text.length === 0 && attachments.length === 0) {
           continue;
@@ -90,14 +119,18 @@ export class TelegramAdapter implements ChannelAdapter {
 
   async sendText(target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
     const url = `https://api.telegram.org/bot${this.botToken}/sendMessage`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: target.chatId,
-        text,
-      }),
-    });
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: target.chatId,
+          text,
+        }),
+      },
+      { attempts: 3, baseDelayMs: 750 },
+    );
 
     if (!response.ok) {
       throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
@@ -110,9 +143,13 @@ export class TelegramAdapter implements ChannelAdapter {
     url.searchParams.set("offset", String(this.updateOffset));
     url.searchParams.set("allowed_updates", JSON.stringify(["message"]));
 
-    const response = await fetch(url);
+    const response = await fetchWithRetry(url, undefined, { attempts: 2, baseDelayMs: 1_000 });
     if (!response.ok) {
-      throw new Error(`Telegram getUpdates failed: ${response.status} ${await response.text()}`);
+      const text = await response.text();
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        throw new TelegramFatalError(`Telegram getUpdates failed: ${response.status} ${text}`);
+      }
+      throw new Error(`Telegram getUpdates failed: ${response.status} ${text}`);
     }
 
     const body = (await response.json()) as { ok: boolean; result?: TelegramUpdate[]; description?: string };
@@ -183,7 +220,7 @@ export class TelegramAdapter implements ChannelAdapter {
     const getFileUrl = new URL(`https://api.telegram.org/bot${this.botToken}/getFile`);
     getFileUrl.searchParams.set("file_id", fileId);
 
-    const fileResponse = await fetch(getFileUrl);
+    const fileResponse = await fetchWithRetry(getFileUrl, undefined, { attempts: 3, baseDelayMs: 750 });
     if (!fileResponse.ok) {
       throw new Error(`Telegram getFile failed: ${fileResponse.status} ${await fileResponse.text()}`);
     }
@@ -193,7 +230,10 @@ export class TelegramAdapter implements ChannelAdapter {
       throw new Error(`Telegram getFile failed: ${body.description ?? "missing file_path"}`);
     }
 
-    const downloadResponse = await fetch(`https://api.telegram.org/file/bot${this.botToken}/${body.result.file_path}`);
+    const downloadResponse = await fetchWithRetry(`https://api.telegram.org/file/bot${this.botToken}/${body.result.file_path}`, undefined, {
+      attempts: 3,
+      baseDelayMs: 750,
+    });
     if (!downloadResponse.ok) {
       throw new Error(`Telegram file download failed: ${downloadResponse.status} ${await downloadResponse.text()}`);
     }
@@ -203,6 +243,56 @@ export class TelegramAdapter implements ChannelAdapter {
       data: Buffer.from(await downloadResponse.arrayBuffer()),
     };
   }
+}
+
+class TelegramFatalError extends Error {}
+
+async function fetchWithRetry(
+  input: string | URL,
+  init: RequestInit | undefined,
+  options: { attempts: number; baseDelayMs: number },
+): Promise<Response> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+    try {
+      const response = await fetch(input, init);
+      if (!isRetryableStatus(response.status) || attempt === options.attempts) {
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt === options.attempts) {
+        throw error;
+      }
+    }
+
+    await sleep(options.baseDelayMs * attempt);
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    return `${error.message}: ${cause.message}`;
+  }
+  return error.message;
 }
 
 function filenameFromTelegramPath(filePath: string): string | undefined {

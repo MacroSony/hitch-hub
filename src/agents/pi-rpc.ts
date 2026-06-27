@@ -154,6 +154,10 @@ export class PiRpcBackend implements AgentBackend {
     yield* this.eventsQueue.iterate();
   }
 
+  isAlive(): boolean {
+    return this.proc !== undefined && this.proc.exitCode === null && !this.proc.killed;
+  }
+
   async abort(): Promise<void> {
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.write(`${JSON.stringify({ type: "abort" })}\n`);

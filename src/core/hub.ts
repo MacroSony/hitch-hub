@@ -14,6 +14,7 @@ export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
   private readonly workers = new Map<string, AgentBackend>();
+  private readonly inFlight = new Set<Promise<void>>();
 
   constructor(
     private readonly config: HubConfig,
@@ -26,9 +27,16 @@ export class RemoteAgentHub {
   async run(): Promise<void> {
     try {
       for await (const event of this.channel.receive()) {
-        await this.handleEvent(event);
+        const task = this.handleEvent(event).catch((error: unknown) => {
+          process.stderr.write(`[hitch] Event handling failed: ${formatError(error)}\n`);
+        });
+        this.inFlight.add(task);
+        task.finally(() => {
+          this.inFlight.delete(task);
+        });
       }
     } finally {
+      await Promise.allSettled(this.inFlight);
       await this.stopWorkers();
     }
   }
@@ -66,7 +74,7 @@ export class RemoteAgentHub {
           return;
       }
     } catch (error) {
-      await this.channel.sendText(event.target, error instanceof Error ? error.message : String(error), {
+      await this.safeSendText(event.target, error instanceof Error ? error.message : String(error), {
         replyToEventId: event.id,
       });
     }
@@ -155,10 +163,14 @@ export class RemoteAgentHub {
     }
 
     if (session.status === "running") {
-      await this.sendChunkedText(event.target, "Session is already running. Use `!abort` before sending another turn.");
+      await this.sendChunkedText(
+        event.target,
+        `Session is still running since ${session.updatedAt}. Wait for Pi to finish, use \`!status\`, or use \`!abort\` before sending another turn.`,
+      );
       return;
     }
 
+    this.sessions.updateStatus(session.id, "running");
     await this.audit.write({
       type: "prompt.received",
       sessionId: session.id,
@@ -167,7 +179,6 @@ export class RemoteAgentHub {
     });
 
     const backend = this.getWorker(session);
-    this.sessions.updateStatus(session.id, "running");
 
     try {
       const processId = await backend.start(session);
@@ -182,7 +193,7 @@ export class RemoteAgentHub {
       await backend.send(event.attachments ? { text, attachments: event.attachments } : { text });
       await this.consumeAgentEvents(session, backend);
     } catch (error) {
-      this.sessions.updateStatus(session.id, "error");
+      this.updateStatusUnlessStopped(session.id, "error");
       await this.audit.write({
         type: "worker.error",
         sessionId: session.id,
@@ -190,6 +201,10 @@ export class RemoteAgentHub {
         details: { error: error instanceof Error ? error.message : String(error) },
       });
       await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
+    } finally {
+      if (!backend.isAlive()) {
+        this.workers.delete(session.id);
+      }
     }
   }
 
@@ -259,12 +274,15 @@ export class RemoteAgentHub {
 
     try {
       for await (const agentEvent of backend.events()) {
+        if (this.sessions.getById(session.id)?.status === "stopped") {
+          return;
+        }
         const finished = await this.handleAgentEvent(session, agentEvent, streamedText);
         if (agentEvent.type === "text_delta") {
           streamedText += agentEvent.text;
         }
         if (finished) {
-          this.sessions.updateStatus(session.id, "idle");
+          this.updateStatusUnlessStopped(session.id, "idle");
           await this.audit.write({
             type: "worker.completed",
             sessionId: session.id,
@@ -278,7 +296,7 @@ export class RemoteAgentHub {
     }
 
     if (timedOut) {
-      this.sessions.updateStatus(session.id, "error");
+      this.updateStatusUnlessStopped(session.id, "error");
       await this.audit.write({
         type: "worker.timeout",
         sessionId: session.id,
@@ -293,10 +311,35 @@ export class RemoteAgentHub {
         },
         `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`,
       );
+      return;
     }
+
+    if (this.sessions.getById(session.id)?.status === "stopped") {
+      return;
+    }
+
+    this.sessions.updateStatus(session.id, "idle");
+    await this.audit.write({
+      type: "worker.exited",
+      sessionId: session.id,
+      details: { streamedTextLength: streamedText.length },
+    });
+    await this.sendChunkedText(
+      {
+        platform: session.platform,
+        chatId: session.chatId,
+        ...(session.threadId ? { threadId: session.threadId } : {}),
+        ...(session.userId ? { userId: session.userId } : {}),
+      },
+      streamedText.length > 0 ? streamedText : "Pi worker exited before reporting a final response; session is idle.",
+    );
   }
 
   private async handleAgentEvent(session: HubSession, event: AgentEvent, streamedText: string): Promise<boolean> {
+    if (this.sessions.getById(session.id)?.status === "stopped") {
+      return true;
+    }
+
     const target = {
       platform: session.platform,
       chatId: session.chatId,
@@ -336,7 +379,10 @@ export class RemoteAgentHub {
         return false;
       }
       case "status":
-        this.sessions.updateStatus(session.id, event.state === "running" ? "running" : event.state === "error" ? "error" : "idle");
+        this.updateStatusUnlessStopped(
+          session.id,
+          event.state === "running" ? "running" : event.state === "error" ? "error" : "idle",
+        );
         return false;
     }
   }
@@ -344,12 +390,31 @@ export class RemoteAgentHub {
   private async sendChunkedText(target: InboundChatEvent["target"], text: string): Promise<void> {
     const maxLength = 3900;
     if (text.length <= maxLength) {
-      await this.channel.sendText(target, text);
+      await this.safeSendText(target, text);
       return;
     }
 
     for (let start = 0; start < text.length; start += maxLength) {
-      await this.channel.sendText(target, text.slice(start, start + maxLength));
+      await this.safeSendText(target, text.slice(start, start + maxLength));
+    }
+  }
+
+  private updateStatusUnlessStopped(id: string, status: HubSession["status"]): void {
+    if (this.sessions.getById(id)?.status === "stopped") {
+      return;
+    }
+    this.sessions.updateStatus(id, status);
+  }
+
+  private async safeSendText(
+    target: InboundChatEvent["target"],
+    text: string,
+    opts?: Parameters<ChannelAdapter["sendText"]>[2],
+  ): Promise<void> {
+    try {
+      await this.channel.sendText(target, text, opts);
+    } catch (error) {
+      process.stderr.write(`[hitch] Send failed: ${formatError(error)}\n`);
     }
   }
 
@@ -374,4 +439,16 @@ export class RemoteAgentHub {
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    return `${error.message}: ${cause.message}`;
+  }
+  return error.message;
 }

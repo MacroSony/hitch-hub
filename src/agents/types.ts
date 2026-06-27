@@ -17,6 +17,7 @@ export interface AgentBackend {
   start(session: HubSession): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
   events(): AsyncIterable<AgentEvent>;
+  isAlive(): boolean;
   abort(): Promise<void>;
   stop(): Promise<void>;
 }
