@@ -4,7 +4,7 @@ import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
-import type { AgentBackend, AgentEvent } from "../agents/types.js";
+import type { AgentBackend, AgentEvent, AgentModelInfo } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry } from "./session-registry.js";
@@ -62,6 +62,12 @@ export class RemoteAgentHub {
           return;
         case "abort":
           await this.handleAbort(event);
+          return;
+        case "model":
+          await this.handleModel(event, command.model);
+          return;
+        case "models":
+          await this.handleModels(event, command.filter);
           return;
         case "approve":
           await this.handleApprovalDecision(event, command.id, "allowed");
@@ -153,6 +159,84 @@ export class RemoteAgentHub {
       target: event.target,
     });
     await this.sendChunkedText(event.target, `Stopped session ${shortId(session)}.`);
+  }
+
+  private async handleModel(event: InboundChatEvent, model?: string): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target);
+    if (!session) {
+      await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
+      return;
+    }
+
+    if (session.status === "running") {
+      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before changing model.");
+      return;
+    }
+
+    const backend = this.getWorker(session);
+    const processId = await backend.start(session);
+    this.sessions.setBackendProcess(session.id, processId);
+
+    if (!model) {
+      if (!backend.getState) {
+        await this.sendChunkedText(event.target, "This agent does not expose model state.");
+        return;
+      }
+      const state = await backend.getState();
+      await this.sendChunkedText(event.target, `Current model: ${formatModel(state.model)}`);
+      return;
+    }
+
+    if (!backend.setModel) {
+      await this.sendChunkedText(event.target, "This agent does not support model switching through Hitch.");
+      return;
+    }
+
+    const selected = await backend.setModel(model);
+    await this.audit.write({
+      type: "model.changed",
+      sessionId: session.id,
+      target: event.target,
+      details: { model },
+    });
+    await this.sendChunkedText(event.target, `Model switched to ${formatModel(selected)}.`);
+  }
+
+  private async handleModels(event: InboundChatEvent, filter?: string): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target);
+    if (!session) {
+      await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
+      return;
+    }
+
+    if (session.status === "running") {
+      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before listing models.");
+      return;
+    }
+
+    const backend = this.getWorker(session);
+    const processId = await backend.start(session);
+    this.sessions.setBackendProcess(session.id, processId);
+
+    if (!backend.getAvailableModels) {
+      await this.sendChunkedText(event.target, "This agent does not expose available models.");
+      return;
+    }
+
+    const normalizedFilter = filter?.toLowerCase();
+    const models = (await backend.getAvailableModels())
+      .filter((model) => {
+        if (!normalizedFilter) {
+          return true;
+        }
+        return formatModel(model).toLowerCase().includes(normalizedFilter);
+      })
+      .slice(0, 40);
+
+    await this.sendChunkedText(
+      event.target,
+      models.length > 0 ? `Available models:\n${models.map((model) => `- ${formatModel(model)}`).join("\n")}` : "No models matched.",
+    );
   }
 
   private async handlePrompt(event: InboundChatEvent, text: string): Promise<void> {
@@ -353,6 +437,7 @@ export class RemoteAgentHub {
       case "final": {
         const finalText = streamedText.length > 0 && event.text === "Pi completed." ? streamedText : event.text;
         await this.sendChunkedText(target, finalText);
+        await this.sendArtifactsMentionedInText(target, finalText);
         return true;
       }
       case "tool_call":
@@ -361,6 +446,7 @@ export class RemoteAgentHub {
       case "tool_result":
         if (event.text) {
           await this.sendChunkedText(target, `Tool result: ${event.name}\n${event.text}`);
+          await this.sendArtifactsMentionedInText(target, event.text);
         }
         return false;
       case "approval_request": {
@@ -418,6 +504,21 @@ export class RemoteAgentHub {
     }
   }
 
+  private async sendArtifactsMentionedInText(target: InboundChatEvent["target"], text: string): Promise<void> {
+    if (!this.channel.sendArtifact) {
+      return;
+    }
+
+    const artifacts = extractLocalArtifacts(text).slice(0, 5);
+    for (const artifact of artifacts) {
+      try {
+        await this.channel.sendArtifact(target, artifact);
+      } catch (error) {
+        process.stderr.write(`[hitch] Artifact send failed for ${artifact.path}: ${formatError(error)}\n`);
+      }
+    }
+  }
+
   private isAuthorizedTarget(event: InboundChatEvent): boolean {
     if (event.target.platform === "fake") {
       return true;
@@ -439,6 +540,55 @@ export class RemoteAgentHub {
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function formatModel(model: AgentModelInfo | undefined): string {
+  if (!model) {
+    return "none";
+  }
+  if (model.provider && model.id) {
+    return `${model.provider}/${model.id}`;
+  }
+  return model.name ?? model.id ?? model.provider ?? "unknown";
+}
+
+function extractLocalArtifacts(text: string): Array<{ path: string; kind: "image" | "file" }> {
+  const paths = new Set<string>();
+  const quoted = /["'`]([A-Za-z]:[\\/][^"'`\r\n]+|\/[^"'`\r\n]+)["'`]/g;
+  const windowsUnquoted = /\b[A-Za-z]:[\\/][^\s<>"'`|]+/g;
+  const posixUnquoted = /(^|\s)(\/[^\s<>"'`|]+)/g;
+
+  for (const match of text.matchAll(quoted)) {
+    paths.add(cleanCandidatePath(match[1]));
+  }
+  for (const match of text.matchAll(windowsUnquoted)) {
+    paths.add(cleanCandidatePath(match[0]));
+  }
+  for (const match of text.matchAll(posixUnquoted)) {
+    paths.add(cleanCandidatePath(match[2]));
+  }
+
+  return [...paths]
+    .filter((candidate) => {
+      try {
+        return path.isAbsolute(candidate) && existsSync(candidate) && statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .map((candidate) => ({
+      path: candidate,
+      kind: isImagePath(candidate) ? "image" as const : "file" as const,
+    }));
+}
+
+function cleanCandidatePath(value: string | undefined): string {
+  return (value ?? "").replace(/[),.;\]]+$/g, "");
+}
+
+function isImagePath(value: string): boolean {
+  const ext = path.extname(value).toLowerCase();
+  return ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".webp" || ext === ".gif";
 }
 
 function formatError(error: unknown): string {

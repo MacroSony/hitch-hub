@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
-import type { AgentBackend, AgentEvent, AgentInput } from "./types.js";
+import type { AgentBackend, AgentEvent, AgentInput, AgentModelInfo } from "./types.js";
 
 type SpawnSpec = {
   command: string;
@@ -80,6 +81,7 @@ class AsyncEventQueue<T> {
 export class PiRpcBackend implements AgentBackend {
   private proc: ChildProcessWithoutNullStreams | undefined;
   private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  private readonly responseWaiters = new Map<string, (response: RpcResponse) => void>();
   private stderrTail = "";
 
   constructor(private readonly config: HubConfig) {}
@@ -112,6 +114,9 @@ export class PiRpcBackend implements AgentBackend {
     attachJsonlReader(
       this.proc.stdout,
       (value) => {
+        if (this.resolvePendingResponse(value)) {
+          return;
+        }
         for (const event of mapPiEvent(value)) {
           this.eventsQueue.push(event);
         }
@@ -143,11 +148,38 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async send(input: AgentInput): Promise<void> {
-    if (!this.proc) {
-      throw new Error("Pi RPC process has not been started.");
+    this.writeCommand({ type: "prompt", message: promptTextWithAttachments(input) });
+  }
+
+  async getState(): Promise<{ model?: AgentModelInfo }> {
+    const response = await this.request({ type: "get_state" });
+    const data = response.data;
+    if (!isRecord(data)) {
+      return {};
+    }
+    const model = modelInfoFromValue(data.model);
+    return model ? { model } : {};
+  }
+
+  async setModel(model: string): Promise<AgentModelInfo> {
+    const separator = model.indexOf("/");
+    if (separator <= 0 || separator === model.length - 1) {
+      throw new Error("Usage: !model <provider>/<model-id>");
     }
 
-    this.proc.stdin.write(`${JSON.stringify({ type: "prompt", message: promptTextWithAttachments(input) })}\n`);
+    const provider = model.slice(0, separator).trim();
+    const modelId = model.slice(separator + 1).trim();
+    const response = await this.request({ type: "set_model", provider, modelId });
+    return modelInfoFromValue(response.data) ?? { provider, id: modelId };
+  }
+
+  async getAvailableModels(): Promise<AgentModelInfo[]> {
+    const response = await this.request({ type: "get_available_models" });
+    const data = response.data;
+    if (!isRecord(data) || !Array.isArray(data.models)) {
+      return [];
+    }
+    return data.models.map(modelInfoFromValue).filter((model): model is AgentModelInfo => model !== undefined);
   }
 
   async *events(): AsyncIterable<AgentEvent> {
@@ -160,7 +192,7 @@ export class PiRpcBackend implements AgentBackend {
 
   async abort(): Promise<void> {
     if (this.proc && !this.proc.killed) {
-      this.proc.stdin.write(`${JSON.stringify({ type: "abort" })}\n`);
+      this.writeCommand({ type: "abort" });
     }
     this.proc?.kill("SIGTERM");
   }
@@ -169,7 +201,64 @@ export class PiRpcBackend implements AgentBackend {
     this.proc?.kill("SIGTERM");
     this.proc = undefined;
   }
+
+  private writeCommand(command: Record<string, unknown>): void {
+    if (!this.proc) {
+      throw new Error("Pi RPC process has not been started.");
+    }
+    this.proc.stdin.write(`${JSON.stringify(command)}\n`);
+  }
+
+  private async request(command: Record<string, unknown>, timeoutMs = 10_000): Promise<RpcResponse> {
+    if (!this.proc) {
+      throw new Error("Pi RPC process has not been started.");
+    }
+
+    const id = randomUUID();
+    const responsePromise = new Promise<RpcResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.responseWaiters.delete(id);
+        reject(new Error(`Pi RPC command timed out: ${String(command.type)}`));
+      }, timeoutMs);
+
+      this.responseWaiters.set(id, (response) => {
+        clearTimeout(timeout);
+        if (response.success === false) {
+          reject(new Error(response.error ?? `Pi RPC command failed: ${String(command.type)}`));
+          return;
+        }
+        resolve(response);
+      });
+    });
+
+    this.writeCommand({ id, ...command });
+    return responsePromise;
+  }
+
+  private resolvePendingResponse(value: unknown): boolean {
+    if (!isRecord(value) || value.type !== "response" || typeof value.id !== "string") {
+      return false;
+    }
+
+    const waiter = this.responseWaiters.get(value.id);
+    if (!waiter) {
+      return false;
+    }
+
+    this.responseWaiters.delete(value.id);
+    waiter(value as RpcResponse);
+    return true;
+  }
 }
+
+type RpcResponse = {
+  id?: string;
+  type: "response";
+  command?: string;
+  success: boolean;
+  data?: unknown;
+  error?: string;
+};
 
 function promptTextWithAttachments(input: AgentInput): string {
   if (!input.attachments || input.attachments.length === 0) {
@@ -257,6 +346,27 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   return [];
+}
+
+function modelInfoFromValue(value: unknown): AgentModelInfo | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const provider = typeof value.provider === "string" ? value.provider : undefined;
+  const id = typeof value.id === "string" ? value.id : undefined;
+  const name = typeof value.name === "string" ? value.name : undefined;
+  if (!provider && !id && !name) {
+    return undefined;
+  }
+  return {
+    ...(provider ? { provider } : {}),
+    ...(id ? { id } : {}),
+    ...(name ? { name } : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 function isFireAndForgetExtensionUi(record: Record<string, unknown>): boolean {

@@ -272,3 +272,45 @@ Test results:
 - `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
 - `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=1`.
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "Say only OK." --fake-message "!abort"`: passed; the hub created a session and processed `!abort` without hanging behind the prompt task.
+
+### Checkpoint 8: Command Routing, Pi Model RPC, and Outbound Artifacts
+
+Committed: this commit
+
+Changes:
+
+- Changed unknown `!` commands to stop at Hitch with an explicit unknown-command error instead of leaking to the active Pi prompt.
+- Added real Pi RPC model commands:
+  - `!model` shows the current Pi RPC model through `get_state`.
+  - `!model <provider>/<model-id>` switches through Pi RPC `set_model`.
+  - `/model <provider>/<model-id>` is accepted as a natural alias for `!model`.
+  - `!models [filter]` lists available Pi RPC models through `get_available_models`.
+- Added a bounded outbound artifact path scanner for Pi final text and tool results.
+- Added Telegram outbound artifact upload using `sendPhoto` for common image paths and `sendDocument` for other local files.
+- Kept raw shell passthrough unimplemented even though Pi RPC exposes `bash`; this needs an explicit remote safety design before exposing it over Telegram.
+
+Resume and multi-session planning:
+
+- The original plan already includes `!sessions`, `!switch`, per-chat/per-thread sessions, thread/session mapping, and multiple sessions.
+- Do not implement resume/multiple sessions in this checkpoint.
+- Next design pass should decide whether the default session key is chat, chat thread/topic, explicit session name, or a combination.
+- Resume should be implemented as explicit session listing and switching first, not as hidden automatic reuse across unrelated chats.
+- Multiple simultaneous sessions should initially use separate Telegram chats/topics or explicit `!switch`, with one active turn per session preserved.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; returned the persisted smoke session status.
+- `npm.cmd run smoke:media-cache`: passed; duplicate content reused the SHA-256 cache path under `data_dir/media/inbound`.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!wagawaga"`: passed; returned `Unknown Hitch command: !wagawaga`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "!model"`: passed; routed through Pi RPC `get_state` and returned the isolated smoke model as `unknown/unknown`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "!models unknown"`: passed; routed through Pi RPC `get_available_models` and returned `No models matched.` in the isolated smoke config.
+- `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
+- `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.
+
+Manual follow-up needed:
+
+- Live Telegram artifact upload should be tested with a Pi/ComfyUI result that mentions an existing local image path.
+- Live `/model <provider>/<model-id>` should be tested against the user's system Pi config because the isolated smoke config intentionally has an `unknown/unknown` model.

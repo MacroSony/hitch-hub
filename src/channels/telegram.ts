@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
 import type { MediaCache, StoreAttachmentInput } from "../core/media-cache.js";
-import type { ChannelAdapter, InboundChatEvent, SendOptions } from "./types.js";
+import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
 
 type TelegramUpdate = {
   update_id: number;
@@ -127,6 +128,8 @@ export class TelegramAdapter implements ChannelAdapter {
         body: JSON.stringify({
           chat_id: target.chatId,
           text,
+          ...(target.threadId ? { message_thread_id: target.threadId } : {}),
+          ...(_opts?.replyToEventId ? { reply_to_message_id: _opts.replyToEventId } : {}),
         }),
       },
       { attempts: 3, baseDelayMs: 750 },
@@ -134,6 +137,39 @@ export class TelegramAdapter implements ChannelAdapter {
 
     if (!response.ok) {
       throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
+    }
+  }
+
+  async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void> {
+    const method = artifact.kind === "image" ? "sendPhoto" : "sendDocument";
+    const field = artifact.kind === "image" ? "photo" : "document";
+    const url = `https://api.telegram.org/bot${this.botToken}/${method}`;
+    const data = await readFile(artifact.path);
+    const form = new FormData();
+
+    form.set("chat_id", target.chatId);
+    if (target.threadId) {
+      form.set("message_thread_id", target.threadId);
+    }
+    if (opts?.replyToEventId) {
+      form.set("reply_to_message_id", opts.replyToEventId);
+    }
+    if (artifact.caption) {
+      form.set("caption", artifact.caption.slice(0, 1024));
+    }
+    form.set(field, new Blob([data], { type: mimeTypeForLocalPath(artifact.path) }), pathBasename(artifact.path));
+
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        body: form,
+      },
+      { attempts: 3, baseDelayMs: 750 },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Telegram ${method} failed: ${response.status} ${await response.text()}`);
     }
   }
 
@@ -330,4 +366,8 @@ function guessMimeType(filePath: string): string | undefined {
     return "text/plain";
   }
   return undefined;
+}
+
+function mimeTypeForLocalPath(filePath: string): string {
+  return guessMimeType(filePath) ?? "application/octet-stream";
 }

@@ -13,9 +13,18 @@ export type AgentEvent =
   | { type: "approval_request"; raw: unknown }
   | { type: "status"; state: "running" | "idle" | "waiting" | "error" };
 
+export type AgentModelInfo = {
+  provider?: string;
+  id?: string;
+  name?: string;
+};
+
 export interface AgentBackend {
   start(session: HubSession): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
+  getState?(): Promise<{ model?: AgentModelInfo }>;
+  setModel?(model: string): Promise<AgentModelInfo>;
+  getAvailableModels?(): Promise<AgentModelInfo[]>;
   events(): AsyncIterable<AgentEvent>;
   isAlive(): boolean;
   abort(): Promise<void>;

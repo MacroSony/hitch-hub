@@ -2,7 +2,7 @@
 
 Last verified: 2026-06-27.
 
-Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, receive Pi text/tool/final events back through chat, persist sessions and approval records, and cache inbound Telegram media as local file references.
+Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, receive Pi text/tool/final events back through chat, persist sessions and approval records, cache inbound Telegram media as local file references, switch/query Pi models through RPC, and upload local artifact paths mentioned by Pi back to Telegram.
 
 ## Implemented Features
 
@@ -44,6 +44,7 @@ Hitch is currently a local TypeScript daemon that connects Telegram or a local f
   - Filters configured `allowed_chat_ids` before command handling and attachment downloads.
   - Downloads photos and documents from allowed chats when media caching is enabled.
   - Sends outbound text with `sendMessage`.
+  - Sends outbound local artifacts with `sendPhoto` or `sendDocument`.
 
 ### Authorization and Path Safety
 
@@ -71,6 +72,14 @@ Implemented hub commands:
   - Shows the active session cwd.
 - `!abort`
   - Aborts the active worker if one exists and marks the session stopped.
+- `!model`
+  - Shows the current Pi RPC model for the active session.
+- `!model <provider>/<model-id>`
+  - Switches the active Pi RPC session through the typed `set_model` RPC command.
+- `/model <provider>/<model-id>`
+  - Alias for `!model <provider>/<model-id>`.
+- `!models [filter]`
+  - Lists available Pi RPC models, optionally filtered by text.
 - `!approve <approval-id>`
   - Marks a pending persisted approval request as allowed.
 - `!deny <approval-id>`
@@ -79,7 +88,8 @@ Implemented hub commands:
 Prompt behavior:
 
 - Any text that does not start with `!` is sent to the active agent session as a prompt.
-- Unknown `!` commands are also treated as prompt text.
+- Unknown `!` commands are rejected by Hitch instead of being forwarded to Pi.
+- Unknown slash commands are still sent to the active agent session as prompts.
 - If there is no active session, prompts are rejected with a message telling the user to start one.
 - A session with status `running` rejects another prompt until the running turn finishes or is aborted.
 
@@ -95,11 +105,13 @@ Prompt behavior:
 - Starts Pi as a child process with configured command and args, normally `pi --mode rpc`.
 - On Windows, resolves an npm `.cmd` shim when the configured command has no extension.
 - Starts Pi with the session cwd as the process cwd.
-- Sets Pi runtime directories under the hub data directory:
+- With `agents.pi.config_scope: hitch`, sets Pi runtime directories under the hub data directory:
   - `PI_CODING_AGENT_DIR=<data_dir>/pi/agent`
   - `PI_CODING_AGENT_SESSION_DIR=<data_dir>/pi/sessions`
-- Sets `PI_OFFLINE=1` by default unless the environment already defines `PI_OFFLINE`.
+- With `agents.pi.config_scope: hitch`, sets `PI_OFFLINE=1` by default unless the environment already defines `PI_OFFLINE`.
+- With `agents.pi.config_scope: system`, leaves Pi config/session/auth environment untouched so Pi uses the normal system-level configuration.
 - Writes JSONL prompt and abort messages to Pi stdin.
+- Writes typed JSONL model requests to Pi stdin for `get_state`, `set_model`, and `get_available_models`.
 - Reads JSONL events from Pi stdout.
 - Captures stderr as a tail and only includes it when the process exits abnormally.
 - Maps Pi events into hub events:
@@ -123,6 +135,14 @@ Prompt behavior:
 - Duplicate content reuses the same cached path.
 - Attachment metadata includes source, kind, filename, MIME type, size, local path, SHA-256, and original Telegram file ID when available.
 - Cached attachments are passed to Pi as text references appended to the prompt, including local path, filename, MIME type, and SHA-256.
+
+### Outbound Artifacts
+
+- Pi final text and tool-result text are scanned for existing local Windows absolute file paths.
+- Up to five detected artifacts are sent after the text response.
+- Common image extensions are sent as Telegram photos.
+- Other detected files are sent as Telegram documents.
+- Artifact upload is best-effort: upload failures are logged and do not fail the Pi turn.
 
 ### Delivery, Timeouts, and Audit
 
@@ -183,6 +203,7 @@ channels:
 agents:
   pi:
     command: pi
+    config_scope: system
     default_args:
       - --mode
       - rpc
@@ -209,6 +230,10 @@ Typical chat commands:
 !new pi C:\path\to\repo
 !status
 !cwd
+!model
+!model deepseek/deepseek-v4-flash
+/model deepseek/deepseek-v4-flash
+!models deepseek
 !abort
 !approve <approval-id>
 !deny <approval-id>
@@ -227,6 +252,7 @@ Media usage:
 - Caption text becomes the prompt text.
 - If no caption is provided, Hitch asks Pi to inspect the cached local file references.
 - Current media delivery to Pi is by local-path text reference, not native Pi image-content blocks.
+- If Pi returns an existing local image/file path in final text or a tool result, Hitch attempts to upload that artifact to Telegram.
 
 Run local checks:
 
@@ -253,8 +279,8 @@ Check Telegram credentials without printing the token:
 - `!sessions`, `!switch`, `!cd`, `!compact`, and `!files` are planned but not implemented.
 - Approval decisions are persisted and audited, but they are not sent back into Pi as real approval responses.
 - Telegram inline approval buttons are not implemented.
-- Telegram outbound messages do not currently include thread/topic routing.
-- Outbound image/file artifact upload is not implemented.
+- Telegram outbound text and artifact sends include topic/thread routing when Telegram provides a thread ID.
+- Outbound artifact upload is basic path scanning only; richer artifact events, delivery queues, and upload tracking are not implemented.
 - Native Pi image-content input is not implemented; cached media is passed as prompt text containing local paths.
 - Delivery coalescing, message editing, retry, idempotency, and long-output file fallback are not implemented.
 - Media size validation, MIME sniffing, conversion, OCR, and transcription are not implemented.
@@ -264,8 +290,8 @@ Check Telegram credentials without printing the token:
 
 ## Documentation Freshness
 
-- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache and approval decision commands.
-- `implementation_steps.md` is the historical implementation checklist. It matches the current feature level through Checkpoint 5, with Telegram smoke results representing the environment at the time they were run.
+- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache, model commands, artifact upload bridge, and approval decision commands.
+- `implementation_steps.md` is the historical implementation checklist. It matches the current feature level through Checkpoint 8, with Telegram smoke results representing the environment at the time they were run.
 - `plan.md` is an aspirational architecture and roadmap document. It intentionally lists planned commands, channels, backends, media behavior, and delivery semantics that are not implemented yet. Use this file as a roadmap, not as a current-state reference.
 
 ## Verification on 2026-06-27
