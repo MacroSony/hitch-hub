@@ -41,6 +41,12 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 async function main(): Promise<void> {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // .env is optional; fake-adapter and smoke tests don't need it.
+  }
+
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args.configPath);
   mkdirSync(config.dataDir, { recursive: true });

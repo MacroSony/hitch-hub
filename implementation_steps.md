@@ -108,3 +108,34 @@ Test results:
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi ." --fake-message "Say only OK."`: passed as an environment-limited prompt smoke; Pi emitted an approval request, the hub persisted/rendered it, then the configured 5000ms turn timeout aborted cleanly.
 - Telegram smoke test: skipped because `TELEGRAM_BOT_TOKEN` is absent.
 - Live model-answer smoke test: blocked by absent common provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`); the timeout path was verified instead.
+
+### Checkpoint 3: Default Cwd and Extension Notification Cleanup
+
+Committed: pending
+
+Changes:
+
+- Added `default_cwd` config.
+- Changed `!new <agent>` to use `default_cwd`.
+- Changed relative `!new <agent> <path>` requests to resolve below `default_cwd`.
+- Kept absolute `!new <agent> <path>` behavior unchanged.
+- Rejected missing or non-directory cwd values before worker start.
+- Stopped treating fire-and-forget Pi extension UI requests such as `notify` as approvals.
+- Moved Pi runtime state under the hub data directory for hub-started Pi workers.
+- Stopped sending normal Pi stderr startup chatter to chat.
+- Stopped workers when a finite adapter such as the fake adapter finishes, so smoke tests exit cleanly.
+
+Cause of earlier false approval:
+
+- Pi emitted an `extension_ui_request` with `method: "notify"` from the `pi-comfyui-paint` extension.
+- The hub incorrectly mapped all extension UI requests to approval requests.
+- Fire-and-forget UI methods are now ignored instead of being persisted/rendered as approvals.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi"`: passed; cwd resolved to `C:\Users\James\programming`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi AgentHub"`: passed; cwd resolved to `C:\Users\James\programming\AgentHub`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi AgentHub" --fake-message "Say only OK."`: passed; no false approval was rendered, and the finite fake-adapter process exited cleanly after Pi reported missing provider auth.

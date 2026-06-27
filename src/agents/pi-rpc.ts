@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
@@ -80,6 +80,7 @@ class AsyncEventQueue<T> {
 export class PiRpcBackend implements AgentBackend {
   private proc: ChildProcessWithoutNullStreams | undefined;
   private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  private stderrTail = "";
 
   constructor(private readonly config: HubConfig) {}
 
@@ -90,10 +91,17 @@ export class PiRpcBackend implements AgentBackend {
 
     const piConfig = this.config.agents.pi;
     const spawnSpec = resolveSpawnSpec(piConfig.command, piConfig.default_args);
+    const piAgentDir = path.join(this.config.dataDir, "pi", "agent");
+    const piSessionDir = path.join(this.config.dataDir, "pi", "sessions");
+    mkdirSync(piAgentDir, { recursive: true });
+    mkdirSync(piSessionDir, { recursive: true });
+
     this.proc = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: session.cwd,
       env: {
         ...process.env,
+        PI_CODING_AGENT_DIR: piAgentDir,
+        PI_CODING_AGENT_SESSION_DIR: piSessionDir,
         PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
       },
       windowsHide: true,
@@ -114,13 +122,17 @@ export class PiRpcBackend implements AgentBackend {
     this.proc.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
       if (text.length > 0) {
-        this.eventsQueue.push({ type: "tool_result", name: "stderr", text });
+        this.stderrTail = `${this.stderrTail}\n${text}`.slice(-4000);
       }
     });
 
     this.proc.on("exit", (code, signal) => {
       if (code !== 0 && signal !== "SIGTERM") {
-        this.eventsQueue.push({ type: "final", text: `Pi RPC process exited with code ${code ?? "unknown"}.` });
+        const stderr = this.stderrTail.trim();
+        this.eventsQueue.push({
+          type: "final",
+          text: `Pi RPC process exited with code ${code ?? "unknown"}.${stderr ? `\n${stderr}` : ""}`,
+        });
       }
       this.eventsQueue.close();
     });
@@ -208,6 +220,9 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "extension_ui_request") {
+    if (isFireAndForgetExtensionUi(record)) {
+      return [];
+    }
     return [{ type: "approval_request", raw: record }];
   }
 
@@ -216,6 +231,16 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   return [];
+}
+
+function isFireAndForgetExtensionUi(record: Record<string, unknown>): boolean {
+  return (
+    record.method === "notify" ||
+    record.method === "setStatus" ||
+    record.method === "setWidget" ||
+    record.method === "setTitle" ||
+    record.method === "set_editor_text"
+  );
 }
 
 function extractFinalText(record: Record<string, unknown>): string {

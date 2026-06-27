@@ -1,5 +1,5 @@
 export type HubCommand =
-  | { type: "new"; agent: string; cwd: string }
+  | { type: "new"; agent: string; cwd?: string }
   | { type: "status" }
   | { type: "cwd" }
   | { type: "abort" }
@@ -19,10 +19,11 @@ export function parseCommand(text: string): HubCommand {
   switch (command) {
     case "new": {
       const [agent, ...cwdParts] = args;
-      if (!agent || cwdParts.length === 0) {
-        throw new Error("Usage: !new <agent> <cwd>");
+      if (!agent) {
+        throw new Error("Usage: !new <agent> [cwd]");
       }
-      return { type: "new", agent, cwd: cwdParts.join(" ") };
+      const cwd = cwdParts.join(" ");
+      return cwd.length > 0 ? { type: "new", agent, cwd } : { type: "new", agent };
     }
     case "status":
       return { type: "status" };

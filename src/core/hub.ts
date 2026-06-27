@@ -1,3 +1,4 @@
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
@@ -23,8 +24,12 @@ export class RemoteAgentHub {
   }
 
   async run(): Promise<void> {
-    for await (const event of this.channel.receive()) {
-      await this.handleEvent(event);
+    try {
+      for await (const event of this.channel.receive()) {
+        await this.handleEvent(event);
+      }
+    } finally {
+      await this.stopWorkers();
     }
   }
 
@@ -67,9 +72,9 @@ export class RemoteAgentHub {
     }
   }
 
-  private async handleNew(event: InboundChatEvent, rawAgent: string, rawCwd: string): Promise<void> {
+  private async handleNew(event: InboundChatEvent, rawAgent: string, rawCwd?: string): Promise<void> {
     const agent = this.parseAgent(rawAgent);
-    const cwd = path.resolve(rawCwd);
+    const cwd = this.resolveRequestedCwd(rawCwd);
 
     if (!isPathInsideAllowedRoots(cwd, this.config.allowedRoots)) {
       await this.audit.write({
@@ -78,6 +83,16 @@ export class RemoteAgentHub {
         details: { cwd },
       });
       await this.channel.sendText(event.target, `Rejected cwd outside allowed roots: ${cwd}`);
+      return;
+    }
+
+    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+      await this.audit.write({
+        type: "session.rejected_missing_cwd",
+        target: event.target,
+        details: { cwd },
+      });
+      await this.sendChunkedText(event.target, `Rejected cwd because it is not an existing directory: ${cwd}`);
       return;
     }
 
@@ -203,6 +218,20 @@ export class RemoteAgentHub {
     return value;
   }
 
+  private resolveRequestedCwd(rawCwd: string | undefined): string {
+    const defaultCwd = this.config.defaultCwd;
+    if (!defaultCwd) {
+      throw new Error("No default cwd configured. Use `!new pi <absolute-cwd>` or set `default_cwd`.");
+    }
+
+    if (!rawCwd || rawCwd.trim().length === 0) {
+      return path.resolve(defaultCwd);
+    }
+
+    const trimmed = rawCwd.trim();
+    return path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(defaultCwd, trimmed);
+  }
+
   private getWorker(session: HubSession): AgentBackend {
     const existing = this.workers.get(session.id);
     if (existing) {
@@ -212,6 +241,12 @@ export class RemoteAgentHub {
     const backend = new PiRpcBackend(this.config);
     this.workers.set(session.id, backend);
     return backend;
+  }
+
+  private async stopWorkers(): Promise<void> {
+    const workers = [...this.workers.values()];
+    this.workers.clear();
+    await Promise.allSettled(workers.map((worker) => worker.stop()));
   }
 
   private async consumeAgentEvents(session: HubSession, backend: AgentBackend): Promise<void> {

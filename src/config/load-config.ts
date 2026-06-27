@@ -35,10 +35,12 @@ export function loadConfig(configPath: string): HubConfig {
   const allowedRoots = Object.values(config.users).flatMap((user) =>
     user.allowed_roots.map((root) => resolvePath(root, configDir)),
   );
+  const defaultCwd = config.default_cwd ? resolvePath(config.default_cwd, configDir) : allowedRoots[0];
 
   return {
     ...config,
     dataDir,
+    ...(defaultCwd ? { defaultCwd } : {}),
     allowedRoots,
   };
 }

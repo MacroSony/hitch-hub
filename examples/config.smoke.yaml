@@ -1,4 +1,5 @@
 data_dir: .remote-agent-hub-smoke
+default_cwd: C:\Users\James\programming
 agent_turn_timeout_ms: 5000
 
 users:

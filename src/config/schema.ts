@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const userSchema = z.object({
-  telegram_ids: z.array(z.string()).default([]),
+  telegram_ids: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
   allowed_roots: z.array(z.string()).min(1),
 });
 
@@ -12,7 +12,7 @@ const fakeChannelSchema = z.object({
 const telegramChannelSchema = z.object({
   enabled: z.boolean().default(false),
   bot_token_env: z.string().default("TELEGRAM_BOT_TOKEN"),
-  allowed_chat_ids: z.array(z.string()).default([]),
+  allowed_chat_ids: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
 });
 
 const piAgentSchema = z.object({
@@ -23,6 +23,7 @@ const piAgentSchema = z.object({
 
 export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
+  default_cwd: z.string().optional(),
   agent_turn_timeout_ms: z.number().int().positive().default(300_000),
   users: z.record(z.string(), userSchema).default({}),
   channels: z
@@ -62,5 +63,6 @@ export const configSchema = z.object({
 export type HubConfigInput = z.input<typeof configSchema>;
 export type HubConfig = z.output<typeof configSchema> & {
   dataDir: string;
+  defaultCwd?: string;
   allowedRoots: string[];
 };
