@@ -9,6 +9,18 @@ export type ChatTarget = {
   userId?: string;
 };
 
+export type HubAttachment = {
+  id: string;
+  source: Platform;
+  kind: "image" | "file" | "audio" | "video";
+  filename?: string;
+  mimeType?: string;
+  size?: number;
+  localPath: string;
+  sha256: string;
+  originalId?: string;
+};
+
 export type HubSession = {
   id: string;
   platform: Platform;

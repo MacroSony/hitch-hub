@@ -156,16 +156,16 @@ Checklist:
 - [x] Add Telegram health smoke scripts that do not print bot tokens.
 - [x] Fix package-lock project naming after the Hitch rename.
 - [x] Record checkpoint test results.
-- [ ] Add normalized inbound attachment types.
-- [ ] Add a media cache under `data_dir`.
-- [ ] Parse Telegram photos/documents from allowed chats.
-- [ ] Download Telegram files into the media cache with SHA-256 metadata.
-- [ ] Pass cached image/file references through the hub to Pi prompts.
-- [ ] Verify text-only behavior still works.
+- [x] Add normalized inbound attachment types.
+- [x] Add a media cache under `data_dir`.
+- [x] Parse Telegram photos/documents from allowed chats.
+- [x] Download Telegram files into the media cache with SHA-256 metadata.
+- [x] Pass cached image/file references through the hub to Pi prompts.
+- [x] Verify text-only behavior still works.
 
 ### Checkpoint 4: Public Hygiene and Telegram Health Checks
 
-Committed: pending
+Committed: `4ad0e37`
 
 Changes:
 
@@ -182,3 +182,31 @@ Test results:
 - `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
 - `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
 - `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.
+
+### Checkpoint 5: Inbound Media Cache Foundation
+
+Committed: this commit
+
+Changes:
+
+- Added normalized inbound attachment metadata on channel events and agent input.
+- Added a media cache under `data_dir/media/inbound` with SHA-256-addressed files and duplicate-content reuse.
+- Added Telegram photo/document parsing for allowed chats.
+- Added Telegram `getFile` and file download handling into the media cache.
+- Passed cached attachment references into Pi prompts as local file paths with filename, MIME, and SHA-256 metadata.
+- Added a local media-cache smoke test.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; text-only channel behavior still works.
+- `npm.cmd run smoke:media-cache`: passed; duplicate content reused the same SHA-256 cache path under `data_dir/media/inbound`.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
+- `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.
+
+Notes:
+
+- The first media path passes cached image/file references to Pi as prompt text. Native Pi image-content wiring should be added after verifying the current Pi RPC image message shape against a live media update.
+- Outbound artifact upload is intentionally left for the next media checkpoint.

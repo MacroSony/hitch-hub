@@ -1,9 +1,10 @@
-import type { ChatTarget } from "../core/types.js";
+import type { ChatTarget, HubAttachment } from "../core/types.js";
 
 export type InboundChatEvent = {
   id: string;
   target: ChatTarget;
   text: string;
+  attachments?: HubAttachment[];
   receivedAt: string;
 };
 

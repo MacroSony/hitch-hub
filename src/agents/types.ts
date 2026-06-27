@@ -1,7 +1,8 @@
-import type { HubSession } from "../core/types.js";
+import type { HubAttachment, HubSession } from "../core/types.js";
 
 export type AgentInput = {
   text: string;
+  attachments?: HubAttachment[];
 };
 
 export type AgentEvent =

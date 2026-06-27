@@ -3,6 +3,7 @@ import { loadConfig } from "./config/load-config.js";
 import { FakeChannelAdapter } from "./channels/fake.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { RemoteAgentHub } from "./core/hub.js";
+import { MediaCache } from "./core/media-cache.js";
 
 type CliArgs = {
   configPath: string;
@@ -54,7 +55,7 @@ async function main(): Promise<void> {
   const adapter =
     args.fakeMessages.length > 0
       ? new FakeChannelAdapter(args.fakeMessages)
-      : createConfiguredAdapter(config.channels.telegram);
+      : createConfiguredAdapter(config.channels.telegram, new MediaCache(config.dataDir));
 
   const hub = new RemoteAgentHub(config, adapter);
   await hub.run();
@@ -64,7 +65,7 @@ function createConfiguredAdapter(telegram: {
   enabled: boolean;
   bot_token_env: string;
   allowed_chat_ids: string[];
-}): TelegramAdapter {
+}, mediaCache: MediaCache): TelegramAdapter {
   if (!telegram.enabled) {
     throw new Error("No channel configured. Use --fake-message for local smoke tests or enable Telegram.");
   }
@@ -74,7 +75,7 @@ function createConfiguredAdapter(telegram: {
     throw new Error(`Telegram bot token env var is not set: ${telegram.bot_token_env}`);
   }
 
-  return new TelegramAdapter(token, telegram.allowed_chat_ids);
+  return new TelegramAdapter(token, telegram.allowed_chat_ids, mediaCache);
 }
 
 main().catch((error: unknown) => {

@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "smoke:fake": "tsx src/main.ts --config examples/config.smoke.yaml --fake-message \"!status\"",
+    "smoke:media-cache": "tsx src/smoke/media-cache.ts --config examples/config.smoke.yaml",
     "smoke:pi-rpc": "tsx src/smoke/pi-rpc-state.ts --config examples/config.smoke.yaml",
     "smoke:telegram-getme": "tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",
     "smoke:telegram-updates": "tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getUpdates",

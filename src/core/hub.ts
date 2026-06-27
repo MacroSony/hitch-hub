@@ -163,7 +163,7 @@ export class RemoteAgentHub {
       type: "prompt.received",
       sessionId: session.id,
       target: event.target,
-      details: { length: text.length },
+      details: { length: text.length, attachments: event.attachments?.length ?? 0 },
     });
 
     const backend = this.getWorker(session);
@@ -179,7 +179,7 @@ export class RemoteAgentHub {
         details: { processId },
       });
 
-      await backend.send({ text });
+      await backend.send(event.attachments ? { text, attachments: event.attachments } : { text });
       await this.consumeAgentEvents(session, backend);
     } catch (error) {
       this.sessions.updateStatus(session.id, "error");

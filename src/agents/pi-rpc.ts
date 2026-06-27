@@ -145,7 +145,7 @@ export class PiRpcBackend implements AgentBackend {
       throw new Error("Pi RPC process has not been started.");
     }
 
-    this.proc.stdin.write(`${JSON.stringify({ type: "prompt", message: input.text })}\n`);
+    this.proc.stdin.write(`${JSON.stringify({ type: "prompt", message: promptTextWithAttachments(input) })}\n`);
   }
 
   async *events(): AsyncIterable<AgentEvent> {
@@ -163,6 +163,26 @@ export class PiRpcBackend implements AgentBackend {
     this.proc?.kill("SIGTERM");
     this.proc = undefined;
   }
+}
+
+function promptTextWithAttachments(input: AgentInput): string {
+  if (!input.attachments || input.attachments.length === 0) {
+    return input.text;
+  }
+
+  const attachmentLines = input.attachments.map((attachment, index) => {
+    const label = attachment.kind === "image" ? "Image" : "File";
+    const parts = [
+      `${label} ${index + 1}: ${attachment.localPath}`,
+      attachment.filename ? `filename=${attachment.filename}` : undefined,
+      attachment.mimeType ? `mime=${attachment.mimeType}` : undefined,
+      `sha256=${attachment.sha256}`,
+    ].filter(Boolean);
+    return parts.join(" ");
+  });
+
+  const prefix = input.text.trim().length > 0 ? input.text.trim() : "Please inspect the attached local file reference(s).";
+  return `${prefix}\n\nAttachments cached by Hitch:\n${attachmentLines.join("\n")}`;
 }
 
 function mapPiEvent(value: unknown): AgentEvent[] {
