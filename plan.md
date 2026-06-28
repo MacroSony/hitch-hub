@@ -567,18 +567,22 @@ or:
 
 ### 10.2 Agent-native commands
 
-Pass through agent-native commands explicitly.
+Treat leading slash commands as agent-native by default. Hitch should route them to the active backend without maintaining a global catalog of every agent's commands.
 
 Examples:
 
 ```text
-/agent /compact
-/agent /model sonnet
-/agent /review
-/agent /prompts:draftpr FILES="src/api.ts"
+/compact
+/model sonnet
+/review
+/prompts:draftpr FILES="src/api.ts"
 ```
 
-For convenience, the hub may pass through unknown `/commands`, but this should be configurable.
+Each backend owns how those commands are delivered. If the backend exposes a typed command API, prefer that. If the backend expects slash commands through its prompt path, forward them there. Hitch may later add `/hub ...` or `/agent ...` escape hatches if a chat platform or backend creates a namespace collision, but the lightweight default is:
+
+- `!command` -> Hitch command
+- `/command` -> active agent command
+- normal text -> active agent prompt
 
 ### 10.3 Native command discovery
 

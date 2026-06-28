@@ -18,7 +18,7 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Configurable default cwd
 - SHA-256 inbound media cache for Telegram photos/documents
 - Cached media references passed to Pi prompts as local file paths
-- Pi RPC model inspection and switching through `!model` / `/model`
+- Pi RPC model inspection and switching through agent-native `/model`
 - Best-effort outbound Telegram upload for local image/file paths mentioned by Pi
 - Basic text chunking and timeout handling
 
@@ -77,16 +77,21 @@ Then send commands to the Telegram bot:
 !new pi C:\path\to\repo
 !status
 !cwd
-!model
-!model deepseek/deepseek-v4-flash
-/model deepseek/deepseek-v4-flash
-!models deepseek
 !abort
 !approve <approval-id>
 !deny <approval-id>
 ```
 
-Unknown `!` commands are rejected by Hitch instead of being forwarded to Pi. Normal text and unknown slash commands are still passed to the active Pi session as prompts.
+Agent-native slash commands are routed to the active backend:
+
+```text
+/model
+/model deepseek/deepseek-v4-flash
+/models deepseek
+/review
+```
+
+Unknown `!` commands are rejected by Hitch instead of being forwarded to Pi. Slash commands are treated as agent-native commands. For Pi, Hitch maps `/model` and `/models` to typed Pi RPC calls; other slash commands are forwarded through Pi's command/prompt path. `!model` and `!models` remain compatibility aliases for `/model` and `/models`.
 
 Path behavior:
 
@@ -100,7 +105,7 @@ Media behavior:
 - Telegram photos and documents from allowed chats are cached under `data_dir/media/inbound`
 - Cached files are deduplicated by SHA-256
 - Cached media is passed to Pi as local file path references appended to the prompt
-- When Pi mentions existing local image/file paths in final text or tool results, Hitch attempts to upload up to five artifacts back to Telegram
+- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five artifacts back to Telegram
 - Native Pi image-content messages are not implemented yet; images currently reach Pi as local path references
 
 ## Local Testing

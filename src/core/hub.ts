@@ -4,7 +4,7 @@ import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
-import type { AgentBackend, AgentEvent, AgentModelInfo } from "../agents/types.js";
+import type { AgentBackend, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry } from "./session-registry.js";
@@ -63,17 +63,14 @@ export class RemoteAgentHub {
         case "abort":
           await this.handleAbort(event);
           return;
-        case "model":
-          await this.handleModel(event, command.model);
-          return;
-        case "models":
-          await this.handleModels(event, command.filter);
-          return;
         case "approve":
           await this.handleApprovalDecision(event, command.id, "allowed");
           return;
         case "deny":
           await this.handleApprovalDecision(event, command.id, "denied");
+          return;
+        case "agent_command":
+          await this.handleAgentCommand(event, command.raw);
           return;
         case "prompt":
           await this.handlePrompt(event, command.text);
@@ -161,7 +158,7 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Stopped session ${shortId(session)}.`);
   }
 
-  private async handleModel(event: InboundChatEvent, model?: string): Promise<void> {
+  private async handleAgentCommand(event: InboundChatEvent, raw: string): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
     if (!session) {
       await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
@@ -169,74 +166,50 @@ export class RemoteAgentHub {
     }
 
     if (session.status === "running") {
-      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before changing model.");
+      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before sending an agent command.");
       return;
     }
 
     const backend = this.getWorker(session);
-    const processId = await backend.start(session);
-    this.sessions.setBackendProcess(session.id, processId);
 
-    if (!model) {
-      if (!backend.getState) {
-        await this.sendChunkedText(event.target, "This agent does not expose model state.");
-        return;
+    if (!backend.executeCommand) {
+      await this.sendChunkedText(event.target, "This agent does not support native command passthrough.");
+      return;
+    }
+
+    try {
+      const processId = await backend.start(session);
+      this.sessions.setBackendProcess(session.id, processId);
+      await this.audit.write({
+        type: "agent_command.received",
+        sessionId: session.id,
+        target: event.target,
+        details: { command: raw, attachments: event.attachments?.length ?? 0 },
+      });
+
+      const input = event.attachments ? { raw, attachments: event.attachments } : { raw };
+      const result = await backend.executeCommand(input);
+      if (result.text) {
+        await this.sendChunkedText(event.target, result.text);
       }
-      const state = await backend.getState();
-      await this.sendChunkedText(event.target, `Current model: ${formatModel(state.model)}`);
-      return;
+      if (result.consumesEvents) {
+        this.sessions.updateStatus(session.id, "running");
+        await this.consumeAgentEvents(session, backend);
+      }
+    } catch (error) {
+      this.updateStatusUnlessStopped(session.id, "error");
+      await this.audit.write({
+        type: "agent_command.error",
+        sessionId: session.id,
+        target: event.target,
+        details: { command: raw, error: error instanceof Error ? error.message : String(error) },
+      });
+      await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
+    } finally {
+      if (!backend.isAlive()) {
+        this.workers.delete(session.id);
+      }
     }
-
-    if (!backend.setModel) {
-      await this.sendChunkedText(event.target, "This agent does not support model switching through Hitch.");
-      return;
-    }
-
-    const selected = await backend.setModel(model);
-    await this.audit.write({
-      type: "model.changed",
-      sessionId: session.id,
-      target: event.target,
-      details: { model },
-    });
-    await this.sendChunkedText(event.target, `Model switched to ${formatModel(selected)}.`);
-  }
-
-  private async handleModels(event: InboundChatEvent, filter?: string): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
-    if (!session) {
-      await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
-      return;
-    }
-
-    if (session.status === "running") {
-      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before listing models.");
-      return;
-    }
-
-    const backend = this.getWorker(session);
-    const processId = await backend.start(session);
-    this.sessions.setBackendProcess(session.id, processId);
-
-    if (!backend.getAvailableModels) {
-      await this.sendChunkedText(event.target, "This agent does not expose available models.");
-      return;
-    }
-
-    const normalizedFilter = filter?.toLowerCase();
-    const models = (await backend.getAvailableModels())
-      .filter((model) => {
-        if (!normalizedFilter) {
-          return true;
-        }
-        return formatModel(model).toLowerCase().includes(normalizedFilter);
-      })
-      .slice(0, 40);
-
-    await this.sendChunkedText(
-      event.target,
-      models.length > 0 ? `Available models:\n${models.map((model) => `- ${formatModel(model)}`).join("\n")}` : "No models matched.",
-    );
   }
 
   private async handlePrompt(event: InboundChatEvent, text: string): Promise<void> {
@@ -509,7 +482,7 @@ export class RemoteAgentHub {
       return;
     }
 
-    const artifacts = extractLocalArtifacts(text).slice(0, 5);
+    const artifacts = extractLocalArtifacts(text, [this.config.dataDir, ...this.config.allowedRoots]).slice(0, 5);
     for (const artifact of artifacts) {
       try {
         await this.channel.sendArtifact(target, artifact);
@@ -542,17 +515,7 @@ function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
 }
 
-function formatModel(model: AgentModelInfo | undefined): string {
-  if (!model) {
-    return "none";
-  }
-  if (model.provider && model.id) {
-    return `${model.provider}/${model.id}`;
-  }
-  return model.name ?? model.id ?? model.provider ?? "unknown";
-}
-
-function extractLocalArtifacts(text: string): Array<{ path: string; kind: "image" | "file" }> {
+function extractLocalArtifacts(text: string, allowedRoots: string[]): Array<{ path: string; kind: "image" | "file" }> {
   const paths = new Set<string>();
   const quoted = /["'`]([A-Za-z]:[\\/][^"'`\r\n]+|\/[^"'`\r\n]+)["'`]/g;
   const windowsUnquoted = /\b[A-Za-z]:[\\/][^\s<>"'`|]+/g;
@@ -571,7 +534,12 @@ function extractLocalArtifacts(text: string): Array<{ path: string; kind: "image
   return [...paths]
     .filter((candidate) => {
       try {
-        return path.isAbsolute(candidate) && existsSync(candidate) && statSync(candidate).isFile();
+        return (
+          path.isAbsolute(candidate) &&
+          isPathInsideAllowedRoots(candidate, allowedRoots) &&
+          existsSync(candidate) &&
+          statSync(candidate).isFile()
+        );
       } catch {
         return false;
       }

@@ -2,7 +2,7 @@
 
 Last verified: 2026-06-27.
 
-Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, receive Pi text/tool/final events back through chat, persist sessions and approval records, cache inbound Telegram media as local file references, switch/query Pi models through RPC, and upload local artifact paths mentioned by Pi back to Telegram.
+Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, route agent-native slash commands, receive Pi text/tool/final events back through chat, persist sessions and approval records, cache inbound Telegram media as local file references, switch/query Pi models through RPC, and upload local artifact paths mentioned by Pi back to Telegram.
 
 ## Implemented Features
 
@@ -72,24 +72,23 @@ Implemented hub commands:
   - Shows the active session cwd.
 - `!abort`
   - Aborts the active worker if one exists and marks the session stopped.
-- `!model`
-  - Shows the current Pi RPC model for the active session.
-- `!model <provider>/<model-id>`
-  - Switches the active Pi RPC session through the typed `set_model` RPC command.
-- `/model <provider>/<model-id>`
-  - Alias for `!model <provider>/<model-id>`.
-- `!models [filter]`
-  - Lists available Pi RPC models, optionally filtered by text.
 - `!approve <approval-id>`
   - Marks a pending persisted approval request as allowed.
 - `!deny <approval-id>`
   - Marks a pending persisted approval request as denied.
 
+Agent-native command routing:
+
+- Any message beginning with `/` is routed to the active backend as an agent-native command.
+- Pi maps `/model` and `/models` to typed RPC calls.
+- Other Pi slash commands are forwarded through Pi's command/prompt path, allowing Pi extensions, skills, and prompt templates to own their command behavior.
+- `!model` and `!models` remain compatibility aliases that are converted to `/model` and `/models`.
+
 Prompt behavior:
 
 - Any text that does not start with `!` is sent to the active agent session as a prompt.
 - Unknown `!` commands are rejected by Hitch instead of being forwarded to Pi.
-- Unknown slash commands are still sent to the active agent session as prompts.
+- Slash commands are routed as agent-native commands, not Hitch commands.
 - If there is no active session, prompts are rejected with a message telling the user to start one.
 - A session with status `running` rejects another prompt until the running turn finishes or is aborted.
 
@@ -112,6 +111,7 @@ Prompt behavior:
 - With `agents.pi.config_scope: system`, leaves Pi config/session/auth environment untouched so Pi uses the normal system-level configuration.
 - Writes JSONL prompt and abort messages to Pi stdin.
 - Writes typed JSONL model requests to Pi stdin for `get_state`, `set_model`, and `get_available_models`.
+- Owns execution of Pi-native slash commands received from Hitch.
 - Reads JSONL events from Pi stdout.
 - Captures stderr as a tail and only includes it when the process exits abnormally.
 - Maps Pi events into hub events:
@@ -138,7 +138,8 @@ Prompt behavior:
 
 ### Outbound Artifacts
 
-- Pi final text and tool-result text are scanned for existing local Windows absolute file paths.
+- Pi final text and tool-result text are scanned for existing local absolute file paths.
+- Only files under configured allowed roots or `data_dir` are eligible for upload.
 - Up to five detected artifacts are sent after the text response.
 - Common image extensions are sent as Telegram photos.
 - Other detected files are sent as Telegram documents.
@@ -230,10 +231,8 @@ Typical chat commands:
 !new pi C:\path\to\repo
 !status
 !cwd
-!model
-!model deepseek/deepseek-v4-flash
 /model deepseek/deepseek-v4-flash
-!models deepseek
+/models deepseek
 !abort
 !approve <approval-id>
 !deny <approval-id>
@@ -252,7 +251,7 @@ Media usage:
 - Caption text becomes the prompt text.
 - If no caption is provided, Hitch asks Pi to inspect the cached local file references.
 - Current media delivery to Pi is by local-path text reference, not native Pi image-content blocks.
-- If Pi returns an existing local image/file path in final text or a tool result, Hitch attempts to upload that artifact to Telegram.
+- If Pi returns an existing local image/file path under `allowed_roots` or `data_dir` in final text or a tool result, Hitch attempts to upload that artifact to Telegram.
 
 Run local checks:
 
@@ -290,8 +289,8 @@ Check Telegram credentials without printing the token:
 
 ## Documentation Freshness
 
-- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache, model commands, artifact upload bridge, and approval decision commands.
-- `implementation_steps.md` is the historical implementation checklist. It matches the current feature level through Checkpoint 8, with Telegram smoke results representing the environment at the time they were run.
+- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache, agent-native slash command routing, artifact upload bridge, and approval decision commands.
+- `implementation_steps.md` is the historical implementation checklist. It matches the current feature level through Checkpoint 9, with Telegram smoke results representing the environment at the time they were run.
 - `plan.md` is an aspirational architecture and roadmap document. It intentionally lists planned commands, channels, backends, media behavior, and delivery semantics that are not implemented yet. Use this file as a roadmap, not as a current-state reference.
 
 ## Verification on 2026-06-27

@@ -5,7 +5,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
-import type { AgentBackend, AgentEvent, AgentInput, AgentModelInfo } from "./types.js";
+import type { AgentBackend, AgentCommandInput, AgentCommandResult, AgentEvent, AgentInput, AgentModelInfo } from "./types.js";
 
 type SpawnSpec = {
   command: string;
@@ -151,7 +151,38 @@ export class PiRpcBackend implements AgentBackend {
     this.writeCommand({ type: "prompt", message: promptTextWithAttachments(input) });
   }
 
-  async getState(): Promise<{ model?: AgentModelInfo }> {
+  async executeCommand(input: AgentCommandInput): Promise<AgentCommandResult> {
+    const parsed = parseSlashCommand(input.raw);
+
+    switch (parsed.name) {
+      case "model": {
+        if (parsed.args.length === 0) {
+          const state = await this.getState();
+          return { text: `Current model: ${formatModel(state.model)}` };
+        }
+        const selected = await this.setModel(parsed.args.join(" "));
+        return { text: `Model switched to ${formatModel(selected)}.` };
+      }
+      case "models": {
+        const filter = parsed.args.join(" ").toLowerCase();
+        const models = (await this.getAvailableModels())
+          .filter((model) => filter.length === 0 || formatModel(model).toLowerCase().includes(filter))
+          .slice(0, 40);
+        return {
+          text: models.length > 0 ? `Available models:\n${models.map((model) => `- ${formatModel(model)}`).join("\n")}` : "No models matched.",
+        };
+      }
+      default:
+        const promptInput = input.attachments ? { text: input.raw, attachments: input.attachments } : { text: input.raw };
+        this.writeCommand({
+          type: "prompt",
+          message: promptTextWithAttachments(promptInput),
+        });
+        return { consumesEvents: true };
+    }
+  }
+
+  private async getState(): Promise<{ model?: AgentModelInfo }> {
     const response = await this.request({ type: "get_state" });
     const data = response.data;
     if (!isRecord(data)) {
@@ -161,10 +192,10 @@ export class PiRpcBackend implements AgentBackend {
     return model ? { model } : {};
   }
 
-  async setModel(model: string): Promise<AgentModelInfo> {
+  private async setModel(model: string): Promise<AgentModelInfo> {
     const separator = model.indexOf("/");
     if (separator <= 0 || separator === model.length - 1) {
-      throw new Error("Usage: !model <provider>/<model-id>");
+      throw new Error("Usage: /model <provider>/<model-id>");
     }
 
     const provider = model.slice(0, separator).trim();
@@ -173,7 +204,7 @@ export class PiRpcBackend implements AgentBackend {
     return modelInfoFromValue(response.data) ?? { provider, id: modelId };
   }
 
-  async getAvailableModels(): Promise<AgentModelInfo[]> {
+  private async getAvailableModels(): Promise<AgentModelInfo[]> {
     const response = await this.request({ type: "get_available_models" });
     const data = response.data;
     if (!isRecord(data) || !Array.isArray(data.models)) {
@@ -278,6 +309,25 @@ function promptTextWithAttachments(input: AgentInput): string {
 
   const prefix = input.text.trim().length > 0 ? input.text.trim() : "Please inspect the attached local file reference(s).";
   return `${prefix}\n\nAttachments cached by Hitch:\n${attachmentLines.join("\n")}`;
+}
+
+function parseSlashCommand(raw: string): { name: string; args: string[] } {
+  const [command = "", ...args] = raw.trim().split(/\s+/);
+  const name = command.startsWith("/") ? command.slice(1) : command;
+  return {
+    name: name.split("@")[0]?.toLowerCase() ?? "",
+    args,
+  };
+}
+
+function formatModel(model: AgentModelInfo | undefined): string {
+  if (!model) {
+    return "none";
+  }
+  if (model.provider && model.id) {
+    return `${model.provider}/${model.id}`;
+  }
+  return model.name ?? model.id ?? model.provider ?? "unknown";
 }
 
 function mapPiEvent(value: unknown): AgentEvent[] {

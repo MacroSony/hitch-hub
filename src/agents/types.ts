@@ -5,6 +5,16 @@ export type AgentInput = {
   attachments?: HubAttachment[];
 };
 
+export type AgentCommandInput = {
+  raw: string;
+  attachments?: HubAttachment[];
+};
+
+export type AgentCommandResult = {
+  text?: string;
+  consumesEvents?: boolean;
+};
+
 export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "final"; text: string }
@@ -22,9 +32,7 @@ export type AgentModelInfo = {
 export interface AgentBackend {
   start(session: HubSession): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
-  getState?(): Promise<{ model?: AgentModelInfo }>;
-  setModel?(model: string): Promise<AgentModelInfo>;
-  getAvailableModels?(): Promise<AgentModelInfo[]>;
+  executeCommand?(input: AgentCommandInput): Promise<AgentCommandResult>;
   events(): AsyncIterable<AgentEvent>;
   isAlive(): boolean;
   abort(): Promise<void>;

@@ -3,18 +3,16 @@ export type HubCommand =
   | { type: "status" }
   | { type: "cwd" }
   | { type: "abort" }
-  | { type: "model"; model?: string }
-  | { type: "models"; filter?: string }
   | { type: "approve"; id: string }
   | { type: "deny"; id: string }
+  | { type: "agent_command"; raw: string }
   | { type: "prompt"; text: string };
 
 export function parseCommand(text: string): HubCommand {
   const trimmed = text.trim();
 
-  if (trimmed.startsWith("/model")) {
-    const model = trimmed.slice("/model".length).trim();
-    return model.length > 0 ? { type: "model", model } : { type: "model" };
+  if (trimmed.startsWith("/")) {
+    return { type: "agent_command", raw: trimmed };
   }
 
   if (!trimmed.startsWith("!")) {
@@ -39,12 +37,10 @@ export function parseCommand(text: string): HubCommand {
     case "abort":
       return { type: "abort" };
     case "model": {
-      const model = args.join(" ");
-      return model.length > 0 ? { type: "model", model } : { type: "model" };
+      return { type: "agent_command", raw: args.length > 0 ? `/model ${args.join(" ")}` : "/model" };
     }
     case "models": {
-      const filter = args.join(" ");
-      return filter.length > 0 ? { type: "models", filter } : { type: "models" };
+      return { type: "agent_command", raw: args.length > 0 ? `/models ${args.join(" ")}` : "/models" };
     }
     case "approve": {
       const [id] = args;

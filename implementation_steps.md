@@ -314,3 +314,33 @@ Manual follow-up needed:
 
 - Live Telegram artifact upload should be tested with a Pi/ComfyUI result that mentions an existing local image path.
 - Live `/model <provider>/<model-id>` should be tested against the user's system Pi config because the isolated smoke config intentionally has an `unknown/unknown` model.
+
+### Checkpoint 9: Agent-Native Slash Command Routing
+
+Committed: this commit
+
+Changes:
+
+- Added `agent_command` as a first-class parsed command type.
+- Changed all leading `/...` messages to route to the active backend as agent-native commands.
+- Kept `!` as the Hitch command namespace, with unknown `!` commands still rejected.
+- Kept `!model` and `!models` as compatibility aliases that rewrite to `/model` and `/models`.
+- Added `AgentBackend.executeCommand()` so Hitch core does not need to maintain backend-specific slash command knowledge.
+- Moved `/model` and `/models` handling from Hitch core into `PiRpcBackend`.
+- For Pi, `/model` and `/models` use typed Pi RPC calls. Other slash commands are forwarded through Pi's command/prompt path so Pi extensions, skills, and prompt templates own their behavior.
+- Tightened outbound artifact discovery so only existing files under `allowed_roots` or `data_dir` are eligible for upload.
+
+Test results:
+
+- `npm.cmd run typecheck`: passed.
+- `npm.cmd run build`: passed.
+- `npm.cmd run smoke:fake`: passed; returned the persisted smoke session status.
+- `npm.cmd run smoke:media-cache`: passed; duplicate content reused the SHA-256 cache path under `data_dir/media/inbound`.
+- `npm.cmd run smoke:pi-rpc`: passed; Pi RPC `get_state` returned `success=true`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!wagawaga"`: passed; returned `Unknown Hitch command: !wagawaga`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "/model"`: passed; routed through backend command handling and returned the isolated smoke model as `unknown/unknown`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "/models unknown"`: passed; routed through backend command handling and returned `No models matched.`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "!model"`: passed; compatibility alias rewrote to `/model` and returned the isolated smoke model as `unknown/unknown`.
+- `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "/definitely-hitch-pass-through-smoke"`: passed; routed to Pi's command/prompt path and returned the expected smoke-config provider auth error. The artifact allowlist prevented unrelated global Pi documentation paths in the error text from being uploaded.
+- `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
+- `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.
