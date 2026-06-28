@@ -182,6 +182,10 @@ export class PiRpcBackend implements AgentBackend {
     }
   }
 
+  async respondToApproval(raw: unknown, decision: "allowed" | "denied"): Promise<void> {
+    this.writeCommand(piApprovalResponse(raw, decision));
+  }
+
   private async getState(): Promise<{ model?: AgentModelInfo }> {
     const response = await this.request({ type: "get_state" });
     const data = response.data;
@@ -385,6 +389,9 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "extension_ui_request") {
+    if (record.method === "notify" && typeof record.message === "string") {
+      return [{ type: "tool_result", name: "Pi notification", text: record.message }];
+    }
     if (isFireAndForgetExtensionUi(record)) {
       return [];
     }
@@ -417,6 +424,58 @@ function modelInfoFromValue(value: unknown): AgentModelInfo | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
+}
+
+function piApprovalResponse(raw: unknown, decision: "allowed" | "denied"): Record<string, unknown> {
+  if (!isRecord(raw) || raw.type !== "extension_ui_request" || typeof raw.id !== "string") {
+    throw new Error("Approval is not a Pi extension UI request.");
+  }
+
+  const method = typeof raw.method === "string" ? raw.method : "";
+  switch (method) {
+    case "confirm":
+      return { type: "extension_ui_response", id: raw.id, confirmed: decision === "allowed" };
+    case "select": {
+      if (decision === "denied") {
+        const deniedValue = selectOption(raw.options, ["no", "block", "deny", "reject", "cancel", "stop"]);
+        return deniedValue
+          ? { type: "extension_ui_response", id: raw.id, value: deniedValue }
+          : { type: "extension_ui_response", id: raw.id, cancelled: true };
+      }
+
+      const allowedValue = selectOption(raw.options, ["allow", "yes", "approve", "proceed", "continue", "ok"]);
+      return {
+        type: "extension_ui_response",
+        id: raw.id,
+        value: allowedValue ?? firstString(raw.options) ?? "",
+      };
+    }
+    case "input":
+    case "editor":
+      return decision === "allowed"
+        ? { type: "extension_ui_response", id: raw.id, value: "" }
+        : { type: "extension_ui_response", id: raw.id, cancelled: true };
+    default:
+      throw new Error(`Unsupported Pi extension UI approval method: ${method || "unknown"}`);
+  }
+}
+
+function selectOption(options: unknown, needles: string[]): string | undefined {
+  if (!Array.isArray(options)) {
+    return undefined;
+  }
+
+  return options.find((option): option is string => {
+    if (typeof option !== "string") {
+      return false;
+    }
+    const normalized = option.toLowerCase();
+    return needles.some((needle) => normalized.includes(needle));
+  });
+}
+
+function firstString(options: unknown): string | undefined {
+  return Array.isArray(options) ? options.find((option): option is string => typeof option === "string") : undefined;
 }
 
 function isFireAndForgetExtensionUi(record: Record<string, unknown>): boolean {

@@ -1,8 +1,8 @@
 # Current State
 
-Last verified: 2026-06-27.
+Last verified: 2026-06-28.
 
-Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, route agent-native slash commands, receive Pi text/tool/final events back through chat, persist sessions and approval records, cache inbound Telegram media as local file references, switch/query Pi models through RPC, and upload local artifact paths mentioned by Pi back to Telegram.
+Hitch is currently a local TypeScript daemon that connects Telegram or a local fake test channel to Pi running in RPC mode. It is usable for the first control path: create a Pi-backed session in an allowed workspace, send text prompts, route agent-native slash commands, receive Pi text/tool/final events back through chat, persist sessions and approval records, answer Pi extension UI approval requests, cache inbound Telegram media as local file references, switch/query Pi models through RPC, and upload local artifact paths mentioned by Pi back to Telegram.
 
 ## Implemented Features
 
@@ -73,9 +73,9 @@ Implemented hub commands:
 - `!abort`
   - Aborts the active worker if one exists and marks the session stopped.
 - `!approve <approval-id>`
-  - Marks a pending persisted approval request as allowed.
+  - Marks a pending persisted approval request as allowed and, for Pi extension UI requests, sends the matching approval response back to Pi.
 - `!deny <approval-id>`
-  - Marks a pending persisted approval request as denied.
+  - Marks a pending persisted approval request as denied and, for Pi extension UI requests, sends the matching denial response back to Pi.
 
 Agent-native command routing:
 
@@ -121,9 +121,11 @@ Prompt behavior:
   - `tool_execution_start` -> tool-start chat message
   - `tool_execution_end` -> tool-result chat message when text is present
   - `extension_ui_request` -> approval request unless it is a fire-and-forget UI method
+  - Pi extension `notify` UI requests -> tool-result chat message
   - `extension_error` -> final error text
   - failed `response` -> final error text
-- Ignores fire-and-forget Pi extension UI methods such as `notify`, `setStatus`, `setWidget`, `setTitle`, and `set_editor_text`.
+- Ignores fire-and-forget Pi extension UI methods such as `setStatus`, `setWidget`, `setTitle`, and `set_editor_text`.
+- Sends `extension_ui_response` messages back to Pi for persisted `confirm`, `select`, `input`, and `editor` requests when `!approve` or `!deny` is received.
 
 ### Inbound Media Cache
 
@@ -163,6 +165,7 @@ Available npm scripts:
 - `npm run smoke:fake`
 - `npm run smoke:media-cache`
 - `npm run smoke:pi-rpc`
+- `npm run smoke:pi-approval`
 - `npm run smoke:telegram-getme`
 - `npm run smoke:telegram-updates`
 
@@ -261,6 +264,7 @@ Run local checks:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:fake
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:media-cache
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-rpc
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-approval
 ```
 
 Check Telegram credentials without printing the token:
@@ -276,7 +280,7 @@ Check Telegram credentials without printing the token:
 - Only Telegram and the local fake adapter are implemented.
 - `channels.fake.enabled` exists in config but fake mode is selected by passing `--fake-message`.
 - `!sessions`, `!switch`, `!cd`, `!compact`, and `!files` are planned but not implemented.
-- Approval decisions are persisted and audited, but they are not sent back into Pi as real approval responses.
+- Hitch can answer Pi extension UI approval requests, but Pi still needs an extension such as `permission-gate.ts` to create per-tool approval prompts.
 - Telegram inline approval buttons are not implemented.
 - Telegram outbound text and artifact sends include topic/thread routing when Telegram provides a thread ID.
 - Outbound artifact upload is basic path scanning only; richer artifact events, delivery queues, and upload tracking are not implemented.
@@ -289,9 +293,28 @@ Check Telegram credentials without printing the token:
 
 ## Documentation Freshness
 
-- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache, agent-native slash command routing, artifact upload bridge, and approval decision commands.
+- `README.md` is the setup and quick-usage guide. It has been refreshed to include the current inbound media cache, agent-native slash command routing, artifact upload bridge, and Pi extension UI approval bridge.
 - `implementation_steps.md` is the historical implementation checklist. It matches the current feature level through Checkpoint 9, with Telegram smoke results representing the environment at the time they were run.
 - `plan.md` is an aspirational architecture and roadmap document. It intentionally lists planned commands, channels, backends, media behavior, and delivery semantics that are not implemented yet. Use this file as a roadmap, not as a current-state reference.
+
+## Verification on 2026-06-28
+
+Passed on Linux with Node.js 24.14.0:
+
+- `npm run typecheck`
+- `npm run build`
+- `npm run smoke:fake`
+- `npm run smoke:media-cache`
+- `npm run smoke:pi-rpc`
+- `npm run smoke:pi-approval`
+- `npm run smoke:telegram-getme`
+- `npm run smoke:telegram-updates`
+- `npm run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "!cwd"`
+
+Notes:
+
+- Telegram checks used Node's `--use-env-proxy` npm script flag and did not print the bot token.
+- `smoke:pi-approval` loads Pi's bundled `timed-confirm.ts` extension and verifies both `!approve` and `!deny` are delivered back to Pi as RPC extension UI responses.
 
 ## Verification on 2026-06-27
 

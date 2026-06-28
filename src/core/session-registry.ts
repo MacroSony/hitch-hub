@@ -18,6 +18,37 @@ type SessionRow = {
   updated_at: string;
 };
 
+type ApprovalRow = {
+  id: string;
+  session_id: string;
+  agent: AgentName;
+  action_kind: string;
+  cwd: string;
+  title: string;
+  preview: string;
+  risk: string;
+  raw_json: string;
+  status: string;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PendingApproval = {
+  id: string;
+  sessionId: string;
+  agent: AgentName;
+  actionKind: string;
+  cwd: string;
+  title: string;
+  preview: string;
+  risk: string;
+  raw: unknown;
+  expiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 function rowToSession(row: SessionRow): HubSession {
   return {
     id: row.id,
@@ -30,6 +61,23 @@ function rowToSession(row: SessionRow): HubSession {
     ...(row.backend_session_id ? { backendSessionId: row.backend_session_id } : {}),
     ...(row.process_id ? { processId: row.process_id } : {}),
     status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPendingApproval(row: ApprovalRow): PendingApproval {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    agent: row.agent,
+    actionKind: row.action_kind,
+    cwd: row.cwd,
+    title: row.title,
+    preview: row.preview,
+    risk: row.risk,
+    raw: JSON.parse(row.raw_json) as unknown,
+    ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -150,6 +198,13 @@ export class SessionRegistry {
       .prepare("UPDATE approval_requests SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending'")
       .run(status, new Date().toISOString(), id);
     return result.changes > 0;
+  }
+
+  getPendingApproval(id: string): PendingApproval | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM approval_requests WHERE id = ? AND status = 'pending'")
+      .get(id) as ApprovalRow | undefined;
+    return row ? rowToPendingApproval(row) : undefined;
   }
 
   private migrate(): void {

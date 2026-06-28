@@ -8,7 +8,7 @@ import type { AgentBackend, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry } from "./session-registry.js";
-import type { AgentName, HubSession } from "./types.js";
+import type { AgentName, ChatTarget, HubSession } from "./types.js";
 
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
@@ -270,17 +270,47 @@ export class RemoteAgentHub {
     approvalId: string,
     decision: "allowed" | "denied",
   ): Promise<void> {
-    const updated = this.sessions.updateApprovalStatus(approvalId, decision);
+    const approval = this.sessions.getPendingApproval(approvalId);
+    if (!approval) {
+      await this.audit.write({
+        type: "approval.decided",
+        target: event.target,
+        details: { approvalId, decision, updated: false },
+      });
+      await this.sendChunkedText(event.target, `No pending approval found for ${approvalId}.`);
+      return;
+    }
+
+    const session = this.sessions.getById(approval.sessionId);
+    if (!session || !targetMatchesSession(event.target, session)) {
+      await this.audit.write({
+        type: "approval.rejected_target",
+        sessionId: approval.sessionId,
+        target: event.target,
+        details: { approvalId, decision },
+      });
+      await this.sendChunkedText(event.target, `No pending approval found for ${approvalId}.`);
+      return;
+    }
+
+    const backend = this.workers.get(approval.sessionId);
+    if (backend?.respondToApproval) {
+      if (!backend.isAlive()) {
+        await this.sendChunkedText(event.target, `Approval ${approvalId} could not be delivered because the agent is not running.`);
+        return;
+      }
+      await backend.respondToApproval(approval.raw, decision);
+    }
+
+    this.sessions.updateApprovalStatus(approvalId, decision);
     await this.audit.write({
       type: "approval.decided",
+      sessionId: approval.sessionId,
       target: event.target,
-      details: { approvalId, decision, updated },
+      details: { approvalId, decision, delivered: Boolean(backend?.respondToApproval) },
     });
 
-    await this.sendChunkedText(
-      event.target,
-      updated ? `Approval ${approvalId} ${decision}.` : `No pending approval found for ${approvalId}.`,
-    );
+    await this.sendChunkedText(event.target, `Approval ${approvalId} ${decision}.`);
   }
 
   private parseAgent(value: string): AgentName {
@@ -423,12 +453,13 @@ export class RemoteAgentHub {
         }
         return false;
       case "approval_request": {
+        const method = piUiMethod(event.raw);
         const approvalId = this.sessions.createApproval({
           sessionId: session.id,
           agent: session.agent,
-          actionKind: "unknown",
+          actionKind: method ?? "unknown",
           cwd: session.cwd,
-          title: "Pi approval request",
+          title: method ? `Pi ${method} request` : "Pi approval request",
           preview: JSON.stringify(event.raw).slice(0, 1000),
           risk: "medium",
           raw: event.raw,
@@ -513,6 +544,23 @@ export class RemoteAgentHub {
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function targetMatchesSession(target: ChatTarget, session: HubSession): boolean {
+  return (
+    target.platform === session.platform &&
+    target.chatId === session.chatId &&
+    (target.threadId ?? "") === (session.threadId ?? "")
+  );
+}
+
+function piUiMethod(raw: unknown): string | undefined {
+  return raw !== null &&
+    typeof raw === "object" &&
+    (raw as Record<string, unknown>).type === "extension_ui_request" &&
+    typeof (raw as Record<string, unknown>).method === "string"
+    ? String((raw as Record<string, unknown>).method)
+    : undefined;
 }
 
 function extractLocalArtifacts(text: string, allowedRoots: string[]): Array<{ path: string; kind: "image" | "file" }> {

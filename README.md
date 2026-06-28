@@ -14,7 +14,7 @@ Hitch is early. The current implementation focuses on the first useful control p
 - SQLite session and approval registry
 - cwd allowlist checks
 - Basic audit logging
-- Approval request persistence and text command decision recording
+- Pi extension UI approval requests answered through `!approve` / `!deny`
 - Configurable default cwd
 - SHA-256 inbound media cache for Telegram photos/documents
 - Cached media references passed to Pi prompts as local file paths
@@ -37,6 +37,8 @@ On Windows PowerShell, `npm.ps1` may be blocked by execution policy. Use `npm.cm
 ```powershell
 & 'C:\Program Files\nodejs\npm.cmd' install
 ```
+
+When `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY` are set, the npm scripts start Node with `--use-env-proxy` so Telegram API calls use the same proxy settings as tools such as curl.
 
 ## Setup
 
@@ -100,6 +102,12 @@ Path behavior:
 - `!new pi C:\path\to\repo` uses the absolute path directly
 - cwd values outside allowed roots are rejected
 
+Approval behavior:
+
+- Pi itself does not provide a built-in per-tool approval gate.
+- Pi extensions can ask for confirmation through RPC extension UI requests.
+- Hitch persists those requests, renders an approval ID, and sends the matching `extension_ui_response` back to Pi when `!approve <id>` or `!deny <id>` is received.
+
 Media behavior:
 
 - Telegram photos and documents from allowed chats are cached under `data_dir/media/inbound`
@@ -132,6 +140,12 @@ Run the Pi RPC protocol smoke test:
 
 ```powershell
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-rpc
+```
+
+Run the Pi approval bridge smoke test:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:pi-approval
 ```
 
 Run the media-cache smoke test:

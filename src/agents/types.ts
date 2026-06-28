@@ -33,6 +33,7 @@ export interface AgentBackend {
   start(session: HubSession): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
   executeCommand?(input: AgentCommandInput): Promise<AgentCommandResult>;
+  respondToApproval?(raw: unknown, decision: "allowed" | "denied"): Promise<void>;
   events(): AsyncIterable<AgentEvent>;
   isAlive(): boolean;
   abort(): Promise<void>;
