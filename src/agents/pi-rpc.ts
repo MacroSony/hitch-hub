@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -148,7 +148,7 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async send(input: AgentInput): Promise<void> {
-    this.writeCommand({ type: "prompt", message: promptTextWithAttachments(input) });
+    this.writeCommand(promptCommandWithAttachments(input));
   }
 
   async executeCommand(input: AgentCommandInput): Promise<AgentCommandResult> {
@@ -174,10 +174,7 @@ export class PiRpcBackend implements AgentBackend {
       }
       default:
         const promptInput = input.attachments ? { text: input.raw, attachments: input.attachments } : { text: input.raw };
-        this.writeCommand({
-          type: "prompt",
-          message: promptTextWithAttachments(promptInput),
-        });
+        this.writeCommand(promptCommandWithAttachments(promptInput));
         return { consumesEvents: true };
     }
   }
@@ -295,15 +292,35 @@ type RpcResponse = {
   error?: string;
 };
 
-function promptTextWithAttachments(input: AgentInput): string {
+type PiImageContent = {
+  type: "image";
+  data: string;
+  mimeType: string;
+};
+
+function promptCommandWithAttachments(input: AgentInput): Record<string, unknown> {
+  const { text, images } = promptContentWithAttachments(input);
+  return images.length > 0 ? { type: "prompt", message: text, images } : { type: "prompt", message: text };
+}
+
+function promptContentWithAttachments(input: AgentInput): { text: string; images: PiImageContent[] } {
   if (!input.attachments || input.attachments.length === 0) {
-    return input.text;
+    return { text: input.text, images: [] };
   }
+
+  const imageAttachments = input.attachments.filter((attachment) => attachment.kind === "image" && isPiImageMimeType(attachment.mimeType));
+  const images = imageAttachments.map((attachment) => ({
+    type: "image" as const,
+    data: readFileSync(attachment.localPath).toString("base64"),
+    mimeType: attachment.mimeType ?? "image/png",
+  }));
 
   const attachmentLines = input.attachments.map((attachment, index) => {
     const label = attachment.kind === "image" ? "Image" : "File";
+    const delivery = attachment.kind === "image" && isPiImageMimeType(attachment.mimeType) ? "attached_native=true" : `path=${attachment.localPath}`;
     const parts = [
-      `${label} ${index + 1}: ${attachment.localPath}`,
+      `${label} ${index + 1}:`,
+      delivery,
       attachment.filename ? `filename=${attachment.filename}` : undefined,
       attachment.mimeType ? `mime=${attachment.mimeType}` : undefined,
       `sha256=${attachment.sha256}`,
@@ -312,7 +329,11 @@ function promptTextWithAttachments(input: AgentInput): string {
   });
 
   const prefix = input.text.trim().length > 0 ? input.text.trim() : "Please inspect the attached local file reference(s).";
-  return `${prefix}\n\nAttachments cached by Hitch:\n${attachmentLines.join("\n")}`;
+  return { text: `${prefix}\n\nAttachments cached by Hitch:\n${attachmentLines.join("\n")}`, images };
+}
+
+function isPiImageMimeType(mimeType: string | undefined): boolean {
+  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp" || mimeType === "image/gif";
 }
 
 function parseSlashCommand(raw: string): { name: string; args: string[] } {

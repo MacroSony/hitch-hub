@@ -48,15 +48,24 @@ export function loadConfig(configPath: string): HubConfig {
 
 function assertLiveChannelAuthorization(config: HubConfigInput): void {
   const telegram = config.channels?.telegram;
-  if (!telegram?.enabled || telegram.unsafe_allow_all) {
-    return;
+  if (telegram?.enabled && !telegram.unsafe_allow_all) {
+    const allowedChatIds = telegram.allowed_chat_ids ?? [];
+    const allowedUserIds = Object.values(config.users ?? {}).flatMap((user) => user.telegram_ids ?? []);
+    if (allowedChatIds.length === 0 || allowedUserIds.length === 0) {
+      throw new Error(
+        "Telegram is enabled but not explicitly locked down. Set channels.telegram.allowed_chat_ids and at least one users.*.telegram_ids value, or set channels.telegram.unsafe_allow_all: true for local testing.",
+      );
+    }
   }
 
-  const allowedChatIds = telegram.allowed_chat_ids ?? [];
-  const allowedUserIds = Object.values(config.users ?? {}).flatMap((user) => user.telegram_ids ?? []);
-  if (allowedChatIds.length === 0 || allowedUserIds.length === 0) {
-    throw new Error(
-      "Telegram is enabled but not explicitly locked down. Set channels.telegram.allowed_chat_ids and at least one users.*.telegram_ids value, or set channels.telegram.unsafe_allow_all: true for local testing.",
-    );
+  const wechat = config.channels?.wechat;
+  if (wechat?.enabled && !wechat.unsafe_allow_all) {
+    const allowedChatIds = wechat.allowed_chat_ids ?? [];
+    const allowedUserIds = Object.values(config.users ?? {}).flatMap((user) => user.wechat_ids ?? []);
+    if (allowedChatIds.length === 0 || allowedUserIds.length === 0) {
+      throw new Error(
+        "WeChat is enabled but not explicitly locked down. Set channels.wechat.allowed_chat_ids and at least one users.*.wechat_ids value, or set channels.wechat.unsafe_allow_all: true for local testing.",
+      );
+    }
   }
 }

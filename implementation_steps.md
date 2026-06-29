@@ -344,3 +344,27 @@ Test results:
 - `npm.cmd run dev -- --config examples/config.smoke.yaml --fake-message "!new pi" --fake-message "/definitely-hitch-pass-through-smoke"`: passed; routed to Pi's command/prompt path and returned the expected smoke-config provider auth error. The artifact allowlist prevented unrelated global Pi documentation paths in the error text from being uploaded.
 - `npm.cmd run smoke:telegram-getme`: passed with network access; Telegram returned bot `@piagenthub77_bot`, id `8832939480`, `can_join_groups=true`.
 - `npm.cmd run smoke:telegram-updates`: passed with network access; Telegram returned `visible_updates=0`.
+
+### Checkpoint 10: Safety, Sessions, Media Flow, and WeChat Adapter
+
+Committed: this commit
+
+Changes:
+
+- Made live Telegram and WeChat channel allowlists explicit, with `unsafe_allow_all` as an intentional local-testing escape hatch.
+- Added approval expiry through `approval_timeout_ms`.
+- Added Telegram inline approval buttons through callback queries while keeping text fallback commands.
+- Added `!sessions` and `!switch <session-id-or-name>`.
+- Added optional `!new pi ... --name <session-name>` session names.
+- Added explicit selected-session tracking instead of treating the most recently updated row as active.
+- Preserved ordered handling for Hitch commands while keeping prompts and slash-agent commands in background tasks.
+- Added inbound/outbound media byte limits and media MIME sniffing.
+- Added native Pi RPC image attachments for cached inbound images.
+- Added audit delivery records for outbound artifact attempts.
+- Added a WeChat iLink channel adapter with QR login, credential persistence, sync cursor persistence, context-token persistence, inbound text/media, outbound text, and outbound artifacts.
+- Added `smoke:media-flow` to verify cached inbound attachments reach the backend and local outbound artifacts reach the channel boundary.
+
+Manual follow-up needed:
+
+- Live Telegram media upload/download should be tested with real bot credentials and a configured chat/user allowlist.
+- Live WeChat QR login, text reply, image/file inbound, and artifact outbound should be tested from an actual WeChat account because the iLink protocol depends on server-side session/context-token behavior.

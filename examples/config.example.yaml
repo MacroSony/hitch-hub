@@ -1,11 +1,18 @@
 data_dir: .remote-agent-hub
 default_cwd: ..
 agent_turn_timeout_ms: 60000
+approval_timeout_ms: 300000
+
+media:
+  max_inbound_bytes: 20971520
+  max_outbound_bytes: 52428800
 
 users:
   local:
     telegram_ids:
       - "123456789"
+    wechat_ids:
+      - "wechat-user-id"
     allowed_roots:
       - ..
 
@@ -17,6 +24,12 @@ channels:
     bot_token_env: TELEGRAM_BOT_TOKEN
     allowed_chat_ids:
       - "123456789"
+    unsafe_allow_all: false
+  wechat:
+    enabled: false
+    allowed_chat_ids:
+      - "wechat-user-id"
+    bot_type: "3"
     unsafe_allow_all: false
 
 agents:

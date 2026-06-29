@@ -27,6 +27,16 @@ type TelegramUpdate = {
       file_size?: number;
     };
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    from?: { id: number | string };
+    message?: {
+      message_id: number;
+      chat: { id: number | string };
+      message_thread_id?: number;
+    };
+  };
 };
 
 type TelegramGetFileResponse = {
@@ -48,6 +58,7 @@ export class TelegramAdapter implements ChannelAdapter {
     private readonly allowedChatIds: string[] = [],
     private readonly mediaCache?: MediaCache,
     private readonly unsafeAllowAll = false,
+    private readonly maxInboundBytes = 20 * 1024 * 1024,
   ) {}
 
   async *receive(): AsyncIterable<InboundChatEvent> {
@@ -74,6 +85,10 @@ export class TelegramAdapter implements ChannelAdapter {
         this.updateOffset = Math.max(this.updateOffset, update.update_id + 1);
         const message = update.message;
         if (!message) {
+          const callbackEvent = await this.eventFromCallbackQuery(update.callback_query);
+          if (callbackEvent) {
+            yield callbackEvent;
+          }
           continue;
         }
 
@@ -131,6 +146,7 @@ export class TelegramAdapter implements ChannelAdapter {
           text,
           ...(target.threadId ? { message_thread_id: target.threadId } : {}),
           ...(_opts?.replyToEventId ? { reply_to_message_id: _opts.replyToEventId } : {}),
+          ...(_opts?.buttons ? { reply_markup: telegramInlineKeyboard(_opts.buttons) } : {}),
         }),
       },
       { attempts: 3, baseDelayMs: 750 },
@@ -178,7 +194,7 @@ export class TelegramAdapter implements ChannelAdapter {
     const url = new URL(`https://api.telegram.org/bot${this.botToken}/getUpdates`);
     url.searchParams.set("timeout", "30");
     url.searchParams.set("offset", String(this.updateOffset));
-    url.searchParams.set("allowed_updates", JSON.stringify(["message"]));
+    url.searchParams.set("allowed_updates", JSON.stringify(["message", "callback_query"]));
 
     const response = await fetchWithRetry(url, undefined, { attempts: 2, baseDelayMs: 1_000 });
     if (!response.ok) {
@@ -197,6 +213,56 @@ export class TelegramAdapter implements ChannelAdapter {
     return body.result ?? [];
   }
 
+  private async eventFromCallbackQuery(callback: TelegramUpdate["callback_query"]): Promise<InboundChatEvent | undefined> {
+    if (!callback?.message || !callback.data?.startsWith("hitch:")) {
+      return undefined;
+    }
+
+    const chatId = String(callback.message.chat.id);
+    if (!this.unsafeAllowAll && (this.allowedChatIds.length === 0 || !this.allowedChatIds.includes(chatId))) {
+      await this.answerCallbackQuery(callback.id, "Unauthorized chat.");
+      return undefined;
+    }
+
+    const [, action, id] = callback.data.split(":");
+    if ((action !== "approve" && action !== "deny") || !id) {
+      await this.answerCallbackQuery(callback.id, "Unsupported action.");
+      return undefined;
+    }
+
+    await this.answerCallbackQuery(callback.id);
+    return {
+      id: callback.id,
+      target: {
+        platform: "telegram",
+        chatId,
+        ...(callback.message.message_thread_id !== undefined ? { threadId: String(callback.message.message_thread_id) } : {}),
+        ...(callback.from?.id !== undefined ? { userId: String(callback.from.id) } : {}),
+      },
+      text: action === "approve" ? `!approve ${id}` : `!deny ${id}`,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+
+  private async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    const response = await fetchWithRetry(
+      `https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: callbackQueryId,
+          ...(text ? { text } : {}),
+        }),
+      },
+      { attempts: 3, baseDelayMs: 750 },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Telegram answerCallbackQuery failed: ${response.status} ${await response.text()}`);
+    }
+  }
+
   private async downloadAttachments(message: NonNullable<TelegramUpdate["message"]>): Promise<HubAttachment[]> {
     if (!this.mediaCache) {
       return [];
@@ -213,7 +279,9 @@ export class TelegramAdapter implements ChannelAdapter {
       if (!largestPhoto) {
         return attachments;
       }
+      assertWithinSizeLimit(largestPhoto.file_size, this.maxInboundBytes, "photo");
       const downloaded = await this.downloadFile(largestPhoto.file_id);
+      assertWithinSizeLimit(downloaded.data.byteLength, this.maxInboundBytes, "photo");
       const input: StoreAttachmentInput = {
         source: "telegram",
         kind: "image",
@@ -232,7 +300,9 @@ export class TelegramAdapter implements ChannelAdapter {
     }
 
     if (message.document) {
+      assertWithinSizeLimit(message.document.file_size, this.maxInboundBytes, "document");
       const downloaded = await this.downloadFile(message.document.file_id);
+      assertWithinSizeLimit(downloaded.data.byteLength, this.maxInboundBytes, "document");
       const input: StoreAttachmentInput = {
         source: "telegram",
         kind: documentKind(message.document.mime_type),
@@ -318,6 +388,42 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function assertWithinSizeLimit(size: number | undefined, maxBytes: number, label: string): void {
+  if (size !== undefined && size > maxBytes) {
+    throw new Error(`${label} is too large (${size} bytes > ${maxBytes} byte limit)`);
+  }
+}
+
+function telegramInlineKeyboard(buttons: NonNullable<SendOptions["buttons"]>): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  return {
+    inline_keyboard: [
+      buttons.map((button) => ({
+        text: button.label,
+        callback_data: callbackDataForButton(button.text),
+      })),
+    ],
+  };
+}
+
+function callbackDataForButton(text: string): string {
+  const [command, id] = text.trim().split(/\s+/, 2);
+  if (command === "!approve" && id) {
+    return `hitch:approve:${id}`;
+  }
+  if (command === "!deny" && id) {
+    return `hitch:deny:${id}`;
+  }
+  return `hitch:noop:${cryptoRandomSuffix(text)}`;
+}
+
+function cryptoRandomSuffix(text: string): string {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(16);
 }
 
 function formatError(error: unknown): string {

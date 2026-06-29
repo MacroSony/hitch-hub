@@ -1,6 +1,8 @@
 export type HubCommand =
-  | { type: "new"; agent: string; cwd?: string }
+  | { type: "new"; agent: string; cwd?: string; name?: string }
   | { type: "status" }
+  | { type: "sessions" }
+  | { type: "switch"; ref: string }
   | { type: "cwd" }
   | { type: "abort" }
   | { type: "approve"; id: string }
@@ -27,11 +29,32 @@ export function parseCommand(text: string): HubCommand {
       if (!agent) {
         throw new Error("Usage: !new <agent> [cwd]");
       }
-      const cwd = cwdParts.join(" ");
-      return cwd.length > 0 ? { type: "new", agent, cwd } : { type: "new", agent };
+      const nameMarker = cwdParts.indexOf("--name");
+      const effectiveCwdParts = nameMarker >= 0 ? cwdParts.slice(0, nameMarker) : cwdParts;
+      const nameParts = nameMarker >= 0 ? cwdParts.slice(nameMarker + 1) : [];
+      const cwd = effectiveCwdParts.join(" ");
+      const name = nameParts.join(" ").trim();
+      if (nameMarker >= 0 && name.length === 0) {
+        throw new Error("Usage: !new <agent> [cwd] --name <session-name>");
+      }
+      return {
+        type: "new",
+        agent,
+        ...(cwd.length > 0 ? { cwd } : {}),
+        ...(name.length > 0 ? { name } : {}),
+      };
     }
     case "status":
       return { type: "status" };
+    case "sessions":
+      return { type: "sessions" };
+    case "switch": {
+      const ref = args.join(" ").trim();
+      if (!ref) {
+        throw new Error("Usage: !switch <session-id-or-name>");
+      }
+      return { type: "switch", ref };
+    }
     case "cwd":
       return { type: "cwd" };
     case "abort":

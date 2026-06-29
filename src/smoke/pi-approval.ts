@@ -62,7 +62,7 @@ class ApprovalSmokeChannel implements ChannelAdapter {
       return;
     }
 
-    const approvalMatch = /^Approval requested: ([0-9a-f-]+)$/i.exec(text.trim());
+    const approvalMatch = /^Approval requested: ([0-9a-f-]+)/i.exec(text.trim());
     if (approvalMatch?.[1]) {
       this.approvalId.resolve(approvalMatch[1]);
       return;
@@ -99,10 +99,16 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     default_cwd: path.resolve("."),
     defaultCwd: path.resolve("."),
     agent_turn_timeout_ms: 20_000,
+    approval_timeout_ms: 20_000,
+    media: {
+      max_inbound_bytes: 20 * 1024 * 1024,
+      max_outbound_bytes: 50 * 1024 * 1024,
+    },
     allowedRoots: [path.resolve(".")],
     users: {
       smoke: {
         telegram_ids: [],
+        wechat_ids: [],
         allowed_roots: [path.resolve(".")],
       },
     },
@@ -112,6 +118,12 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
         enabled: false,
         bot_token_env: "TELEGRAM_BOT_TOKEN",
         allowed_chat_ids: [],
+        unsafe_allow_all: false,
+      },
+      wechat: {
+        enabled: false,
+        allowed_chat_ids: [],
+        bot_type: "3",
         unsafe_allow_all: false,
       },
     },
@@ -130,7 +142,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
   await hub.run();
 
   const expectedDecisionText = new RegExp(`^Approval [0-9a-f-]+ ${decision}\\.$`, "i");
-  if (!channel.sentTexts.some((text) => /^Approval requested: [0-9a-f-]+$/i.test(text.trim()))) {
+  if (!channel.sentTexts.some((text) => /^Approval requested: [0-9a-f-]+/i.test(text.trim()))) {
     throw new Error(`Approval ${decision} smoke did not receive an approval request.`);
   }
   if (!channel.sentTexts.some((text) => expectedDecisionText.test(text.trim()))) {

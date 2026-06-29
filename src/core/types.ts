@@ -23,6 +23,7 @@ export type HubAttachment = {
 
 export type HubSession = {
   id: string;
+  name?: string;
   platform: Platform;
   chatId: string;
   threadId?: string;
@@ -34,6 +35,7 @@ export type HubSession = {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  selectedAt?: string;
 };
 
 export type AuditEvent = {

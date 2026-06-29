@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const userSchema = z.object({
   telegram_ids: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
+  wechat_ids: z.array(z.string()).default([]),
   allowed_roots: z.array(z.string()).min(1),
 });
 
@@ -16,6 +17,13 @@ const telegramChannelSchema = z.object({
   unsafe_allow_all: z.boolean().default(false),
 });
 
+const wechatChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  allowed_chat_ids: z.array(z.string()).default([]),
+  bot_type: z.string().default("3"),
+  unsafe_allow_all: z.boolean().default(false),
+});
+
 const piAgentSchema = z.object({
   command: z.string().default("pi"),
   default_args: z.array(z.string()).default(["--mode", "rpc"]),
@@ -23,10 +31,20 @@ const piAgentSchema = z.object({
   config_scope: z.enum(["hitch", "system"]).default("hitch"),
 });
 
+const mediaSchema = z.object({
+  max_inbound_bytes: z.number().int().positive().default(20 * 1024 * 1024),
+  max_outbound_bytes: z.number().int().positive().default(50 * 1024 * 1024),
+});
+
 export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
   default_cwd: z.string().optional(),
   agent_turn_timeout_ms: z.number().int().positive().default(300_000),
+  approval_timeout_ms: z.number().int().positive().default(300_000),
+  media: mediaSchema.default({
+    max_inbound_bytes: 20 * 1024 * 1024,
+    max_outbound_bytes: 50 * 1024 * 1024,
+  }),
   users: z.record(z.string(), userSchema).default({}),
   channels: z
     .object({
@@ -37,6 +55,12 @@ export const configSchema = z.object({
         allowed_chat_ids: [],
         unsafe_allow_all: false,
       }),
+      wechat: wechatChannelSchema.default({
+        enabled: false,
+        allowed_chat_ids: [],
+        bot_type: "3",
+        unsafe_allow_all: false,
+      }),
     })
     .default({
       fake: { enabled: true },
@@ -44,6 +68,12 @@ export const configSchema = z.object({
         enabled: false,
         bot_token_env: "TELEGRAM_BOT_TOKEN",
         allowed_chat_ids: [],
+        unsafe_allow_all: false,
+      },
+      wechat: {
+        enabled: false,
+        allowed_chat_ids: [],
+        bot_type: "3",
         unsafe_allow_all: false,
       },
     }),

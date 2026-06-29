@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { loadConfig } from "./config/load-config.js";
 import { FakeChannelAdapter } from "./channels/fake.js";
 import { TelegramAdapter } from "./channels/telegram.js";
+import { WeChatAdapter } from "./channels/wechat.js";
 import { RemoteAgentHub } from "./core/hub.js";
 import { MediaCache } from "./core/media-cache.js";
 
@@ -55,28 +56,42 @@ async function main(): Promise<void> {
   const adapter =
     args.fakeMessages.length > 0
       ? new FakeChannelAdapter(args.fakeMessages)
-      : createConfiguredAdapter(config.channels.telegram, new MediaCache(config.dataDir));
+      : createConfiguredAdapter(config, new MediaCache(config.dataDir));
 
   const hub = new RemoteAgentHub(config, adapter);
   await hub.run();
 }
 
-function createConfiguredAdapter(telegram: {
-  enabled: boolean;
-  bot_token_env: string;
-  allowed_chat_ids: string[];
-  unsafe_allow_all: boolean;
-}, mediaCache: MediaCache): TelegramAdapter {
-  if (!telegram.enabled) {
-    throw new Error("No channel configured. Use --fake-message for local smoke tests or enable Telegram.");
+function createConfiguredAdapter(config: ReturnType<typeof loadConfig>, mediaCache: MediaCache): TelegramAdapter | WeChatAdapter {
+  const telegram = config.channels.telegram;
+  if (telegram.enabled) {
+    const token = process.env[telegram.bot_token_env];
+    if (!token) {
+      throw new Error(`Telegram bot token env var is not set: ${telegram.bot_token_env}`);
+    }
+
+    return new TelegramAdapter(
+      token,
+      telegram.allowed_chat_ids,
+      mediaCache,
+      telegram.unsafe_allow_all,
+      config.media.max_inbound_bytes,
+    );
   }
 
-  const token = process.env[telegram.bot_token_env];
-  if (!token) {
-    throw new Error(`Telegram bot token env var is not set: ${telegram.bot_token_env}`);
+  const wechat = config.channels.wechat;
+  if (wechat.enabled) {
+    return new WeChatAdapter({
+      dataDir: config.dataDir,
+      mediaCache,
+      allowedChatIds: wechat.allowed_chat_ids,
+      unsafeAllowAll: wechat.unsafe_allow_all,
+      botType: wechat.bot_type,
+      maxInboundBytes: config.media.max_inbound_bytes,
+    });
   }
 
-  return new TelegramAdapter(token, telegram.allowed_chat_ids, mediaCache, telegram.unsafe_allow_all);
+  throw new Error("No channel configured. Use --fake-message for local smoke tests or enable Telegram or WeChat.");
 }
 
 main().catch((error: unknown) => {

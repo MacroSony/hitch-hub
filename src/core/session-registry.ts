@@ -5,6 +5,7 @@ import type { AgentName, ChatTarget, HubSession, Platform, SessionStatus } from 
 
 type SessionRow = {
   id: string;
+  name: string | null;
   platform: Platform;
   chat_id: string;
   thread_id: string | null;
@@ -16,6 +17,7 @@ type SessionRow = {
   status: SessionStatus;
   created_at: string;
   updated_at: string;
+  selected_at: string | null;
 };
 
 type ApprovalRow = {
@@ -52,6 +54,7 @@ export type PendingApproval = {
 function rowToSession(row: SessionRow): HubSession {
   return {
     id: row.id,
+    ...(row.name ? { name: row.name } : {}),
     platform: row.platform,
     chatId: row.chat_id,
     ...(row.thread_id ? { threadId: row.thread_id } : {}),
@@ -63,6 +66,7 @@ function rowToSession(row: SessionRow): HubSession {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.selected_at ? { selectedAt: row.selected_at } : {}),
   };
 }
 
@@ -92,17 +96,18 @@ export class SessionRegistry {
     this.migrate();
   }
 
-  createSession(target: ChatTarget, agent: AgentName, cwd: string): HubSession {
+  createSession(target: ChatTarget, agent: AgentName, cwd: string, name?: string): HubSession {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     this.db
       .prepare(
         `INSERT INTO hub_sessions (
-          id, platform, chat_id, thread_id, user_id, agent, cwd, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, platform, chat_id, thread_id, user_id, agent, cwd, status, created_at, updated_at, selected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
+        name?.trim() || null,
         target.platform,
         target.chatId,
         target.threadId ?? null,
@@ -110,6 +115,7 @@ export class SessionRegistry {
         agent,
         cwd,
         "idle",
+        now,
         now,
         now,
       );
@@ -136,12 +142,59 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND status != 'stopped'
-         ORDER BY updated_at DESC
+         ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC
          LIMIT 1`,
       )
       .get(target.platform, target.chatId, target.threadId ?? null) as SessionRow | undefined;
 
     return row ? rowToSession(row) : undefined;
+  }
+
+  listForTarget(target: ChatTarget): HubSession[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM hub_sessions
+         WHERE platform = ?
+           AND chat_id = ?
+           AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND status != 'stopped'
+         ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC`,
+      )
+      .all(target.platform, target.chatId, target.threadId ?? null) as SessionRow[];
+
+    return rows.map(rowToSession);
+  }
+
+  findForTarget(target: ChatTarget, ref: string): HubSession | undefined {
+    const trimmed = ref.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM hub_sessions
+         WHERE platform = ?
+           AND chat_id = ?
+           AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND status != 'stopped'
+           AND (id = ? OR id LIKE ? OR name = ?)
+         ORDER BY updated_at DESC
+         LIMIT 2`,
+      )
+      .all(target.platform, target.chatId, target.threadId ?? null, trimmed, `${trimmed}%`, trimmed) as SessionRow[];
+
+    if (rows.length > 1) {
+      throw new Error(`Session reference is ambiguous: ${trimmed}`);
+    }
+
+    return rows[0] ? rowToSession(rows[0]) : undefined;
+  }
+
+  selectSession(id: string): void {
+    this.db
+      .prepare("UPDATE hub_sessions SET selected_at = ?, updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), new Date().toISOString(), id);
   }
 
   updateStatus(id: string, status: SessionStatus): void {
@@ -193,7 +246,7 @@ export class SessionRegistry {
     return id;
   }
 
-  updateApprovalStatus(id: string, status: "allowed" | "denied"): boolean {
+  updateApprovalStatus(id: string, status: "allowed" | "denied" | "expired"): boolean {
     const result = this.db
       .prepare("UPDATE approval_requests SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending'")
       .run(status, new Date().toISOString(), id);
@@ -204,13 +257,36 @@ export class SessionRegistry {
     const row = this.db
       .prepare("SELECT * FROM approval_requests WHERE id = ? AND status = 'pending'")
       .get(id) as ApprovalRow | undefined;
-    return row ? rowToPendingApproval(row) : undefined;
+    if (!row) {
+      return undefined;
+    }
+
+    if (row.expires_at && Date.parse(row.expires_at) <= Date.now()) {
+      this.updateApprovalStatus(id, "expired");
+      return undefined;
+    }
+
+    return rowToPendingApproval(row);
+  }
+
+  countPendingApprovalsForSession(sessionId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM approval_requests
+         WHERE session_id = ?
+           AND status = 'pending'
+           AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(sessionId, new Date().toISOString()) as { count: number } | undefined;
+    return row?.count ?? 0;
   }
 
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hub_sessions (
         id TEXT PRIMARY KEY,
+        name TEXT,
         platform TEXT NOT NULL,
         chat_id TEXT NOT NULL,
         thread_id TEXT,
@@ -221,11 +297,12 @@ export class SessionRegistry {
         process_id INTEGER,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        selected_at TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_hub_sessions_target
-        ON hub_sessions(platform, chat_id, thread_id, updated_at);
+        ON hub_sessions(platform, chat_id, thread_id, selected_at, updated_at);
 
       CREATE TABLE IF NOT EXISTS approval_requests (
         id TEXT PRIMARY KEY,
@@ -246,5 +323,15 @@ export class SessionRegistry {
       CREATE INDEX IF NOT EXISTS idx_approval_requests_session
         ON approval_requests(session_id, status, created_at);
     `);
+
+    this.addColumnIfMissing("hub_sessions", "name", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "selected_at", "TEXT");
+  }
+
+  private addColumnIfMissing(tableName: string, columnName: string, columnType: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+    if (!rows.some((row) => row.name === columnName)) {
+      this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
+    }
   }
 }

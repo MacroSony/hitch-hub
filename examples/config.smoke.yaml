@@ -1,10 +1,16 @@
 data_dir: .remote-agent-hub-smoke
 default_cwd: ..
 agent_turn_timeout_ms: 5000
+approval_timeout_ms: 20000
+
+media:
+  max_inbound_bytes: 20971520
+  max_outbound_bytes: 52428800
 
 users:
   smoke:
     telegram_ids: []
+    wechat_ids: []
     allowed_roots:
       - ..
 
@@ -15,6 +21,12 @@ channels:
     enabled: false
     bot_token_env: TELEGRAM_BOT_TOKEN
     allowed_chat_ids: []
+    unsafe_allow_all: false
+  wechat:
+    enabled: false
+    allowed_chat_ids: []
+    bot_type: "3"
+    unsafe_allow_all: false
 
 agents:
   pi:

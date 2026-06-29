@@ -19,6 +19,7 @@ export class RemoteAgentHub {
   constructor(
     private readonly config: HubConfig,
     private readonly channel: ChannelAdapter,
+    private readonly backendFactory: (config: HubConfig) => AgentBackend = (config) => new PiRpcBackend(config),
   ) {
     this.sessions = new SessionRegistry(config.dataDir);
     this.audit = new AuditLog(config.dataDir);
@@ -27,13 +28,18 @@ export class RemoteAgentHub {
   async run(): Promise<void> {
     try {
       for await (const event of this.channel.receive()) {
-        const task = this.handleEvent(event).catch((error: unknown) => {
-          process.stderr.write(`[hitch] Event handling failed: ${formatError(error)}\n`);
-        });
-        this.inFlight.add(task);
-        task.finally(() => {
-          this.inFlight.delete(task);
-        });
+        if (shouldHandleInBackground(event)) {
+          const task = this.handleEvent(event).catch((error: unknown) => {
+            process.stderr.write(`[hitch] Event handling failed: ${formatError(error)}\n`);
+          });
+          this.inFlight.add(task);
+          task.finally(() => {
+            this.inFlight.delete(task);
+          });
+          continue;
+        }
+
+        await this.handleEvent(event);
       }
     } finally {
       await Promise.allSettled(this.inFlight);
@@ -52,10 +58,16 @@ export class RemoteAgentHub {
 
       switch (command.type) {
         case "new":
-          await this.handleNew(event, command.agent, command.cwd);
+          await this.handleNew(event, command.agent, command.cwd, command.name);
           return;
         case "status":
           await this.handleStatus(event);
+          return;
+        case "sessions":
+          await this.handleSessions(event);
+          return;
+        case "switch":
+          await this.handleSwitch(event, command.ref);
           return;
         case "cwd":
           await this.handleCwd(event);
@@ -83,9 +95,17 @@ export class RemoteAgentHub {
     }
   }
 
-  private async handleNew(event: InboundChatEvent, rawAgent: string, rawCwd?: string): Promise<void> {
+  private async handleNew(event: InboundChatEvent, rawAgent: string, rawCwd?: string, name?: string): Promise<void> {
     const agent = this.parseAgent(rawAgent);
     const cwd = this.resolveRequestedCwd(rawCwd);
+    const activeSession = this.sessions.getActiveForTarget(event.target);
+    if (activeSession && isTurnBlocked(activeSession)) {
+      await this.sendChunkedText(
+        event.target,
+        `Active session ${shortId(activeSession)} is ${activeSession.status}. Use \`!status\`, \`!abort\`, or finish the current turn before creating a new session.`,
+      );
+      return;
+    }
 
     if (!isPathInsideAllowedRoots(cwd, this.config.allowedRoots)) {
       await this.audit.write({
@@ -107,17 +127,17 @@ export class RemoteAgentHub {
       return;
     }
 
-    const session = this.sessions.createSession(event.target, agent, cwd);
+    const session = this.sessions.createSession(event.target, agent, cwd, name);
     await this.audit.write({
       type: "session.created",
       sessionId: session.id,
       target: event.target,
-      details: { agent, cwd },
+      details: { agent, cwd, name },
     });
 
     await this.sendChunkedText(
       event.target,
-      `Created session ${shortId(session)}\nagent: ${session.agent}\ncwd: ${session.cwd}`,
+      `${activeSession ? `Created and switched to session ${shortId(session)}` : `Created session ${shortId(session)}`}\n${session.name ? `name: ${session.name}\n` : ""}agent: ${session.agent}\ncwd: ${session.cwd}`,
     );
   }
 
@@ -131,6 +151,43 @@ export class RemoteAgentHub {
     await this.sendChunkedText(
       event.target,
       `Session ${shortId(session)}\nagent: ${session.agent}\nstatus: ${session.status}\ncwd: ${session.cwd}`,
+    );
+  }
+
+  private async handleSessions(event: InboundChatEvent): Promise<void> {
+    const sessions = this.sessions.listForTarget(event.target);
+    if (sessions.length === 0) {
+      await this.sendChunkedText(event.target, "No sessions.");
+      return;
+    }
+
+    const active = this.sessions.getActiveForTarget(event.target);
+    const lines = sessions.map((session) => {
+      const marker = active?.id === session.id ? "*" : " ";
+      const name = session.name ? ` ${session.name}` : "";
+      return `${marker} ${shortId(session)}${name} | ${session.status} | ${session.agent} | ${session.cwd}`;
+    });
+    await this.sendChunkedText(event.target, `Sessions:\n${lines.join("\n")}`);
+  }
+
+  private async handleSwitch(event: InboundChatEvent, ref: string): Promise<void> {
+    const session = this.sessions.findForTarget(event.target, ref);
+    if (!session) {
+      await this.sendChunkedText(event.target, `No session found for ${ref}. Use \`!sessions\` to list sessions.`);
+      return;
+    }
+
+    this.sessions.selectSession(session.id);
+    const selected = this.sessions.getById(session.id) ?? session;
+    await this.audit.write({
+      type: "session.selected",
+      sessionId: session.id,
+      target: event.target,
+      details: { ref },
+    });
+    await this.sendChunkedText(
+      event.target,
+      `Switched to session ${shortId(selected)}${selected.name ? ` (${selected.name})` : ""}\nstatus: ${selected.status}\ncwd: ${selected.cwd}`,
     );
   }
 
@@ -166,10 +223,7 @@ export class RemoteAgentHub {
     }
 
     if (isTurnBlocked(session)) {
-      await this.sendChunkedText(
-        event.target,
-        blockedTurnMessage(session, "agent command"),
-      );
+      await this.sendBlockedTurn(event, session, "agent command");
       return;
     }
 
@@ -223,10 +277,7 @@ export class RemoteAgentHub {
     }
 
     if (isTurnBlocked(session)) {
-      await this.sendChunkedText(
-        event.target,
-        blockedTurnMessage(session, "message"),
-      );
+      await this.sendBlockedTurn(event, session, "message");
       return;
     }
 
@@ -316,6 +367,18 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Approval ${approvalId} ${decision}.`);
   }
 
+  private async sendBlockedTurn(event: InboundChatEvent, session: HubSession, inputKind: string): Promise<void> {
+    if (session.status === "waiting_approval" && this.sessions.countPendingApprovalsForSession(session.id) === 0) {
+      await this.sendChunkedText(
+        event.target,
+        `Session is waiting on an approval that is no longer pending. Use \`!abort\` or wait for the agent timeout before sending another ${inputKind}.`,
+      );
+      return;
+    }
+
+    await this.sendChunkedText(event.target, blockedTurnMessage(session, inputKind));
+  }
+
   private parseAgent(value: string): AgentName {
     if (value !== "pi") {
       throw new Error(`Unsupported agent for Iteration 1: ${value}`);
@@ -343,7 +406,7 @@ export class RemoteAgentHub {
       return existing;
     }
 
-    const backend = new PiRpcBackend(this.config);
+    const backend = this.backendFactory(this.config);
     this.workers.set(session.id, backend);
     return backend;
   }
@@ -457,6 +520,7 @@ export class RemoteAgentHub {
         return false;
       case "approval_request": {
         const method = piUiMethod(event.raw);
+        const expiresAt = new Date(Date.now() + this.config.approval_timeout_ms).toISOString();
         const approvalId = this.sessions.createApproval({
           sessionId: session.id,
           agent: session.agent,
@@ -466,9 +530,19 @@ export class RemoteAgentHub {
           preview: JSON.stringify(event.raw).slice(0, 1000),
           risk: "medium",
           raw: event.raw,
+          expiresAt,
         });
         this.sessions.updateStatus(session.id, "waiting_approval");
-        await this.sendChunkedText(target, `Approval requested: ${approvalId}`);
+        await this.safeSendText(
+          target,
+          `Approval requested: ${approvalId}\nexpires: ${expiresAt}\n\nFallback commands:\n!approve ${approvalId}\n!deny ${approvalId}`,
+          {
+            buttons: [
+              { label: "Approve", text: `!approve ${approvalId}` },
+              { label: "Deny", text: `!deny ${approvalId}` },
+            ],
+          },
+        );
         return false;
       }
       case "status":
@@ -519,8 +593,28 @@ export class RemoteAgentHub {
     const artifacts = extractLocalArtifacts(text, [this.config.dataDir, ...this.config.allowedRoots]).slice(0, 5);
     for (const artifact of artifacts) {
       try {
+        const size = statSync(artifact.path).size;
+        if (size > this.config.media.max_outbound_bytes) {
+          await this.audit.write({
+            type: "artifact.delivery",
+            target,
+            details: { path: artifact.path, kind: artifact.kind, status: "skipped", reason: "too_large", size },
+          });
+          continue;
+        }
+
         await this.channel.sendArtifact(target, artifact);
+        await this.audit.write({
+          type: "artifact.delivery",
+          target,
+          details: { path: artifact.path, kind: artifact.kind, status: "sent", size },
+        });
       } catch (error) {
+        await this.audit.write({
+          type: "artifact.delivery",
+          target,
+          details: { path: artifact.path, kind: artifact.kind, status: "failed", error: formatError(error) },
+        });
         process.stderr.write(`[hitch] Artifact send failed for ${artifact.path}: ${formatError(error)}\n`);
       }
     }
@@ -545,12 +639,35 @@ export class RemoteAgentHub {
       return event.target.userId !== undefined && telegramUserIds.includes(event.target.userId);
     }
 
+    if (event.target.platform === "wechat") {
+      if (this.config.channels.wechat.unsafe_allow_all) {
+        return true;
+      }
+
+      const allowedChatIds = this.config.channels.wechat.allowed_chat_ids;
+      if (allowedChatIds.length === 0 || !allowedChatIds.includes(event.target.chatId)) {
+        return false;
+      }
+
+      const wechatUserIds = Object.values(this.config.users).flatMap((user) => user.wechat_ids);
+      return event.target.userId !== undefined && wechatUserIds.includes(event.target.userId);
+    }
+
     return false;
   }
 }
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function shouldHandleInBackground(event: InboundChatEvent): boolean {
+  try {
+    const command = parseCommand(event.text);
+    return command.type === "prompt" || command.type === "agent_command";
+  } catch {
+    return false;
+  }
 }
 
 function targetMatchesSession(target: ChatTarget, session: HubSession): boolean {

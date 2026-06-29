@@ -9,6 +9,7 @@ It lets you connect chat apps such as Telegram to local coding agents such as Pi
 Hitch is early. The current implementation focuses on the first useful control path:
 
 - Telegram long polling adapter for text, captions, photos, and documents
+- WeChat iLink adapter for QR login, text, and media
 - Local fake adapter for repeatable testing
 - Pi RPC backend
 - SQLite session and approval registry
@@ -19,7 +20,9 @@ Hitch is early. The current implementation focuses on the first useful control p
 - SHA-256 inbound media cache for Telegram photos/documents
 - Cached media references passed to Pi prompts as local file paths
 - Pi RPC model inspection and switching through agent-native `/model`
+- Explicit session listing and switching with optional names
 - Best-effort outbound Telegram upload for local image/file paths mentioned by Pi
+- Best-effort outbound WeChat upload for local image/file paths mentioned by Pi
 - Basic text chunking and timeout handling
 
 See `implementation_steps.md` for the current iteration checklist and checkpoint test results.
@@ -59,10 +62,13 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.allowed_roots`: directories Hitch may launch workers in
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
+- `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
+- `users.*.wechat_ids`: WeChat users allowed to control the hub
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
+When WeChat is enabled, `allowed_chat_ids` and at least one `users.*.wechat_ids` entry are required. For local-only experiments, `channels.wechat.unsafe_allow_all: true` allows every WeChat sender explicitly.
 
 ## Usage
 
@@ -79,6 +85,8 @@ Then send commands to the Telegram bot:
 !new pi AgentHub
 !new pi C:\path\to\repo
 !status
+!sessions
+!switch <session-id-or-name>
 !cwd
 !abort
 !approve <approval-id>
@@ -101,21 +109,30 @@ Path behavior:
 - `!new pi` uses `default_cwd`
 - `!new pi test` resolves to `default_cwd\test`
 - `!new pi C:\path\to\repo` uses the absolute path directly
+- `!new pi --name api-fix` names the session and switches to it
 - cwd values outside allowed roots are rejected
 
 Approval behavior:
 
 - Pi itself does not provide a built-in per-tool approval gate.
 - Pi extensions can ask for confirmation through RPC extension UI requests.
-- Hitch persists those requests, renders an approval ID, and sends the matching `extension_ui_response` back to Pi when `!approve <id>` or `!deny <id>` is received.
+- Hitch persists those requests with an expiry, renders an approval ID, and sends the matching `extension_ui_response` back to Pi when `!approve <id>` or `!deny <id>` is received.
+- Telegram renders approval buttons when possible; text commands remain the fallback.
 
 Media behavior:
 
-- Telegram photos and documents from allowed chats are cached under `data_dir/media/inbound`
+- Telegram photos/documents and WeChat media from allowed chats are cached under `data_dir/media/inbound`
 - Cached files are deduplicated by SHA-256
-- Cached media is passed to Pi as local file path references appended to the prompt
-- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five artifacts back to Telegram
-- Native Pi image-content messages are not implemented yet; images currently reach Pi as local path references
+- Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
+- Inbound and outbound media byte limits are configured under `media`
+- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five artifacts back to Telegram or WeChat
+- Outbound artifact delivery attempts are recorded in the audit log
+
+WeChat behavior:
+
+- First run prints a QR code URL to stderr; scan it with WeChat to connect.
+- Credentials, long-poll cursor, and context tokens are stored under `data_dir/wechat`.
+- Replies require a context token from an inbound WeChat message, so proactive sends before a user messages the bot may fail.
 
 ## Local Testing
 
@@ -153,6 +170,7 @@ Run the media-cache smoke test:
 
 ```powershell
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:media-cache
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:media-flow
 ```
 
 Check Telegram credentials without printing the token:

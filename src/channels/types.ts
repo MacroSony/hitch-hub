@@ -10,6 +10,10 @@ export type InboundChatEvent = {
 
 export type SendOptions = {
   replyToEventId?: string;
+  buttons?: Array<{
+    label: string;
+    text: string;
+  }>;
 };
 
 export type OutboundArtifact = {
