@@ -112,6 +112,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
         enabled: false,
         bot_token_env: "TELEGRAM_BOT_TOKEN",
         allowed_chat_ids: [],
+        unsafe_allow_all: false,
       },
     },
     agents: {

@@ -47,6 +47,7 @@ export class TelegramAdapter implements ChannelAdapter {
     private readonly botToken: string,
     private readonly allowedChatIds: string[] = [],
     private readonly mediaCache?: MediaCache,
+    private readonly unsafeAllowAll = false,
   ) {}
 
   async *receive(): AsyncIterable<InboundChatEvent> {
@@ -77,7 +78,7 @@ export class TelegramAdapter implements ChannelAdapter {
         }
 
         const chatId = String(message.chat.id);
-        if (this.allowedChatIds.length > 0 && !this.allowedChatIds.includes(chatId)) {
+        if (!this.unsafeAllowAll && (this.allowedChatIds.length === 0 || !this.allowedChatIds.includes(chatId))) {
           continue;
         }
 

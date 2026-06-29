@@ -165,8 +165,11 @@ export class RemoteAgentHub {
       return;
     }
 
-    if (session.status === "running") {
-      await this.sendChunkedText(event.target, "Session is running. Wait for Pi to finish or use `!abort` before sending an agent command.");
+    if (isTurnBlocked(session)) {
+      await this.sendChunkedText(
+        event.target,
+        blockedTurnMessage(session, "agent command"),
+      );
       return;
     }
 
@@ -219,10 +222,10 @@ export class RemoteAgentHub {
       return;
     }
 
-    if (session.status === "running") {
+    if (isTurnBlocked(session)) {
       await this.sendChunkedText(
         event.target,
-        `Session is still running since ${session.updatedAt}. Wait for Pi to finish, use \`!status\`, or use \`!abort\` before sending another turn.`,
+        blockedTurnMessage(session, "message"),
       );
       return;
     }
@@ -529,13 +532,17 @@ export class RemoteAgentHub {
     }
 
     if (event.target.platform === "telegram") {
+      if (this.config.channels.telegram.unsafe_allow_all) {
+        return true;
+      }
+
       const allowedChatIds = this.config.channels.telegram.allowed_chat_ids;
-      if (allowedChatIds.length > 0 && !allowedChatIds.includes(event.target.chatId)) {
+      if (allowedChatIds.length === 0 || !allowedChatIds.includes(event.target.chatId)) {
         return false;
       }
 
       const telegramUserIds = Object.values(this.config.users).flatMap((user) => user.telegram_ids);
-      return telegramUserIds.length === 0 || (event.target.userId !== undefined && telegramUserIds.includes(event.target.userId));
+      return event.target.userId !== undefined && telegramUserIds.includes(event.target.userId);
     }
 
     return false;
@@ -550,8 +557,21 @@ function targetMatchesSession(target: ChatTarget, session: HubSession): boolean 
   return (
     target.platform === session.platform &&
     target.chatId === session.chatId &&
-    (target.threadId ?? "") === (session.threadId ?? "")
+    (target.threadId ?? "") === (session.threadId ?? "") &&
+    (session.userId === undefined || target.userId === session.userId)
   );
+}
+
+function isTurnBlocked(session: HubSession): boolean {
+  return session.status === "running" || session.status === "waiting_approval";
+}
+
+function blockedTurnMessage(session: HubSession, inputKind: string): string {
+  if (session.status === "waiting_approval") {
+    return `Session is waiting for approval since ${session.updatedAt}. Use \`!approve <id>\`, \`!deny <id>\`, \`!status\`, or \`!abort\` before sending another ${inputKind}.`;
+  }
+
+  return `Session is still running since ${session.updatedAt}. Wait for Pi to finish, use \`!status\`, or use \`!abort\` before sending another ${inputKind}.`;
 }
 
 function piUiMethod(raw: unknown): string | undefined {

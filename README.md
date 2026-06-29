@@ -23,7 +23,6 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Basic text chunking and timeout handling
 
 See `implementation_steps.md` for the current iteration checklist and checkpoint test results.
-See `CURRENT_STATE.md` for the current implemented feature and usage inventory.
 
 ## Requirements
 
@@ -59,9 +58,11 @@ Edit `examples/config.example.yaml` for your machine:
 - `default_cwd`: where `!new pi` starts by default
 - `users.*.allowed_roots`: directories Hitch may launch workers in
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
+- `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
+When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
 
 ## Usage
 

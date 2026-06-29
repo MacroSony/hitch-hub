@@ -4,7 +4,8 @@ agent_turn_timeout_ms: 60000
 
 users:
   local:
-    telegram_ids: []
+    telegram_ids:
+      - "123456789"
     allowed_roots:
       - ..
 
@@ -12,9 +13,11 @@ channels:
   fake:
     enabled: true
   telegram:
-    enabled: true
+    enabled: false
     bot_token_env: TELEGRAM_BOT_TOKEN
-    allowed_chat_ids: []
+    allowed_chat_ids:
+      - "123456789"
+    unsafe_allow_all: false
 
 agents:
   pi:

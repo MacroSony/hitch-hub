@@ -65,6 +65,7 @@ function createConfiguredAdapter(telegram: {
   enabled: boolean;
   bot_token_env: string;
   allowed_chat_ids: string[];
+  unsafe_allow_all: boolean;
 }, mediaCache: MediaCache): TelegramAdapter {
   if (!telegram.enabled) {
     throw new Error("No channel configured. Use --fake-message for local smoke tests or enable Telegram.");
@@ -75,7 +76,7 @@ function createConfiguredAdapter(telegram: {
     throw new Error(`Telegram bot token env var is not set: ${telegram.bot_token_env}`);
   }
 
-  return new TelegramAdapter(token, telegram.allowed_chat_ids, mediaCache);
+  return new TelegramAdapter(token, telegram.allowed_chat_ids, mediaCache, telegram.unsafe_allow_all);
 }
 
 main().catch((error: unknown) => {

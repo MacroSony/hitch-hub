@@ -13,6 +13,7 @@ const telegramChannelSchema = z.object({
   enabled: z.boolean().default(false),
   bot_token_env: z.string().default("TELEGRAM_BOT_TOKEN"),
   allowed_chat_ids: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
+  unsafe_allow_all: z.boolean().default(false),
 });
 
 const piAgentSchema = z.object({
@@ -34,6 +35,7 @@ export const configSchema = z.object({
         enabled: false,
         bot_token_env: "TELEGRAM_BOT_TOKEN",
         allowed_chat_ids: [],
+        unsafe_allow_all: false,
       }),
     })
     .default({
@@ -42,6 +44,7 @@ export const configSchema = z.object({
         enabled: false,
         bot_token_env: "TELEGRAM_BOT_TOKEN",
         allowed_chat_ids: [],
+        unsafe_allow_all: false,
       },
     }),
   agents: z

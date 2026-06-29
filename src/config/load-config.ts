@@ -29,6 +29,7 @@ export function loadConfig(configPath: string): HubConfig {
   const raw = readFileSync(resolvedConfigPath, "utf8");
   const parsed = YAML.parse(raw) as HubConfigInput;
   const config = configSchema.parse(parsed);
+  assertLiveChannelAuthorization(config);
   const configDir = path.dirname(resolvedConfigPath);
   const dataDir = resolvePath(config.data_dir, configDir);
 
@@ -43,4 +44,19 @@ export function loadConfig(configPath: string): HubConfig {
     ...(defaultCwd ? { defaultCwd } : {}),
     allowedRoots,
   };
+}
+
+function assertLiveChannelAuthorization(config: HubConfigInput): void {
+  const telegram = config.channels?.telegram;
+  if (!telegram?.enabled || telegram.unsafe_allow_all) {
+    return;
+  }
+
+  const allowedChatIds = telegram.allowed_chat_ids ?? [];
+  const allowedUserIds = Object.values(config.users ?? {}).flatMap((user) => user.telegram_ids ?? []);
+  if (allowedChatIds.length === 0 || allowedUserIds.length === 0) {
+    throw new Error(
+      "Telegram is enabled but not explicitly locked down. Set channels.telegram.allowed_chat_ids and at least one users.*.telegram_ids value, or set channels.telegram.unsafe_allow_all: true for local testing.",
+    );
+  }
 }
