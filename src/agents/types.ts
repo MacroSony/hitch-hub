@@ -10,9 +10,29 @@ export type AgentCommandInput = {
   attachments?: HubAttachment[];
 };
 
+export type AgentInteractionOption = {
+  label: string;
+  description?: string;
+  value: unknown;
+};
+
+export type AgentInteraction = {
+  kind: string;
+  title: string;
+  options: AgentInteractionOption[];
+  pageSize?: number;
+};
+
+export type AgentSelectionInput = {
+  kind: string;
+  label: string;
+  value: unknown;
+};
+
 export type AgentCommandResult = {
   text?: string;
   consumesEvents?: boolean;
+  interaction?: AgentInteraction;
 };
 
 export type AgentEvent =
@@ -33,6 +53,7 @@ export interface AgentBackend {
   start(session: HubSession): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
   executeCommand?(input: AgentCommandInput): Promise<AgentCommandResult>;
+  executeSelection?(input: AgentSelectionInput): Promise<AgentCommandResult>;
   respondToApproval?(raw: unknown, decision: "allowed" | "denied"): Promise<void>;
   events(): AsyncIterable<AgentEvent>;
   isAlive(): boolean;

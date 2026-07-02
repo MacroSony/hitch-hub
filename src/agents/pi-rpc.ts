@@ -5,7 +5,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
-import type { AgentBackend, AgentCommandInput, AgentCommandResult, AgentEvent, AgentInput, AgentModelInfo } from "./types.js";
+import type {
+  AgentBackend,
+  AgentCommandInput,
+  AgentCommandResult,
+  AgentEvent,
+  AgentInput,
+  AgentInteraction,
+  AgentModelInfo,
+  AgentSelectionInput,
+} from "./types.js";
 
 type SpawnSpec = {
   command: string;
@@ -92,7 +101,7 @@ export class PiRpcBackend implements AgentBackend {
     }
 
     const piConfig = this.config.agents.pi;
-    const spawnSpec = resolveSpawnSpec(piConfig.command, piConfig.default_args);
+    const spawnSpec = resolveSpawnSpec(piConfig.command, piArgsForSession(piConfig.default_args, session));
     const env = { ...process.env };
 
     if (piConfig.config_scope === "hitch") {
@@ -158,7 +167,11 @@ export class PiRpcBackend implements AgentBackend {
       case "model": {
         if (parsed.args.length === 0) {
           const state = await this.getState();
-          return { text: `Current model: ${formatModel(state.model)}` };
+          const models = await this.getAvailableModels();
+          return {
+            text: `Current model: ${formatModel(state.model)}`,
+            ...(models.length > 0 ? { interaction: modelSelectionInteraction(models, "Select model") } : {}),
+          };
         }
         const selected = await this.setModel(parsed.args.join(" "));
         return { text: `Model switched to ${formatModel(selected)}.` };
@@ -167,9 +180,10 @@ export class PiRpcBackend implements AgentBackend {
         const filter = parsed.args.join(" ").toLowerCase();
         const models = (await this.getAvailableModels())
           .filter((model) => filter.length === 0 || formatModel(model).toLowerCase().includes(filter))
-          .slice(0, 40);
+          .slice(0, 100);
         return {
-          text: models.length > 0 ? `Available models:\n${models.map((model) => `- ${formatModel(model)}`).join("\n")}` : "No models matched.",
+          ...(models.length > 0 ? { interaction: modelSelectionInteraction(models, filter ? `Select model matching "${filter}"` : "Select model") } : {}),
+          ...(models.length === 0 ? { text: "No models matched." } : {}),
         };
       }
       default:
@@ -181,6 +195,18 @@ export class PiRpcBackend implements AgentBackend {
 
   async respondToApproval(raw: unknown, decision: "allowed" | "denied"): Promise<void> {
     this.writeCommand(piApprovalResponse(raw, decision));
+  }
+
+  async executeSelection(input: AgentSelectionInput): Promise<AgentCommandResult> {
+    if (input.kind !== "pi.model.select") {
+      throw new Error(`Unsupported Pi selection kind: ${input.kind}`);
+    }
+    if (!isRecord(input.value) || typeof input.value.provider !== "string" || typeof input.value.modelId !== "string") {
+      throw new Error("Invalid Pi model selection payload.");
+    }
+
+    const selected = await this.setModel(`${input.value.provider}/${input.value.modelId}`);
+    return { text: `Model switched to ${formatModel(selected)}.` };
   }
 
   private async getState(): Promise<{ model?: AgentModelInfo }> {
@@ -345,6 +371,18 @@ function parseSlashCommand(raw: string): { name: string; args: string[] } {
   };
 }
 
+function piArgsForSession(args: string[], session: HubSession): string[] {
+  if (hasExplicitSessionArg(args)) {
+    return args;
+  }
+  return [...args, "--session-id", session.backendSessionId ?? session.id];
+}
+
+function hasExplicitSessionArg(args: string[]): boolean {
+  const flags = new Set(["--no-session", "--continue", "-c", "--resume", "-r", "--session", "--session-id", "--fork"]);
+  return args.some((arg) => flags.has(arg) || arg.startsWith("--session=") || arg.startsWith("--session-id=") || arg.startsWith("--fork="));
+}
+
 function formatModel(model: AgentModelInfo | undefined): string {
   if (!model) {
     return "none";
@@ -353,6 +391,24 @@ function formatModel(model: AgentModelInfo | undefined): string {
     return `${model.provider}/${model.id}`;
   }
   return model.name ?? model.id ?? model.provider ?? "unknown";
+}
+
+function modelSelectionInteraction(models: AgentModelInfo[], title: string): AgentInteraction {
+  return {
+    kind: "pi.model.select",
+    title,
+    options: models
+      .filter((model) => model.provider && model.id)
+      .map((model) => ({
+        label: formatModel(model),
+        ...(model.name && model.name !== model.id ? { description: model.name } : {}),
+        value: {
+          provider: model.provider,
+          modelId: model.id,
+        },
+      })),
+    pageSize: 9,
+  };
 }
 
 function mapPiEvent(value: unknown): AgentEvent[] {

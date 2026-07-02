@@ -36,6 +36,24 @@ type ApprovalRow = {
   updated_at: string;
 };
 
+type PendingInteractionRow = {
+  id: string;
+  platform: Platform;
+  chat_id: string;
+  thread_id: string | null;
+  user_id: string | null;
+  session_id: string | null;
+  owner: "hub" | "agent";
+  kind: string;
+  title: string;
+  options_json: string;
+  page_index: number;
+  page_size: number;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PendingApproval = {
   id: string;
   sessionId: string;
@@ -47,6 +65,27 @@ export type PendingApproval = {
   risk: string;
   raw: unknown;
   expiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PendingInteractionOption = {
+  label: string;
+  description?: string;
+  value: unknown;
+};
+
+export type PendingInteraction = {
+  id: string;
+  target: ChatTarget;
+  sessionId?: string;
+  owner: "hub" | "agent";
+  kind: string;
+  title: string;
+  options: PendingInteractionOption[];
+  pageIndex: number;
+  pageSize: number;
+  expiresAt: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -87,6 +126,28 @@ function rowToPendingApproval(row: ApprovalRow): PendingApproval {
   };
 }
 
+function rowToPendingInteraction(row: PendingInteractionRow): PendingInteraction {
+  return {
+    id: row.id,
+    target: {
+      platform: row.platform,
+      chatId: row.chat_id,
+      ...(row.thread_id ? { threadId: row.thread_id } : {}),
+      ...(row.user_id ? { userId: row.user_id } : {}),
+    },
+    ...(row.session_id ? { sessionId: row.session_id } : {}),
+    owner: row.owner,
+    kind: row.kind,
+    title: row.title,
+    options: JSON.parse(row.options_json) as PendingInteractionOption[],
+    pageIndex: row.page_index,
+    pageSize: row.page_size,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export class SessionRegistry {
   private readonly db: DatabaseSync;
 
@@ -102,8 +163,8 @@ export class SessionRegistry {
     this.db
       .prepare(
         `INSERT INTO hub_sessions (
-          id, name, platform, chat_id, thread_id, user_id, agent, cwd, status, created_at, updated_at, selected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, platform, chat_id, thread_id, user_id, agent, cwd, backend_session_id, status, created_at, updated_at, selected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -114,6 +175,7 @@ export class SessionRegistry {
         target.userId ?? null,
         agent,
         cwd,
+        id,
         "idle",
         now,
         now,
@@ -209,6 +271,16 @@ export class SessionRegistry {
       .run(processId ?? null, new Date().toISOString(), id);
   }
 
+  recoverInterruptedSessions(): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE hub_sessions SET status = 'idle', process_id = NULL, updated_at = ? WHERE status IN ('running', 'waiting_approval')")
+      .run(now);
+    this.db
+      .prepare("UPDATE approval_requests SET status = 'expired', updated_at = ? WHERE status = 'pending'")
+      .run(now);
+  }
+
   createApproval(input: {
     sessionId: string;
     agent: AgentName;
@@ -282,6 +354,106 @@ export class SessionRegistry {
     return row?.count ?? 0;
   }
 
+  createPendingInteraction(
+    target: ChatTarget,
+    input: {
+      owner: "hub" | "agent";
+      kind: string;
+      title: string;
+      options: PendingInteractionOption[];
+      sessionId?: string;
+      pageSize?: number;
+      expiresAt: string;
+    },
+  ): PendingInteraction {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    this.deletePendingInteractionForTarget(target);
+    this.db
+      .prepare(
+        `INSERT INTO pending_interactions (
+          id, platform, chat_id, thread_id, user_id, session_id, owner, kind, title, options_json,
+          page_index, page_size, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        target.platform,
+        target.chatId,
+        target.threadId ?? null,
+        target.userId ?? null,
+        input.sessionId ?? null,
+        input.owner,
+        input.kind,
+        input.title,
+        JSON.stringify(input.options),
+        0,
+        Math.max(1, Math.min(input.pageSize ?? 9, 9)),
+        input.expiresAt,
+        now,
+        now,
+      );
+
+    const interaction = this.getPendingInteractionById(id);
+    if (!interaction) {
+      throw new Error(`Pending interaction was not persisted: ${id}`);
+    }
+    return interaction;
+  }
+
+  getPendingInteractionForTarget(target: ChatTarget): PendingInteraction | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM pending_interactions
+         WHERE platform = ?
+           AND chat_id = ?
+           AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND COALESCE(user_id, '') = COALESCE(?, '')
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .get(target.platform, target.chatId, target.threadId ?? null, target.userId ?? null) as PendingInteractionRow | undefined;
+    return row ? this.activeInteractionFromRow(row) : undefined;
+  }
+
+  updatePendingInteractionPage(id: string, pageIndex: number): PendingInteraction | undefined {
+    this.db
+      .prepare("UPDATE pending_interactions SET page_index = ?, updated_at = ? WHERE id = ?")
+      .run(pageIndex, new Date().toISOString(), id);
+    return this.getPendingInteractionById(id);
+  }
+
+  deletePendingInteraction(id: string): void {
+    this.db.prepare("DELETE FROM pending_interactions WHERE id = ?").run(id);
+  }
+
+  private deletePendingInteractionForTarget(target: ChatTarget): void {
+    this.db
+      .prepare(
+        `DELETE FROM pending_interactions
+         WHERE platform = ?
+           AND chat_id = ?
+           AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND COALESCE(user_id, '') = COALESCE(?, '')`,
+      )
+      .run(target.platform, target.chatId, target.threadId ?? null, target.userId ?? null);
+  }
+
+  private getPendingInteractionById(id: string): PendingInteraction | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM pending_interactions WHERE id = ?")
+      .get(id) as PendingInteractionRow | undefined;
+    return row ? this.activeInteractionFromRow(row) : undefined;
+  }
+
+  private activeInteractionFromRow(row: PendingInteractionRow): PendingInteraction | undefined {
+    if (Date.parse(row.expires_at) <= Date.now()) {
+      this.deletePendingInteraction(row.id);
+      return undefined;
+    }
+    return rowToPendingInteraction(row);
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hub_sessions (
@@ -322,6 +494,27 @@ export class SessionRegistry {
 
       CREATE INDEX IF NOT EXISTS idx_approval_requests_session
         ON approval_requests(session_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS pending_interactions (
+        id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        thread_id TEXT,
+        user_id TEXT,
+        session_id TEXT,
+        owner TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        options_json TEXT NOT NULL,
+        page_index INTEGER NOT NULL,
+        page_size INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pending_interactions_target
+        ON pending_interactions(platform, chat_id, thread_id, user_id, updated_at);
     `);
 
     this.addColumnIfMissing("hub_sessions", "name", "TEXT");

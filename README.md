@@ -105,6 +105,13 @@ Agent-native slash commands are routed to the active backend:
 
 Unknown `!` commands are rejected by Hitch instead of being forwarded to Pi. Slash commands are treated as agent-native commands. For Pi, Hitch maps `/model` and `/models` to typed Pi RPC calls; other slash commands are forwarded through Pi's command/prompt path. `!model` and `!models` remain compatibility aliases for `/model` and `/models`.
 
+Interactive selection behavior:
+
+- `!sessions` renders a numbered session picker; reply with a number to switch sessions.
+- Pi `/model` and `/models [filter]` render a numbered model picker when model choices are available; reply with a number to switch models.
+- `0` advances to the next page when a picker has more than one page.
+- Numeric replies are treated as selections only while a pending picker exists for the same chat/thread/user.
+
 Path behavior:
 
 - `!new pi` uses `default_cwd`
@@ -180,6 +187,12 @@ Run the media-cache smoke test:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:media-flow
 ```
 
+Run the interactive-selection smoke test:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:interaction-flow
+```
+
 Check Telegram credentials without printing the token:
 
 ```powershell
@@ -202,6 +215,7 @@ Pi config behavior:
 - `config_scope: system` starts Pi like your terminal Pi and leaves `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and `PI_OFFLINE` untouched.
 - `config_scope: hitch` stores Pi config/session state under `data_dir/pi/...` and defaults `PI_OFFLINE=1` unless already set.
 - Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
+- Hitch starts Pi with a stable `--session-id` based on the Hitch session unless `agents.pi.default_args` already includes an explicit Pi session mode such as `--no-session`, `--session`, `--session-id`, `--continue`, `--resume`, or `--fork`.
 
 ## Roadmap
 

@@ -9,6 +9,7 @@
     "smoke:fake": "node --use-env-proxy --import tsx src/main.ts --config examples/config.smoke.yaml --fake-message \"!status\"",
     "smoke:media-cache": "node --use-env-proxy --import tsx src/smoke/media-cache.ts --config examples/config.smoke.yaml",
     "smoke:media-flow": "node --use-env-proxy --import tsx src/smoke/media-flow.ts",
+    "smoke:interaction-flow": "node --use-env-proxy --import tsx src/smoke/interaction-flow.ts",
     "smoke:pi-rpc": "node --use-env-proxy --import tsx src/smoke/pi-rpc-state.ts --config examples/config.smoke.yaml",
     "smoke:pi-approval": "node --use-env-proxy --import tsx src/smoke/pi-approval.ts",
     "smoke:telegram-getme": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",

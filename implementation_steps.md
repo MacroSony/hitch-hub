@@ -390,3 +390,25 @@ Test results:
 - `npm run smoke:media-flow`: passed; verifies both summary and full tool-output delivery modes.
 - `npm run smoke:pi-rpc`: passed.
 - `npm run smoke:pi-approval`: passed; approval notifications render as summarized tool results by default.
+
+### Checkpoint 12: Interactive Selection and Session Reconnect Foundation
+
+Committed: this commit
+
+Changes:
+
+- Added a persisted pending-interaction table for numbered menus scoped by chat/thread/user.
+- Added generic agent interaction types so backends can return serializable choices and later handle the selected payload through `executeSelection()`.
+- Changed `!sessions` to render a numbered session picker.
+- Changed Pi `/model` and `/models [filter]` to render numbered model pickers when model choices are available.
+- Added numeric reply handling with `0` as next-page navigation.
+- Added stable Pi `--session-id` startup behavior based on the Hitch session ID unless the Pi args already specify a session mode.
+- Added startup recovery that marks interrupted running/waiting sessions idle and expires stale approvals.
+- Added `smoke:interaction-flow` to verify both Hitch-owned and agent-owned selection flows.
+
+Test results:
+
+- Direct Pi RPC probe: `get_available_models` returned structured model choices, `set_model` succeeded, and `get_state` reflected the selected model.
+- `npm run typecheck`: passed.
+- `npm run smoke:interaction-flow`: passed.
+- `npm run dev -- --config examples/config.example.yaml --fake-message "!new pi --name model-select-smoke" --fake-message "/models deepseek" --fake-message "1"`: passed; rendered a numbered Pi model menu and switched to `deepseek/deepseek-v4-flash`.

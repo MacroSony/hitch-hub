@@ -4,11 +4,13 @@ import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
-import type { AgentBackend, AgentEvent } from "../agents/types.js";
+import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
-import { SessionRegistry } from "./session-registry.js";
+import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
+
+const INTERACTION_TTL_MS = 5 * 60 * 1000;
 
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
@@ -22,6 +24,7 @@ export class RemoteAgentHub {
     private readonly backendFactory: (config: HubConfig) => AgentBackend = (config) => new PiRpcBackend(config),
   ) {
     this.sessions = new SessionRegistry(config.dataDir);
+    this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
   }
 
@@ -51,6 +54,10 @@ export class RemoteAgentHub {
     try {
       if (!this.isAuthorizedTarget(event)) {
         await this.channel.sendText(event.target, "Unauthorized chat/user.");
+        return;
+      }
+
+      if (await this.handlePendingInteractionSelection(event)) {
         return;
       }
 
@@ -162,12 +169,17 @@ export class RemoteAgentHub {
     }
 
     const active = this.sessions.getActiveForTarget(event.target);
-    const lines = sessions.map((session) => {
-      const marker = active?.id === session.id ? "*" : " ";
-      const name = session.name ? ` ${session.name}` : "";
-      return `${marker} ${shortId(session)}${name} | ${session.status} | ${session.agent} | ${session.cwd}`;
+    const options = sessions.map((session) => ({
+      label: session.name ? `${session.name} (${shortId(session)})` : shortId(session),
+      description: `${active?.id === session.id ? "active | " : ""}${session.status} | ${session.agent} | ${session.cwd}`,
+      value: { sessionId: session.id },
+    }));
+    await this.createAndSendInteraction(event.target, {
+      owner: "hub",
+      kind: "hub.session.switch",
+      title: "Select session",
+      options,
     });
-    await this.sendChunkedText(event.target, `Sessions:\n${lines.join("\n")}`);
   }
 
   private async handleSwitch(event: InboundChatEvent, ref: string): Promise<void> {
@@ -246,13 +258,7 @@ export class RemoteAgentHub {
 
       const input = event.attachments ? { raw, attachments: event.attachments } : { raw };
       const result = await backend.executeCommand(input);
-      if (result.text) {
-        await this.sendChunkedText(event.target, result.text);
-      }
-      if (result.consumesEvents) {
-        this.sessions.updateStatus(session.id, "running");
-        await this.consumeAgentEvents(session, backend);
-      }
+      await this.handleAgentCommandResult(event.target, session, backend, result);
     } catch (error) {
       this.updateStatusUnlessStopped(session.id, "error");
       await this.audit.write({
@@ -365,6 +371,170 @@ export class RemoteAgentHub {
     });
 
     await this.sendChunkedText(event.target, `Approval ${approvalId} ${decision}.`);
+  }
+
+  private async handlePendingInteractionSelection(event: InboundChatEvent): Promise<boolean> {
+    const selection = selectionNumberFromText(event.text);
+    if (selection === undefined) {
+      return false;
+    }
+
+    const interaction = this.sessions.getPendingInteractionForTarget(event.target);
+    if (!interaction) {
+      return false;
+    }
+
+    const page = interactionPage(interaction);
+    const pageCount = Math.max(1, Math.ceil(interaction.options.length / interaction.pageSize));
+    if (selection === 0) {
+      const updated = this.sessions.updatePendingInteractionPage(interaction.id, (interaction.pageIndex + 1) % pageCount);
+      await this.sendInteractionMenu(event.target, updated ?? interaction);
+      return true;
+    }
+
+    const option = page[selection - 1];
+    if (!option) {
+      await this.sendChunkedText(event.target, `No option ${selection} for this menu.`);
+      await this.sendInteractionMenu(event.target, interaction);
+      return true;
+    }
+
+    this.sessions.deletePendingInteraction(interaction.id);
+    await this.executeInteractionSelection(event.target, interaction, option);
+    return true;
+  }
+
+  private async executeInteractionSelection(
+    target: ChatTarget,
+    interaction: PendingInteraction,
+    option: PendingInteractionOption,
+  ): Promise<void> {
+    if (interaction.owner === "hub") {
+      await this.executeHubSelection(target, interaction, option);
+      return;
+    }
+
+    const session = interaction.sessionId ? this.sessions.getById(interaction.sessionId) : this.sessions.getActiveForTarget(target);
+    if (!session || !targetMatchesSession(target, session)) {
+      await this.sendChunkedText(target, "The selected session is no longer available.");
+      return;
+    }
+    if (isTurnBlocked(session)) {
+      await this.sendChunkedText(target, blockedTurnMessage(session, "selection"));
+      return;
+    }
+
+    const backend = this.getWorker(session);
+    if (!backend.executeSelection) {
+      await this.sendChunkedText(target, "This agent does not support interactive selections.");
+      return;
+    }
+
+    try {
+      const processId = await backend.start(session);
+      this.sessions.setBackendProcess(session.id, processId);
+      const result = await backend.executeSelection({
+        kind: interaction.kind,
+        label: option.label,
+        value: option.value,
+      });
+      await this.handleAgentCommandResult(target, session, backend, result);
+    } catch (error) {
+      this.updateStatusUnlessStopped(session.id, "error");
+      await this.sendChunkedText(target, error instanceof Error ? error.message : String(error));
+    } finally {
+      if (!backend.isAlive()) {
+        this.workers.delete(session.id);
+      }
+    }
+  }
+
+  private async executeHubSelection(
+    target: ChatTarget,
+    interaction: PendingInteraction,
+    option: PendingInteractionOption,
+  ): Promise<void> {
+    if (interaction.kind !== "hub.session.switch") {
+      await this.sendChunkedText(target, `Unsupported Hitch selection: ${interaction.kind}`);
+      return;
+    }
+
+    const value = option.value;
+    if (!isRecord(value) || typeof value.sessionId !== "string") {
+      await this.sendChunkedText(target, "Invalid session selection.");
+      return;
+    }
+
+    const session = this.sessions.getById(value.sessionId);
+    if (!session || !targetMatchesSession(target, session)) {
+      await this.sendChunkedText(target, "Selected session is no longer available.");
+      return;
+    }
+
+    this.sessions.selectSession(session.id);
+    const selected = this.sessions.getById(session.id) ?? session;
+    await this.audit.write({
+      type: "session.selected",
+      sessionId: session.id,
+      target,
+      details: { ref: option.label, interactionId: interaction.id },
+    });
+    await this.sendChunkedText(
+      target,
+      `Switched to session ${shortId(selected)}${selected.name ? ` (${selected.name})` : ""}\nstatus: ${selected.status}\ncwd: ${selected.cwd}`,
+    );
+  }
+
+  private async handleAgentCommandResult(
+    target: ChatTarget,
+    session: HubSession,
+    backend: AgentBackend,
+    result: AgentCommandResult,
+  ): Promise<void> {
+    if (result.text) {
+      await this.sendChunkedText(target, result.text);
+    }
+    if (result.interaction) {
+      await this.createAndSendInteraction(target, {
+        owner: "agent",
+        sessionId: session.id,
+        kind: result.interaction.kind,
+        title: result.interaction.title,
+        options: result.interaction.options,
+        ...(result.interaction.pageSize ? { pageSize: result.interaction.pageSize } : {}),
+      });
+    }
+    if (result.consumesEvents) {
+      this.sessions.updateStatus(session.id, "running");
+      await this.consumeAgentEvents(session, backend);
+    }
+  }
+
+  private async createAndSendInteraction(
+    target: ChatTarget,
+    input: {
+      owner: "hub" | "agent";
+      kind: string;
+      title: string;
+      options: PendingInteractionOption[];
+      sessionId?: string;
+      pageSize?: number;
+    },
+  ): Promise<void> {
+    if (input.options.length === 0) {
+      await this.sendChunkedText(target, "No options available.");
+      return;
+    }
+
+    const interaction = this.sessions.createPendingInteraction(target, {
+      ...input,
+      expiresAt: new Date(Date.now() + INTERACTION_TTL_MS).toISOString(),
+    });
+    await this.sendInteractionMenu(target, interaction);
+  }
+
+  private async sendInteractionMenu(target: ChatTarget, interaction: PendingInteraction): Promise<void> {
+    await this.sendChunkedText(target, renderInteractionMenu(interaction));
   }
 
   private async sendBlockedTurn(event: InboundChatEvent, session: HubSession, inputKind: string): Promise<void> {
@@ -683,6 +853,10 @@ function shortId(session: HubSession): string {
 }
 
 function shouldHandleInBackground(event: InboundChatEvent): boolean {
+  if (selectionNumberFromText(event.text) !== undefined) {
+    return false;
+  }
+
   try {
     const command = parseCommand(event.text);
     return command.type === "prompt" || command.type === "agent_command";
@@ -710,6 +884,42 @@ function blockedTurnMessage(session: HubSession, inputKind: string): string {
   }
 
   return `Session is still running since ${session.updatedAt}. Wait for Pi to finish, use \`!status\`, or use \`!abort\` before sending another ${inputKind}.`;
+}
+
+function selectionNumberFromText(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+function interactionPage(interaction: PendingInteraction): PendingInteractionOption[] {
+  const start = interaction.pageIndex * interaction.pageSize;
+  return interaction.options.slice(start, start + interaction.pageSize);
+}
+
+function renderInteractionMenu(interaction: PendingInteraction): string {
+  const page = interactionPage(interaction);
+  const pageCount = Math.max(1, Math.ceil(interaction.options.length / interaction.pageSize));
+  const lines = [
+    `${interaction.title}${pageCount > 1 ? ` (${interaction.pageIndex + 1}/${pageCount})` : ""}`,
+    ...page.map((option, index) => `${index + 1}. ${formatInteractionOption(option)}`),
+  ];
+  if (pageCount > 1) {
+    lines.push("0. Next page");
+  }
+  return lines.join("\n");
+}
+
+function formatInteractionOption(option: PendingInteractionOption): string {
+  return option.description ? `${option.label} | ${option.description}` : option.label;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 function piUiMethod(raw: unknown): string | undefined {
