@@ -87,6 +87,13 @@ class MediaFlowBackend implements AgentBackend {
 
   async send(input: AgentInput): Promise<void> {
     this.receivedInput = input;
+    this.queue.push({ type: "tool_call", name: "read_file", preview: `{"path":"${this.artifactPath}"}` });
+    this.queue.push({
+      type: "tool_result",
+      name: "read_file",
+      succeeded: true,
+      text: `hidden tool output marker: ${this.artifactPath}`,
+    });
     this.queue.push({ type: "final", text: `Generated artifact: "${this.artifactPath}"` });
     this.queue.close();
   }
@@ -107,7 +114,13 @@ class MediaFlowBackend implements AgentBackend {
 }
 
 async function main(): Promise<void> {
-  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow");
+  const summary = await runScenario(false);
+  await runScenario(true);
+  process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
+}
+
+async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; outbound: number }> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", fullToolOutput ? "full" : "summary");
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
 
@@ -149,7 +162,7 @@ async function main(): Promise<void> {
     },
   ];
 
-  const config = mediaFlowConfig(dataDir);
+  const config = mediaFlowConfig(dataDir, fullToolOutput);
   const channel = new MediaFlowChannel(events);
   const backend = new MediaFlowBackend(artifactPath);
   const hub = new RemoteAgentHub(config, channel, () => backend);
@@ -159,11 +172,29 @@ async function main(): Promise<void> {
   if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath) {
     throw new Error(`Expected outbound artifact delivery for ${artifactPath}`);
   }
+  const toolStarted = channel.texts.find((text) => text.startsWith("Tool started: read_file"));
+  if (!toolStarted) {
+    throw new Error("Expected summarized tool start message");
+  }
+  if (!fullToolOutput && toolStarted !== "Tool started: read_file") {
+    throw new Error("Default delivery should hide tool preview args");
+  }
+  if (!channel.texts.some((text) => text.startsWith("Tool finished: read_file (succeeded)"))) {
+    throw new Error("Expected summarized tool result message");
+  }
+  const hasFullToolOutput = channel.texts.some((text) => text.includes("hidden tool output marker"));
+  const hasToolPreview = channel.texts.some((text) => text.includes('{"path"'));
+  if (!fullToolOutput && (hasFullToolOutput || hasToolPreview)) {
+    throw new Error("Default delivery should hide tool preview args and full tool output");
+  }
+  if (fullToolOutput && (!hasFullToolOutput || !hasToolPreview)) {
+    throw new Error("Full tool-output delivery should include preview args and result text");
+  }
 
-  process.stdout.write(`Media flow smoke ok: inbound=${backend.receivedInput.attachments.length} outbound=${channel.artifacts.length}\n`);
+  return { inbound: backend.receivedInput.attachments.length, outbound: channel.artifacts.length };
 }
 
-function mediaFlowConfig(dataDir: string): HubConfig {
+function mediaFlowConfig(dataDir: string, fullToolOutput: boolean): HubConfig {
   const cwd = path.resolve(".");
   return {
     data_dir: dataDir,
@@ -175,6 +206,9 @@ function mediaFlowConfig(dataDir: string): HubConfig {
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,
       max_outbound_bytes: 50 * 1024 * 1024,
+    },
+    delivery: {
+      full_tool_output: fullToolOutput,
     },
     allowedRoots: [cwd, dataDir],
     users: {

@@ -7,6 +7,9 @@ media:
   max_inbound_bytes: 20971520
   max_outbound_bytes: 52428800
 
+delivery:
+  full_tool_output: false
+
 users:
   local:
     telegram_ids:

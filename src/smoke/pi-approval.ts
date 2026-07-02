@@ -104,6 +104,9 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
       max_inbound_bytes: 20 * 1024 * 1024,
       max_outbound_bytes: 50 * 1024 * 1024,
     },
+    delivery: {
+      full_tool_output: false,
+    },
     allowedRoots: [path.resolve(".")],
     users: {
       smoke: {

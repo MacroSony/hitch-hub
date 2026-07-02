@@ -420,6 +420,7 @@ export class RemoteAgentHub {
   private async consumeAgentEvents(session: HubSession, backend: AgentBackend): Promise<void> {
     let streamedText = "";
     let timedOut = false;
+    const deliveredArtifactPaths = new Set<string>();
     const timeout = setTimeout(() => {
       timedOut = true;
       void backend.abort();
@@ -430,7 +431,7 @@ export class RemoteAgentHub {
         if (this.sessions.getById(session.id)?.status === "stopped") {
           return;
         }
-        const finished = await this.handleAgentEvent(session, agentEvent, streamedText);
+        const finished = await this.handleAgentEvent(session, agentEvent, streamedText, deliveredArtifactPaths);
         if (agentEvent.type === "text_delta") {
           streamedText += agentEvent.text;
         }
@@ -488,7 +489,12 @@ export class RemoteAgentHub {
     );
   }
 
-  private async handleAgentEvent(session: HubSession, event: AgentEvent, streamedText: string): Promise<boolean> {
+  private async handleAgentEvent(
+    session: HubSession,
+    event: AgentEvent,
+    streamedText: string,
+    deliveredArtifactPaths: Set<string>,
+  ): Promise<boolean> {
     if (this.sessions.getById(session.id)?.status === "stopped") {
       return true;
     }
@@ -506,17 +512,14 @@ export class RemoteAgentHub {
       case "final": {
         const finalText = streamedText.length > 0 && event.text === "Pi completed." ? streamedText : event.text;
         await this.sendChunkedText(target, finalText);
-        await this.sendArtifactsMentionedInText(target, finalText);
+        await this.sendArtifactsMentionedInText(target, finalText, deliveredArtifactPaths);
         return true;
       }
       case "tool_call":
-        await this.sendChunkedText(target, `Tool started: ${event.name}${event.preview ? `\n${event.preview}` : ""}`);
+        await this.sendChunkedText(target, this.formatToolStart(event));
         return false;
       case "tool_result":
-        if (event.text) {
-          await this.sendChunkedText(target, `Tool result: ${event.name}\n${event.text}`);
-          await this.sendArtifactsMentionedInText(target, event.text);
-        }
+        await this.sendChunkedText(target, this.formatToolResult(event));
         return false;
       case "approval_request": {
         const method = piUiMethod(event.raw);
@@ -573,6 +576,17 @@ export class RemoteAgentHub {
     this.sessions.updateStatus(id, status);
   }
 
+  private formatToolResult(event: Extract<AgentEvent, { type: "tool_result" }>): string {
+    const status = event.succeeded === false ? "failed" : "succeeded";
+    const summary = `Tool finished: ${event.name} (${status})`;
+    return this.config.delivery.full_tool_output && event.text ? `${summary}\n${event.text}` : summary;
+  }
+
+  private formatToolStart(event: Extract<AgentEvent, { type: "tool_call" }>): string {
+    const summary = `Tool started: ${event.name}`;
+    return this.config.delivery.full_tool_output && event.preview ? `${summary}\n${event.preview}` : summary;
+  }
+
   private async safeSendText(
     target: InboundChatEvent["target"],
     text: string,
@@ -585,13 +599,20 @@ export class RemoteAgentHub {
     }
   }
 
-  private async sendArtifactsMentionedInText(target: InboundChatEvent["target"], text: string): Promise<void> {
+  private async sendArtifactsMentionedInText(
+    target: InboundChatEvent["target"],
+    text: string,
+    deliveredArtifactPaths: Set<string>,
+  ): Promise<void> {
     if (!this.channel.sendArtifact) {
       return;
     }
 
-    const artifacts = extractLocalArtifacts(text, [this.config.dataDir, ...this.config.allowedRoots]).slice(0, 5);
+    const artifacts = extractLocalArtifacts(text, [this.config.dataDir, ...this.config.allowedRoots])
+      .filter((artifact) => !deliveredArtifactPaths.has(path.resolve(artifact.path)))
+      .slice(0, Math.max(0, 5 - deliveredArtifactPaths.size));
     for (const artifact of artifacts) {
+      deliveredArtifactPaths.add(path.resolve(artifact.path));
       try {
         const size = statSync(artifact.path).size;
         if (size > this.config.media.max_outbound_bytes) {

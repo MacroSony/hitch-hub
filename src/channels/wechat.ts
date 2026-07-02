@@ -1,8 +1,14 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import {
+  ApiClient,
   MessageType,
+  UploadMediaType,
   WeChatClient,
+  aesEcbPaddedSize,
+  encryptAesEcb,
   normalizeAccountId,
   type MessageItem,
   type WeixinMessage,
@@ -117,6 +123,7 @@ export class WeChatAdapter implements ChannelAdapter {
 
   async sendText(target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
     const client = await this.ensureClient();
+    this.instrumentSendMessage(client.api);
     const to = target.userId ?? target.chatId;
     const contextToken = this.contextTokens.get(to) ?? this.contextTokens.get(target.chatId);
     await client.sendText(to, text, contextToken);
@@ -124,9 +131,57 @@ export class WeChatAdapter implements ChannelAdapter {
 
   async sendArtifact(target: ChatTarget, artifact: OutboundArtifact): Promise<void> {
     const client = await this.ensureClient();
+    const api = client.api;
+    this.instrumentSendMessage(api);
     const to = target.userId ?? target.chatId;
     const contextToken = this.contextTokens.get(to) ?? this.contextTokens.get(target.chatId);
-    await client.sendMedia(to, artifact.path, artifact.caption, contextToken);
+    const isImage = artifact.kind === "image";
+    // wechat-ilink-client v0.1.0's sendMedia()/uploadMedia() only handles the
+    // legacy getUploadUrl response field `upload_param`, but current iLink
+    // servers return `upload_full_url` instead, so the library throws before
+    // uploading. Upload ourselves (supporting both response shapes), then
+    // hand the uploaded media to the library's send methods, which reuse its
+    // tested AES + message-envelope code.
+    const uploaded = await uploadMediaFullUrl({
+      filePath: artifact.path,
+      toUserId: to,
+      api,
+      cdnBaseUrl: api.cdnBaseUrl,
+      mediaType: isImage ? UploadMediaType.IMAGE : UploadMediaType.FILE,
+    });
+    if (isImage) {
+      await client.sendUploadedImage(to, uploaded, artifact.caption, contextToken);
+    } else {
+      await client.sendUploadedFile(to, path.basename(artifact.path), uploaded, artifact.caption, contextToken);
+    }
+  }
+
+  // wechat-ilink-client v0.1.0's sendMessage() discards the response body
+  // and only throws on HTTP non-200, so a server-side rejection (ret != 0) is
+  // silently swallowed and recorded as "sent". Wrap the instance method once
+  // to parse and enforce the actual ret/errmsg response.
+  private instrumentSendMessage(api: ApiClient): void {
+    const anyApi = api as ApiClient & { __hitchInstrumented?: boolean };
+    if (anyApi.__hitchInstrumented) {
+      return;
+    }
+    anyApi.__hitchInstrumented = true;
+    // apiFetch and buildBaseInfo are private on ApiClient; reach them through a
+    // typed cast so we can read the raw sendmessage response the library
+    // otherwise throws away.
+    const privy = api as unknown as {
+      apiFetch: (p: { endpoint: string; body: string; timeoutMs: number }) => Promise<string>;
+      buildBaseInfo: () => unknown;
+    };
+    const orig = api.sendMessage.bind(api);
+    api.sendMessage = async (req: Parameters<typeof orig>[0]): Promise<void> => {
+      const raw = await privy.apiFetch({
+        endpoint: "ilink/bot/sendmessage",
+        body: JSON.stringify({ ...req, base_info: privy.buildBaseInfo() }),
+        timeoutMs: 30_000,
+      });
+      assertWeChatApiOk(parseWeChatApiResponse(raw), "WeChat sendMessage");
+    };
   }
 
   private async ensureClient(): Promise<WeChatClient> {
@@ -283,7 +338,10 @@ function writeSecureJson(filePath: string, value: unknown): void {
 }
 
 function chatIdForMessage(message: WeixinMessage): string | undefined {
-  return message.group_id ?? message.from_user_id;
+  // For 1:1 ClawBot chats the server returns group_id as an empty string (not
+  // undefined), so a nullish-coalescing fallback would return "" and drop the
+  // message. Fall back to from_user_id on any falsy value.
+  return message.group_id || message.from_user_id;
 }
 
 function hubKindForWeChatKind(kind: "image" | "voice" | "file" | "video"): HubAttachment["kind"] {
@@ -291,6 +349,144 @@ function hubKindForWeChatKind(kind: "image" | "voice" | "file" | "video"): HubAt
     return "audio";
   }
   return kind;
+}
+
+type UploadedMedia = {
+  filekey: string;
+  downloadEncryptedQueryParam: string;
+  aeskey: string;
+  fileSize: number;
+  fileSizeCiphertext: number;
+};
+
+type WeChatApiResponse = {
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
+};
+
+// wechat-ilink-client v0.1.0's uploadMedia() only handles the legacy
+// getUploadUrl response field `upload_param`; current iLink servers return
+// `upload_full_url` instead, so the library throws before uploading. This
+// helper reimplements just the upload step, supporting both response shapes,
+// and returns an UploadedFileInfo-compatible object for the library's send
+// methods (sendUploadedImage / sendUploadedFile).
+async function uploadMediaFullUrl(opts: {
+  filePath: string;
+  toUserId: string;
+  api: ApiClient;
+  cdnBaseUrl: string;
+  mediaType: number;
+}): Promise<UploadedMedia> {
+  const { filePath, toUserId, api, cdnBaseUrl, mediaType } = opts;
+  const plaintext = await readFile(filePath);
+  const rawsize = plaintext.length;
+  const rawfilemd5 = createHash("md5").update(plaintext).digest("hex");
+  const fileSizeCiphertext = aesEcbPaddedSize(rawsize);
+  const filekey = randomBytes(16).toString("hex");
+  const aeskey = randomBytes(16);
+
+  const resp = await api.getUploadUrl({
+    filekey,
+    media_type: mediaType,
+    to_user_id: toUserId,
+    rawsize,
+    rawfilemd5,
+    filesize: fileSizeCiphertext,
+    no_need_thumb: true,
+    aeskey: aeskey.toString("hex"),
+  });
+  assertWeChatApiOk(resp as WeChatApiResponse, "WeChat getUploadUrl");
+
+  // `upload_full_url` is returned by current servers but is not on the
+  // library's GetUploadUrlResp type yet, so read it off the parsed object.
+  const fullUrl = (resp as { upload_full_url?: string }).upload_full_url;
+  let uploadUrl: string;
+  if (fullUrl) {
+    // Newer iLink protocol: the server returns the complete CDN upload URL.
+    uploadUrl = fullUrl;
+  } else if (resp.upload_param) {
+    // Legacy protocol: assemble the URL (matches the library's buildCdnUploadUrl).
+    uploadUrl = `${cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(resp.upload_param)}&filekey=${encodeURIComponent(filekey)}`;
+  } else {
+    throw new Error(`getUploadUrl returned no upload_param/upload_full_url: ${JSON.stringify(resp)}`);
+  }
+
+  const ciphertext = encryptAesEcb(plaintext, aeskey);
+  const downloadEncryptedQueryParam = await postCiphertextToCdn(uploadUrl, ciphertext);
+  return {
+    filekey,
+    downloadEncryptedQueryParam,
+    aeskey: aeskey.toString("hex"),
+    fileSize: rawsize,
+    fileSizeCiphertext,
+  };
+}
+
+async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer): Promise<string> {
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const res = await fetch(uploadUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Uint8Array(ciphertext),
+      });
+      if (res.status >= 400 && res.status < 500) {
+        const msg = res.headers.get("x-error-message") ?? (await res.text());
+        throw new Error(`CDN upload client error ${res.status}: ${msg}`);
+      }
+      if (res.status !== 200) {
+        const msg = res.headers.get("x-error-message") ?? `status ${res.status}`;
+        throw new Error(`CDN upload server error: ${msg}`);
+      }
+      const downloadParam = res.headers.get("x-encrypted-param") ?? undefined;
+      if (!downloadParam) {
+        throw new Error("CDN upload response missing x-encrypted-param header");
+      }
+      return downloadParam;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // 4xx is a permanent client error; don't retry.
+      if (err instanceof Error && err.message.includes("client error")) throw err;
+      if (attempt < 3) await sleep(750 * attempt);
+    }
+  }
+  throw lastError ?? new Error("CDN upload failed");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseWeChatApiResponse(raw: string): WeChatApiResponse {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    return {
+      ...(typeof parsed.ret === "number" ? { ret: parsed.ret } : {}),
+      ...(typeof parsed.errcode === "number" ? { errcode: parsed.errcode } : {}),
+      ...(typeof parsed.errmsg === "string" ? { errmsg: parsed.errmsg } : {}),
+    };
+  } catch {
+    throw new Error(`WeChat API returned non-JSON response: ${raw.slice(0, 200)}`);
+  }
+}
+
+function assertWeChatApiOk(resp: WeChatApiResponse, operation: string): void {
+  const ret = resp.ret ?? 0;
+  const errcode = resp.errcode ?? 0;
+  if (ret === 0 && errcode === 0) {
+    return;
+  }
+
+  throw new Error(`${operation} failed: ret=${ret} errcode=${errcode} errmsg=${resp.errmsg ?? ""}`.trim());
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 function assertWithinSizeLimit(size: number | undefined, maxBytes: number, label: string): void {

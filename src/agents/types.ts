@@ -19,7 +19,7 @@ export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "final"; text: string }
   | { type: "tool_call"; name: string; preview?: string }
-  | { type: "tool_result"; name: string; text?: string }
+  | { type: "tool_result"; name: string; text?: string; succeeded?: boolean }
   | { type: "approval_request"; raw: unknown }
   | { type: "status"; state: "running" | "idle" | "waiting" | "error" };
 

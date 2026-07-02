@@ -368,3 +368,25 @@ Manual follow-up needed:
 
 - Live Telegram media upload/download should be tested with real bot credentials and a configured chat/user allowlist.
 - Live WeChat QR login, text reply, image/file inbound, and artifact outbound should be tested from an actual WeChat account because the iLink protocol depends on server-side session/context-token behavior.
+
+### Checkpoint 11: Tool Output Delivery Defaults
+
+Committed: this commit
+
+Changes:
+
+- Added `delivery.full_tool_output`, defaulting to `false`.
+- Changed tool start rendering to hide preview arguments unless full tool output is enabled.
+- Changed tool result rendering to show only the tool name and success/failure by default.
+- Preserved full tool result text behind `delivery.full_tool_output: true`.
+- Stopped scanning hidden tool result text for outbound artifacts, preventing file-read tool output from triggering accidental file uploads.
+
+Test results:
+
+- `npm run typecheck`: passed.
+- `npm run build`: passed.
+- `npm run smoke:fake`: passed.
+- `npm run smoke:media-cache`: passed.
+- `npm run smoke:media-flow`: passed; verifies both summary and full tool-output delivery modes.
+- `npm run smoke:pi-rpc`: passed.
+- `npm run smoke:pi-approval`: passed; approval notifications render as summarized tool results by default.

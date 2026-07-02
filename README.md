@@ -2,7 +2,7 @@
 
 Hitch is a lightweight, self-hosted, chat-native control plane for local coding agents.
 
-It lets you connect chat apps such as Telegram to local coding agents such as Pi, while keeping sessions, working directories, approvals, and artifacts under a small local hub instead of a full dashboard or IDE.
+It lets you connect chat apps such as Telegram or WeChat to local coding agents such as Pi, while keeping sessions, working directories, approvals, and artifacts under a small local hub instead of a full dashboard or IDE.
 
 ## Status
 
@@ -17,13 +17,13 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Basic audit logging
 - Pi extension UI approval requests answered through `!approve` / `!deny`
 - Configurable default cwd
-- SHA-256 inbound media cache for Telegram photos/documents
-- Cached media references passed to Pi prompts as local file paths
+- SHA-256 inbound media cache for Telegram photos/documents and WeChat media
+- Cached images passed to Pi through native RPC image attachments when supported, with local path references kept in the prompt
 - Pi RPC model inspection and switching through agent-native `/model`
 - Explicit session listing and switching with optional names
 - Best-effort outbound Telegram upload for local image/file paths mentioned by Pi
-- Best-effort outbound WeChat upload for local image/file paths mentioned by Pi
-- Basic text chunking and timeout handling
+- Best-effort outbound WeChat upload for local image/file paths mentioned by Pi, with iLink API-level response validation
+- Basic text chunking, summarized tool-output delivery, and timeout handling
 
 See `implementation_steps.md` for the current iteration checklist and checkpoint test results.
 
@@ -65,6 +65,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
+- `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
@@ -78,7 +79,7 @@ Start the hub:
 & 'C:\Program Files\nodejs\npm.cmd' run dev -- --config examples/config.example.yaml
 ```
 
-Then send commands to the Telegram bot:
+Then send commands to the configured chat bot:
 
 ```text
 !new pi
@@ -125,8 +126,14 @@ Media behavior:
 - Cached files are deduplicated by SHA-256
 - Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
 - Inbound and outbound media byte limits are configured under `media`
-- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five artifacts back to Telegram or WeChat
+- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Outbound artifact delivery attempts are recorded in the audit log
+
+Tool output behavior:
+
+- Tool calls show the tool name and completion status by default.
+- Full tool result text is hidden unless `delivery.full_tool_output: true` is configured.
+- Hidden tool result text is not scanned for outbound artifact upload.
 
 WeChat behavior:
 
@@ -198,9 +205,8 @@ Pi config behavior:
 
 ## Roadmap
 
-- Robust Telegram usage testing
-- Native Pi image-content input
-- Outbound artifact upload and delivery tracking
-- Real approval rendering with Telegram buttons
+- Robust live Telegram and WeChat usage testing
+- Richer artifact discovery and durable delivery tracking
+- Richer approval rendering across non-Telegram channels
 - Discord adapter
 - Additional agent backends

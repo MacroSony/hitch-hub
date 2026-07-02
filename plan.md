@@ -1,6 +1,6 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a roadmap and architecture planning document, not a list of implemented features. See `CURRENT_STATE.md` for the verified implementation inventory. Features such as additional channels/backends, `!sessions`, `!switch`, `!cd`, `!compact`, native image input, inline approval buttons, and robust delivery queues are planned but not implemented yet. Basic outbound Telegram upload for local artifact paths is implemented as a best-effort bridge; richer artifact discovery and delivery queues remain planned.
+> Current-state note: this is a roadmap and architecture planning document, not a verified implementation inventory. See `README.md` for the current implemented surface. Some roadmap items such as `!sessions`, `!switch`, WeChat, inline Telegram approval buttons, native image input for supported Pi image MIME types, and basic outbound artifact upload have landed; additional backends/channels, `!cd`, `!compact`, richer artifact discovery, and robust delivery queues remain planned.
 
 ## 1. Project Goal
 

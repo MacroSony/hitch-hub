@@ -399,11 +399,12 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "tool_execution_end") {
-    const text = extractTextContent(record.result);
+    const text = extractTextContent(record.result) ?? extractErrorText(record);
     return [
       {
         type: "tool_result",
         name: String(record.toolName ?? "tool"),
+        succeeded: inferToolSucceeded(record) ?? true,
         ...(text ? { text } : {}),
       },
     ];
@@ -411,7 +412,7 @@ function mapPiEvent(value: unknown): AgentEvent[] {
 
   if (type === "extension_ui_request") {
     if (record.method === "notify" && typeof record.message === "string") {
-      return [{ type: "tool_result", name: "Pi notification", text: record.message }];
+      return [{ type: "tool_result", name: "Pi notification", succeeded: true, text: record.message }];
     }
     if (isFireAndForgetExtensionUi(record)) {
       return [];
@@ -576,4 +577,48 @@ function extractTextContent(value: unknown): string | undefined {
     .join("\n");
 
   return text.length > 0 ? text : undefined;
+}
+
+function extractErrorText(record: Record<string, unknown>): string | undefined {
+  if (typeof record.error === "string" && record.error.length > 0) {
+    return record.error;
+  }
+
+  const result = record.result;
+  if (isRecord(result) && typeof result.error === "string" && result.error.length > 0) {
+    return result.error;
+  }
+
+  return undefined;
+}
+
+function inferToolSucceeded(record: Record<string, unknown>): boolean | undefined {
+  if (typeof record.success === "boolean") {
+    return record.success;
+  }
+  if (typeof record.ok === "boolean") {
+    return record.ok;
+  }
+  if (typeof record.error === "string" && record.error.length > 0) {
+    return false;
+  }
+
+  const result = record.result;
+  if (!isRecord(result)) {
+    return undefined;
+  }
+  if (typeof result.isError === "boolean") {
+    return !result.isError;
+  }
+  if (typeof result.success === "boolean") {
+    return result.success;
+  }
+  if (typeof result.ok === "boolean") {
+    return result.ok;
+  }
+  if (typeof result.error === "string" && result.error.length > 0) {
+    return false;
+  }
+
+  return undefined;
 }

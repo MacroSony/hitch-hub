@@ -36,6 +36,10 @@ const mediaSchema = z.object({
   max_outbound_bytes: z.number().int().positive().default(50 * 1024 * 1024),
 });
 
+const deliverySchema = z.object({
+  full_tool_output: z.boolean().default(false),
+});
+
 export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
   default_cwd: z.string().optional(),
@@ -44,6 +48,9 @@ export const configSchema = z.object({
   media: mediaSchema.default({
     max_inbound_bytes: 20 * 1024 * 1024,
     max_outbound_bytes: 50 * 1024 * 1024,
+  }),
+  delivery: deliverySchema.default({
+    full_tool_output: false,
   }),
   users: z.record(z.string(), userSchema).default({}),
   channels: z
