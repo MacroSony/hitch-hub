@@ -1,4 +1,5 @@
 import type { HubAttachment, HubSession } from "../core/types.js";
+import type { AgentToolContext } from "../core/tool-bridge.js";
 
 export type AgentInput = {
   text: string;
@@ -52,7 +53,7 @@ export type AgentModelInfo = {
 };
 
 export interface AgentBackend {
-  start(session: HubSession): Promise<number | undefined>;
+  start(session: HubSession, toolContext?: AgentToolContext): Promise<number | undefined>;
   send(input: AgentInput): Promise<void>;
   executeCommand?(input: AgentCommandInput): Promise<AgentCommandResult>;
   executeSelection?(input: AgentSelectionInput): Promise<AgentCommandResult>;

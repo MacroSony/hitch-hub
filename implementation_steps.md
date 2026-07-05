@@ -65,11 +65,11 @@ Checklist:
   - delivery status is audited
 - [x] Add user-visible failure reporting when artifact upload fails.
 - [x] Add `!send <absolute-path>` as a human fallback using the same service.
-- [ ] Add an agent bridge for Pi:
+- [x] Add an agent bridge for Pi:
   - preferred final shape: MCP `hitch.send_media`
   - interim option: local CLI/outbox shim authenticated to the active session
-- [ ] Add active session/turn scoping for agent-initiated media sends.
-- [ ] Add hub MCP transport exposing only the session-scoped `hitch.send_media` tool for the first MCP milestone.
+- [x] Add active session/turn scoping for agent-initiated media sends.
+- [x] Add hub MCP transport exposing only the session-scoped `hitch.send_media` tool for the first MCP milestone.
 - [ ] Update Pi guidance/skill prompt to call `hitch.send_media` instead of merely mentioning paths.
 - [x] Gate current final-text path scanner behind `media.auto_discovery`.
 - [x] Default auto-discovery to off.
@@ -79,12 +79,13 @@ Checklist:
   - oversized media skipped with user-visible failure
   - channel send failure audited and surfaced
   - auto-discovery disabled by default
+  - MCP `hitch.send_media` outbox/result protocol
 
 ## Open Decisions
 
 - [!] MCP process shape: one hub MCP server with short-lived session tokens, or one per-session MCP server/process.
-- [!] Transport for non-MCP fallback: JSONL outbox file, localhost HTTP on a random port, or a tiny `hitch-send-artifact` CLI.
-- [!] Whether agent-initiated `send_media` should be allowed only during an active turn or also from idle sessions.
+- [x] Transport for first bridge: session-scoped JSONL outbox and result file.
+- [x] Agent-initiated `send_media` is processed only while the hub is consuming an active agent turn.
 - [!] Whether non-image file sends should be supported by the first `send_media` tool or require a stronger opt-in than images.
 
 ## Design Decision: Agent Config Ownership

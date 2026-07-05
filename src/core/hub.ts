@@ -7,6 +7,7 @@ import { PiRpcBackend } from "../agents/pi-rpc.js";
 import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { HubToolService } from "./hub-tools.js";
+import { AgentToolBridge } from "./tool-bridge.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
@@ -17,6 +18,7 @@ export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
   private readonly tools: HubToolService;
+  private readonly toolBridge: AgentToolBridge;
   private readonly workers = new Map<string, AgentBackend>();
   private readonly inFlight = new Set<Promise<void>>();
 
@@ -29,6 +31,7 @@ export class RemoteAgentHub {
     this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
     this.tools = new HubToolService(config, channel, this.audit);
+    this.toolBridge = new AgentToolBridge(config.dataDir);
   }
 
   async run(): Promise<void> {
@@ -284,7 +287,7 @@ export class RemoteAgentHub {
     }
 
     try {
-      const processId = await backend.start(session);
+      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
       this.sessions.setBackendProcess(session.id, processId);
       await this.audit.write({
         type: "agent_command.received",
@@ -335,7 +338,7 @@ export class RemoteAgentHub {
     const backend = this.getWorker(session);
 
     try {
-      const processId = await backend.start(session);
+      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
       this.sessions.setBackendProcess(session.id, processId);
       await this.audit.write({
         type: "worker.started",
@@ -478,7 +481,7 @@ export class RemoteAgentHub {
     }
 
     try {
-      const processId = await backend.start(session);
+      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
       this.sessions.setBackendProcess(session.id, processId);
       if (this.sessions.getById(session.id)?.status === "waiting_input") {
         this.updateStatusUnlessStopped(session.id, "running");
@@ -641,6 +644,18 @@ export class RemoteAgentHub {
     let streamedText = "";
     let timedOut = false;
     const deliveredArtifactPaths = new Set<string>();
+    const target = targetForSession(session);
+    const toolContext = this.toolBridge.contextFor(session.id);
+    let toolDrain = Promise.resolve();
+    const drainToolRequests = () => {
+      toolDrain = toolDrain
+        .then(() => this.toolBridge.processPending(toolContext, target, this.tools))
+        .catch((error: unknown) => {
+          process.stderr.write(`[hitch] Agent tool bridge failed: ${formatError(error)}\n`);
+        });
+    };
+    drainToolRequests();
+    const toolDrainInterval = setInterval(drainToolRequests, 250);
     const timeout = setTimeout(() => {
       timedOut = true;
       void backend.abort();
@@ -667,6 +682,9 @@ export class RemoteAgentHub {
       }
     } finally {
       clearTimeout(timeout);
+      clearInterval(toolDrainInterval);
+      drainToolRequests();
+      await toolDrain;
     }
 
     if (timedOut) {
@@ -677,12 +695,7 @@ export class RemoteAgentHub {
         details: { timeoutMs: this.config.agent_turn_timeout_ms },
       });
       await this.sendChunkedText(
-        {
-          platform: session.platform,
-          chatId: session.chatId,
-          ...(session.threadId ? { threadId: session.threadId } : {}),
-          ...(session.userId ? { userId: session.userId } : {}),
-        },
+        target,
         `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`,
       );
       return;
@@ -699,12 +712,7 @@ export class RemoteAgentHub {
       details: { streamedTextLength: streamedText.length },
     });
     await this.sendChunkedText(
-      {
-        platform: session.platform,
-        chatId: session.chatId,
-        ...(session.threadId ? { threadId: session.threadId } : {}),
-        ...(session.userId ? { userId: session.userId } : {}),
-      },
+      target,
       streamedText.length > 0 ? streamedText : "Pi worker exited before reporting a final response; session is idle.",
     );
   }
@@ -719,12 +727,7 @@ export class RemoteAgentHub {
       return true;
     }
 
-    const target = {
-      platform: session.platform,
-      chatId: session.chatId,
-      ...(session.threadId ? { threadId: session.threadId } : {}),
-      ...(session.userId ? { userId: session.userId } : {}),
-    };
+    const target = targetForSession(session);
 
     switch (event.type) {
       case "text_delta":
@@ -904,6 +907,15 @@ export class RemoteAgentHub {
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function targetForSession(session: HubSession): ChatTarget {
+  return {
+    platform: session.platform,
+    chatId: session.chatId,
+    ...(session.threadId ? { threadId: session.threadId } : {}),
+    ...(session.userId ? { userId: session.userId } : {}),
+  };
 }
 
 function targetMatchesSession(target: ChatTarget, session: HubSession): boolean {

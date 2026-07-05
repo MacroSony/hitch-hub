@@ -227,22 +227,34 @@ Open transport decision:
 
 ## Interim Pi Bridge
 
-If Pi cannot consume the hub MCP server immediately, add a small bridge:
-
-```text
-hitch-send-artifact /path/to/image.png --caption "Generated image"
-```
-
-The hub can expose session context through environment variables when spawning Pi:
+Hitch now exposes a session-scoped bridge through environment variables on active Pi workers:
 
 ```text
 HITCH_SESSION_ID=<session-id>
-HITCH_TURN_ID=<turn-id>
 HITCH_TOOL_TOKEN=<short-lived-token>
-HITCH_TOOL_OUTBOX=<data-dir>/tools/outbox/<session-id>.jsonl
+HITCH_TOOL_OUTBOX=<data-dir>/tools/<session-id>/outbox.jsonl
+HITCH_TOOL_RESULT_DIR=<data-dir>/tools/<session-id>/results
+HITCH_TOOL_TIMEOUT_MS=<agent-turn-timeout-ms>
 ```
 
-The CLI should write an authenticated request to the hub or to a hub-watched outbox. The hub still performs all validation and delivery.
+The hub drains that outbox only while it is consuming an active agent turn, validates requests, sends media through the active chat target, and writes one JSON result file per request.
+
+For MCP-capable agents, `npm run mcp:session` starts a stdio MCP server that exposes `hitch.send_media` and uses the same outbox/result protocol. The agent must launch it with the `HITCH_TOOL_*` environment variables inherited from the hub-started worker.
+
+The raw JSONL request shape is:
+
+```json
+{
+  "id": "request-id",
+  "type": "send_media",
+  "token": "short-lived-token",
+  "path": "/path/to/image.png",
+  "caption": "Generated image",
+  "kind": "image"
+}
+```
+
+The MCP wrapper writes that request and blocks until the matching result file appears.
 
 ## Config Direction
 
@@ -269,7 +281,7 @@ Rules:
 1. Add `HubToolService` and route existing channel artifact upload through it.
 2. Add `!send <path>` using the same service.
 3. Add user-visible delivery failure messages.
-4. Add Pi bridge through CLI/outbox or MCP, whichever is lower friction first.
+4. Add Pi bridge through session-scoped JSONL outbox and result files.
 5. Expose MCP `hitch.send_media` only.
 6. Update Pi guidance so generated images are sent explicitly.
 7. Gate current text path scanner behind `media.auto_discovery`.

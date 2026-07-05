@@ -1,7 +1,8 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
+import type { AgentToolContext } from "../core/tool-bridge.js";
 import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { ChatTarget, HubAttachment, HubSession } from "../core/types.js";
 import { MediaCache } from "../core/media-cache.js";
@@ -113,11 +114,59 @@ class MediaFlowBackend implements AgentBackend {
   }
 }
 
+class BridgeMediaBackend implements AgentBackend {
+  readonly queue = new AsyncEventQueue<AgentEvent>();
+  private toolContext: AgentToolContext | undefined;
+
+  constructor(private readonly artifactPath: string) {}
+
+  async start(_session: HubSession, toolContext?: AgentToolContext): Promise<number | undefined> {
+    this.toolContext = toolContext;
+    return process.pid;
+  }
+
+  async send(_input: AgentInput): Promise<void> {
+    if (!this.toolContext) {
+      throw new Error("Expected Hitch tool context.");
+    }
+    const requestId = "bridge-send-media";
+    appendFileSync(
+      this.toolContext.outboxPath,
+      `${JSON.stringify({
+        id: requestId,
+        type: "send_media",
+        token: this.toolContext.token,
+        path: this.artifactPath,
+        caption: "bridge caption",
+        kind: "image",
+      })}\n`,
+      "utf8",
+    );
+    this.queue.push({ type: "final", text: "Bridge requested media send." });
+    this.queue.close();
+  }
+
+  async *events(): AsyncIterable<AgentEvent> {
+    yield* this.queue.iterate();
+  }
+
+  isAlive(): boolean {
+    return true;
+  }
+
+  async abort(): Promise<void> {}
+
+  async stop(): Promise<void> {
+    this.queue.close();
+  }
+}
+
 async function main(): Promise<void> {
   const summary = await runScenario(false);
   await runScenario(true);
   await runExplicitSendScenario();
   await runAutoDiscoveryDisabledScenario();
+  await runToolBridgeScenario();
   process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
 }
 
@@ -271,6 +320,59 @@ async function runAutoDiscoveryDisabledScenario(): Promise<void> {
   if (channel.artifacts.length !== 0) {
     throw new Error("Expected auto-discovery disabled config to avoid sending mentioned artifact paths.");
   }
+}
+
+async function runToolBridgeScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", "bridge");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+
+  const artifactPath = path.join(dataDir, "bridge.png");
+  writeFileSync(artifactPath, PNG_1X1);
+
+  const target: ChatTarget = {
+    platform: "fake",
+    chatId: "media-flow-bridge",
+    userId: "media-user",
+  };
+  const channel = new MediaFlowChannel([
+    {
+      id: "new",
+      target,
+      text: "!new pi",
+      receivedAt: new Date().toISOString(),
+    },
+    {
+      id: "prompt",
+      target,
+      text: "Send this through the Hitch tool bridge.",
+      receivedAt: new Date().toISOString(),
+    },
+  ]);
+  const hub = new RemoteAgentHub(mediaFlowConfig(dataDir, false, false), channel, () => new BridgeMediaBackend(artifactPath));
+  await hub.run();
+
+  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath || channel.artifacts[0].caption !== "bridge caption") {
+    throw new Error("Expected tool bridge send_media request to deliver one outbound media artifact.");
+  }
+  const resultPath = findBridgeResultPath(dataDir);
+  if (!resultPath || !existsSync(resultPath)) {
+    throw new Error("Expected tool bridge to write a send_media result file.");
+  }
+}
+
+function findBridgeResultPath(dataDir: string): string | undefined {
+  const toolsDir = path.join(dataDir, "tools");
+  if (!existsSync(toolsDir)) {
+    return undefined;
+  }
+  for (const sessionDir of readdirSync(toolsDir)) {
+    const resultPath = path.join(toolsDir, sessionDir, "results", "bridge-send-media.json");
+    if (existsSync(resultPath)) {
+      return resultPath;
+    }
+  }
+  return undefined;
 }
 
 function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery = true): HubConfig {

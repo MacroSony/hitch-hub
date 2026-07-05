@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
+import type { AgentToolContext } from "../core/tool-bridge.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
 import type {
   AgentBackend,
@@ -95,7 +96,7 @@ export class PiRpcBackend implements AgentBackend {
 
   constructor(private readonly config: HubConfig) {}
 
-  async start(session: HubSession): Promise<number | undefined> {
+  async start(session: HubSession, toolContext?: AgentToolContext): Promise<number | undefined> {
     if (this.proc) {
       return this.proc.pid;
     }
@@ -112,6 +113,13 @@ export class PiRpcBackend implements AgentBackend {
       env.PI_CODING_AGENT_DIR = piAgentDir;
       env.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
       env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
+    }
+    if (toolContext) {
+      env.HITCH_SESSION_ID = toolContext.sessionId;
+      env.HITCH_TOOL_TOKEN = toolContext.token;
+      env.HITCH_TOOL_OUTBOX = toolContext.outboxPath;
+      env.HITCH_TOOL_RESULT_DIR = toolContext.resultDir;
+      env.HITCH_TOOL_TIMEOUT_MS = String(this.config.agent_turn_timeout_ms);
     }
 
     this.proc = spawn(spawnSpec.command, spawnSpec.args, {

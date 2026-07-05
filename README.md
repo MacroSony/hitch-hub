@@ -141,6 +141,8 @@ Media behavior:
 - Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
 - Inbound and outbound media byte limits are configured under `media`
 - Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
+- Agent tool bridge: active Pi workers receive `HITCH_TOOL_*` environment variables for a session-scoped media-send bridge
+- MCP bridge: `npm run mcp:session` exposes `hitch.send_media` over stdio for agents that can launch a session-scoped MCP server
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
 - Outbound artifact delivery attempts are recorded in the audit log
@@ -194,6 +196,7 @@ Run the media-cache smoke test:
 ```powershell
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:media-cache
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:media-flow
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:mcp-session
 ```
 
 Run the interactive-selection smoke test:
