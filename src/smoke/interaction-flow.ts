@@ -42,8 +42,13 @@ class InteractionSmokeChannel implements ChannelAdapter {
   private readonly sessionMenuShown = deferred<void>();
   private readonly sessionSwitched = deferred<void>();
   private readonly agentMenuShown = deferred<void>();
+  private readonly agentNextPageShown = deferred<void>();
+  private readonly agentPreviousPageShown = deferred<void>();
   private readonly agentChoiceSelected = deferred<void>();
+  private readonly liveAgentMenuShown = deferred<void>();
+  private readonly liveAgentChoiceSelected = deferred<void>();
   private createdCount = 0;
+  private firstAgentPageCount = 0;
 
   async *receive(): AsyncIterable<InboundChatEvent> {
     yield this.event("!new pi --name first");
@@ -55,14 +60,26 @@ class InteractionSmokeChannel implements ChannelAdapter {
     yield this.event("!sessions");
     await withTimeout(this.sessionMenuShown.promise, 5_000, "Timed out waiting for session menu");
 
-    yield this.event("2");
+    yield this.event("1");
     await withTimeout(this.sessionSwitched.promise, 5_000, "Timed out waiting for session switch");
 
     yield this.event("/choose");
     await withTimeout(this.agentMenuShown.promise, 5_000, "Timed out waiting for agent menu");
 
-    yield this.event("1");
+    yield this.event("n");
+    await withTimeout(this.agentNextPageShown.promise, 5_000, "Timed out waiting for agent menu next page");
+
+    yield this.event("p");
+    await withTimeout(this.agentPreviousPageShown.promise, 5_000, "Timed out waiting for agent menu previous page");
+
+    yield this.event("0");
     await withTimeout(this.agentChoiceSelected.promise, 5_000, "Timed out waiting for agent selection");
+
+    yield this.event("needs live choice");
+    await withTimeout(this.liveAgentMenuShown.promise, 5_000, "Timed out waiting for live agent menu");
+
+    yield this.event("0");
+    await withTimeout(this.liveAgentChoiceSelected.promise, 5_000, "Timed out waiting for live agent selection");
   }
 
   async sendText(_target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
@@ -78,7 +95,7 @@ class InteractionSmokeChannel implements ChannelAdapter {
       return;
     }
 
-    if (text.startsWith("Select session") && text.includes("1.") && text.includes("2.")) {
+    if (text.startsWith("Select session") && text.includes("0.") && text.includes("1.")) {
       this.sessionMenuShown.resolve();
       return;
     }
@@ -88,13 +105,40 @@ class InteractionSmokeChannel implements ChannelAdapter {
       return;
     }
 
-    if (text.startsWith("Pick backend option") && text.includes("1. alpha")) {
-      this.agentMenuShown.resolve();
+    if (
+      text.startsWith("Pick backend option") &&
+      text.includes("(1/2)") &&
+      text.includes("0. alpha") &&
+      text.includes("9. kappa") &&
+      text.includes("n. Next page") &&
+      text.includes("p. Previous page")
+    ) {
+      this.firstAgentPageCount += 1;
+      if (this.firstAgentPageCount === 1) {
+        this.agentMenuShown.resolve();
+      } else {
+        this.agentPreviousPageShown.resolve();
+      }
+      return;
+    }
+
+    if (text.startsWith("Pick backend option") && text.includes("(2/2)") && text.includes("0. lambda")) {
+      this.agentNextPageShown.resolve();
       return;
     }
 
     if (text === "Choice selected: alpha") {
       this.agentChoiceSelected.resolve();
+      return;
+    }
+
+    if (text.startsWith("Pick live option") && text.includes("0. red")) {
+      this.liveAgentMenuShown.resolve();
+      return;
+    }
+
+    if (text === "Live choice selected: red") {
+      this.liveAgentChoiceSelected.resolve();
     }
   }
 
@@ -113,11 +157,19 @@ class InteractionSmokeChannel implements ChannelAdapter {
 }
 
 class InteractionSmokeBackend implements AgentBackend {
+  private livePromptReceived = false;
+  private readonly liveSelection = deferred<void>();
+
   async start(_session: HubSession): Promise<number | undefined> {
     return process.pid;
   }
 
-  async send(_input: AgentInput): Promise<void> {}
+  async send(input: AgentInput): Promise<void> {
+    if (input.text !== "needs live choice") {
+      throw new Error(`Unexpected prompt: ${input.text}`);
+    }
+    this.livePromptReceived = true;
+  }
 
   async executeCommand(input: AgentCommandInput): Promise<AgentCommandResult> {
     if (input.raw !== "/choose") {
@@ -131,19 +183,52 @@ class InteractionSmokeBackend implements AgentBackend {
         options: [
           { label: "alpha", value: { id: "alpha" } },
           { label: "beta", value: { id: "beta" } },
+          { label: "gamma", value: { id: "gamma" } },
+          { label: "delta", value: { id: "delta" } },
+          { label: "epsilon", value: { id: "epsilon" } },
+          { label: "zeta", value: { id: "zeta" } },
+          { label: "eta", value: { id: "eta" } },
+          { label: "theta", value: { id: "theta" } },
+          { label: "iota", value: { id: "iota" } },
+          { label: "kappa", value: { id: "kappa" } },
+          { label: "lambda", value: { id: "lambda" } },
         ],
       },
     };
   }
 
   async executeSelection(input: AgentSelectionInput): Promise<AgentCommandResult> {
+    if (input.kind === "fake.live.choice" && isRecord(input.value) && input.value.id === "red") {
+      this.liveSelection.resolve();
+      return { text: "Live selection submitted" };
+    }
+
     if (input.kind !== "fake.choice" || !isRecord(input.value) || input.value.id !== "alpha") {
       throw new Error("Unexpected selection payload.");
     }
     return { text: "Choice selected: alpha" };
   }
 
-  async *events(): AsyncIterable<AgentEvent> {}
+  async *events(): AsyncIterable<AgentEvent> {
+    if (!this.livePromptReceived) {
+      return;
+    }
+
+    yield { type: "status", state: "running" };
+    yield {
+      type: "interaction_request",
+      interaction: {
+        kind: "fake.live.choice",
+        title: "Pick live option",
+        options: [
+          { label: "red", value: { id: "red" } },
+          { label: "blue", value: { id: "blue" } },
+        ],
+      },
+    };
+    await this.liveSelection.promise;
+    yield { type: "final", text: "Live choice selected: red" };
+  }
 
   isAlive(): boolean {
     return true;
@@ -170,6 +255,9 @@ async function main(): Promise<void> {
   if (!channel.sentTexts.includes("Choice selected: alpha")) {
     throw new Error("Agent selection was not resolved.");
   }
+  if (!channel.sentTexts.includes("Live choice selected: red")) {
+    throw new Error("Live agent selection was not resolved.");
+  }
 
   process.stdout.write("Interaction flow smoke ok\n");
 }
@@ -186,11 +274,14 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,
       max_outbound_bytes: 50 * 1024 * 1024,
+      auto_discovery: false,
+      outbound_roots: [],
     },
     delivery: {
       full_tool_output: false,
     },
     allowedRoots: [cwd],
+    outboundRoots: [],
     users: {
       smoke: {
         telegram_ids: [],

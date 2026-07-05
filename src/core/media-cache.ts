@@ -43,7 +43,7 @@ export class MediaCache {
   }
 }
 
-function sniffMimeType(data: Buffer): string | undefined {
+export function sniffMimeType(data: Buffer): string | undefined {
   if (data.length >= 4 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
     return "image/png";
   }

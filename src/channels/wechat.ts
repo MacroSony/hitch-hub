@@ -11,6 +11,7 @@ import {
   encryptAesEcb,
   normalizeAccountId,
   type MessageItem,
+  type SendMessageReq,
   type WeixinMessage,
 } from "wechat-ilink-client";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
@@ -31,6 +32,9 @@ type SavedCredentials = {
   token: string;
   baseUrl?: string;
 };
+
+const WECHAT_SEND_MIN_INTERVAL_MS = 2_000;
+const WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS = [5_000, 12_000, 25_000] as const;
 
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
@@ -81,6 +85,8 @@ export class WeChatAdapter implements ChannelAdapter {
   private readonly contextTokensPath: string;
   private readonly queue = new AsyncEventQueue<InboundChatEvent>();
   private readonly contextTokens = new Map<string, string>();
+  private sendQueue: Promise<void> = Promise.resolve();
+  private lastSendAttemptAt = 0;
   private client: WeChatClient | undefined;
 
   constructor(private readonly options: WeChatAdapterOptions) {
@@ -122,6 +128,9 @@ export class WeChatAdapter implements ChannelAdapter {
   }
 
   async sendText(target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
+    if (text.length === 0) {
+      return;
+    }
     const client = await this.ensureClient();
     this.instrumentSendMessage(client.api);
     const to = target.userId ?? target.chatId;
@@ -175,13 +184,66 @@ export class WeChatAdapter implements ChannelAdapter {
     };
     const orig = api.sendMessage.bind(api);
     api.sendMessage = async (req: Parameters<typeof orig>[0]): Promise<void> => {
-      const raw = await privy.apiFetch({
-        endpoint: "ilink/bot/sendmessage",
-        body: JSON.stringify({ ...req, base_info: privy.buildBaseInfo() }),
-        timeoutMs: 30_000,
+      await this.enqueueSend(async () => {
+        let currentReq = req;
+        let triedTokenlessFallback = false;
+        let retryIndex = 0;
+        for (;;) {
+          try {
+            await this.sendMessageOnce(privy, currentReq);
+            return;
+          } catch (error) {
+            if (isRetMinusTwo(error) && !triedTokenlessFallback && hasContextToken(currentReq)) {
+              triedTokenlessFallback = true;
+              currentReq = withEmptyContextToken(currentReq);
+              process.stderr.write("[hitch] WeChat sendMessage returned ret=-2; retrying once with empty context_token.\n");
+              continue;
+            }
+
+            const delayMs = WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS[retryIndex];
+            if (!isRetMinusTwo(error) || delayMs === undefined) {
+              throw error;
+            }
+            retryIndex += 1;
+            process.stderr.write(
+              `[hitch] WeChat sendMessage returned ret=-2; retrying in ${delayMs}ms (${retryIndex + 1}/${WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS.length + 1}).\n`,
+            );
+            await sleep(delayMs);
+          }
+        }
       });
-      assertWeChatApiOk(parseWeChatApiResponse(raw), "WeChat sendMessage");
     };
+  }
+
+  private async sendMessageOnce(
+    privy: {
+      apiFetch: (p: { endpoint: string; body: string; timeoutMs: number }) => Promise<string>;
+      buildBaseInfo: () => unknown;
+    },
+    req: SendMessageReq,
+  ): Promise<void> {
+    await this.waitForSendSlot();
+    const raw = await privy.apiFetch({
+      endpoint: "ilink/bot/sendmessage",
+      body: JSON.stringify({ ...req, base_info: privy.buildBaseInfo() }),
+      timeoutMs: 30_000,
+    });
+    assertWeChatApiOk(parseWeChatApiResponse(raw), "WeChat sendMessage");
+  }
+
+  private async enqueueSend(send: () => Promise<void>): Promise<void> {
+    const run = this.sendQueue.then(send, send);
+    this.sendQueue = run.catch(() => undefined);
+    await run;
+  }
+
+  private async waitForSendSlot(): Promise<void> {
+    const now = Date.now();
+    const waitMs = this.lastSendAttemptAt + WECHAT_SEND_MIN_INTERVAL_MS - now;
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+    this.lastSendAttemptAt = Date.now();
   }
 
   private async ensureClient(): Promise<WeChatClient> {
@@ -365,6 +427,26 @@ type WeChatApiResponse = {
   errmsg?: string;
 };
 
+class WeChatApiError extends Error {
+  readonly ret: number;
+  readonly errcode: number;
+  readonly errmsg: string;
+
+  constructor(
+    readonly operation: string,
+    response: WeChatApiResponse,
+  ) {
+    const ret = response.ret ?? 0;
+    const errcode = response.errcode ?? 0;
+    const errmsg = response.errmsg ?? "";
+    super(`${operation} failed: ret=${ret} errcode=${errcode} errmsg=${errmsg}`.trim());
+    this.name = "WeChatApiError";
+    this.ret = ret;
+    this.errcode = errcode;
+    this.errmsg = errmsg;
+  }
+}
+
 // wechat-ilink-client v0.1.0's uploadMedia() only handles the legacy
 // getUploadUrl response field `upload_param`; current iLink servers return
 // `upload_full_url` instead, so the library throws before uploading. This
@@ -482,7 +564,22 @@ function assertWeChatApiOk(resp: WeChatApiResponse, operation: string): void {
     return;
   }
 
-  throw new Error(`${operation} failed: ret=${ret} errcode=${errcode} errmsg=${resp.errmsg ?? ""}`.trim());
+  throw new WeChatApiError(operation, resp);
+}
+
+function isRetMinusTwo(error: unknown): error is WeChatApiError {
+  return error instanceof WeChatApiError && error.ret === -2;
+}
+
+function hasContextToken(req: SendMessageReq): boolean {
+  return typeof req.msg?.context_token === "string" && req.msg.context_token.length > 0;
+}
+
+function withEmptyContextToken(req: SendMessageReq): SendMessageReq {
+  return {
+    ...req,
+    ...(req.msg ? { msg: { ...req.msg, context_token: "" } } : {}),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

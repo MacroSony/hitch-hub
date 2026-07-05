@@ -1,6 +1,6 @@
 export type Platform = "fake" | "telegram" | "discord" | "wechat" | "qq" | "feishu";
 export type AgentName = "pi" | "claude" | "codex" | "opencode" | "gemini" | "pty";
-export type SessionStatus = "idle" | "running" | "waiting_approval" | "error" | "stopped";
+export type SessionStatus = "idle" | "running" | "waiting_approval" | "waiting_input" | "error" | "stopped";
 
 export type ChatTarget = {
   platform: Platform;

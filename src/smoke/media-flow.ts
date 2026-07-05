@@ -116,6 +116,8 @@ class MediaFlowBackend implements AgentBackend {
 async function main(): Promise<void> {
   const summary = await runScenario(false);
   await runScenario(true);
+  await runExplicitSendScenario();
+  await runAutoDiscoveryDisabledScenario();
   process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
 }
 
@@ -194,7 +196,84 @@ async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; 
   return { inbound: backend.receivedInput.attachments.length, outbound: channel.artifacts.length };
 }
 
-function mediaFlowConfig(dataDir: string, fullToolOutput: boolean): HubConfig {
+async function runExplicitSendScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", "send");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+
+  const artifactPath = path.join(dataDir, "explicit.png");
+  writeFileSync(artifactPath, PNG_1X1);
+
+  const target: ChatTarget = {
+    platform: "fake",
+    chatId: "media-flow-send",
+    userId: "media-user",
+  };
+  const channel = new MediaFlowChannel([
+    {
+      id: "send",
+      target,
+      text: `!send ${artifactPath} explicit caption`,
+      receivedAt: new Date().toISOString(),
+    },
+    {
+      id: "blocked-send",
+      target,
+      text: `!send ${path.resolve("package.json")}`,
+      receivedAt: new Date().toISOString(),
+    },
+  ]);
+  const hub = new RemoteAgentHub(mediaFlowConfig(dataDir, false, false), channel, () => new MediaFlowBackend(artifactPath));
+  await hub.run();
+
+  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath || channel.artifacts[0].caption !== "explicit caption") {
+    throw new Error("Expected explicit !send to deliver exactly one outbound media artifact.");
+  }
+  if (!channel.texts.some((text) => text === "Media sent: explicit.png")) {
+    throw new Error("Expected explicit !send success confirmation.");
+  }
+  if (!channel.texts.some((text) => text.startsWith("Media delivery failed: Media path is outside outbound roots"))) {
+    throw new Error("Expected explicit !send to reject media outside outbound roots.");
+  }
+}
+
+async function runAutoDiscoveryDisabledScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", "auto-disabled");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+
+  const artifactPath = path.join(dataDir, "mentioned.png");
+  writeFileSync(artifactPath, PNG_1X1);
+
+  const target: ChatTarget = {
+    platform: "fake",
+    chatId: "media-flow-auto-disabled",
+    userId: "media-user",
+  };
+  const channel = new MediaFlowChannel([
+    {
+      id: "new",
+      target,
+      text: "!new pi",
+      receivedAt: new Date().toISOString(),
+    },
+    {
+      id: "prompt",
+      target,
+      text: "Generate an image.",
+      receivedAt: new Date().toISOString(),
+    },
+  ]);
+  const backend = new MediaFlowBackend(artifactPath);
+  const hub = new RemoteAgentHub(mediaFlowConfig(dataDir, false, false), channel, () => backend);
+  await hub.run();
+
+  if (channel.artifacts.length !== 0) {
+    throw new Error("Expected auto-discovery disabled config to avoid sending mentioned artifact paths.");
+  }
+}
+
+function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery = true): HubConfig {
   const cwd = path.resolve(".");
   return {
     data_dir: dataDir,
@@ -206,11 +285,14 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean): HubConfig {
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,
       max_outbound_bytes: 50 * 1024 * 1024,
+      auto_discovery: autoDiscovery,
+      outbound_roots: [dataDir],
     },
     delivery: {
       full_tool_output: fullToolOutput,
     },
     allowedRoots: [cwd, dataDir],
+    outboundRoots: [dataDir],
     users: {
       media: {
         telegram_ids: [],

@@ -40,7 +40,9 @@ export type AgentEvent =
   | { type: "final"; text: string }
   | { type: "tool_call"; name: string; preview?: string }
   | { type: "tool_result"; name: string; text?: string; succeeded?: boolean }
+  | { type: "notification"; text: string; level?: string; completesTurn?: boolean }
   | { type: "approval_request"; raw: unknown }
+  | { type: "interaction_request"; interaction: AgentInteraction; raw?: unknown }
   | { type: "status"; state: "running" | "idle" | "waiting" | "error" };
 
 export type AgentModelInfo = {

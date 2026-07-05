@@ -10,6 +10,7 @@ Hitch is early. The current implementation focuses on the first useful control p
 
 - Telegram long polling adapter for text, captions, photos, and documents
 - WeChat iLink adapter for QR login, text, and media
+- Multiple enabled live channel adapters can run in one hub process
 - Local fake adapter for repeatable testing
 - Pi RPC backend
 - SQLite session and approval registry
@@ -21,11 +22,11 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Cached images passed to Pi through native RPC image attachments when supported, with local path references kept in the prompt
 - Pi RPC model inspection and switching through agent-native `/model`
 - Explicit session listing and switching with optional names
-- Best-effort outbound Telegram upload for local image/file paths mentioned by Pi
-- Best-effort outbound WeChat upload for local image/file paths mentioned by Pi, with iLink API-level response validation
+- Prototype outbound Telegram/WeChat upload for local image/file paths mentioned by Pi
+- Planned minimal `hitch.send_media` hub tool/MCP path for outbound media, replacing path auto-discovery as the primary design
 - Basic text chunking, summarized tool-output delivery, and timeout handling
 
-See `implementation_steps.md` for the current iteration checklist and checkpoint test results.
+See `implementation_steps.md` for the current iteration checklist, `docs/completed-work.md` for finished checkpoint history, and `docs/hub-tools-mcp.md` for the explicit outbound media/tool design.
 
 ## Requirements
 
@@ -64,6 +65,8 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
+- `media.outbound_roots`: directories Hitch may explicitly send media from with `!send` or future hub tools
+- `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 
@@ -90,6 +93,7 @@ Then send commands to the configured chat bot:
 !switch <session-id-or-name>
 !cwd
 !abort
+!send /absolute/path/to/image.png optional caption
 !approve <approval-id>
 !deny <approval-id>
 ```
@@ -109,7 +113,7 @@ Interactive selection behavior:
 
 - `!sessions` renders a numbered session picker; reply with a number to switch sessions.
 - Pi `/model` and `/models [filter]` render a numbered model picker when model choices are available; reply with a number to switch models.
-- `0` advances to the next page when a picker has more than one page.
+- Picker options use `0` through `9`; `n` advances to the next page and `p` goes back.
 - Numeric replies are treated as selections only while a pending picker exists for the same chat/thread/user.
 
 Path behavior:
@@ -125,6 +129,9 @@ Approval behavior:
 - Pi itself does not provide a built-in per-tool approval gate.
 - Pi extensions can ask for confirmation through RPC extension UI requests.
 - Hitch persists those requests with an expiry, renders an approval ID, and sends the matching `extension_ui_response` back to Pi when `!approve <id>` or `!deny <id>` is received.
+- Pi extension select requests are rendered as normal Hitch pickers instead of approval prompts.
+- Pi notifications render as chat notifications, not tool results.
+- Pi input/editor requests render their prompt or prefilled text in chat and are auto-cancelled until IM text entry/editing is supported.
 - Telegram renders approval buttons when possible; text commands remain the fallback.
 
 Media behavior:
@@ -133,7 +140,9 @@ Media behavior:
 - Cached files are deduplicated by SHA-256
 - Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
 - Inbound and outbound media byte limits are configured under `media`
-- When Pi mentions existing local image/file paths under `allowed_roots` or `data_dir`, Hitch attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
+- Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
+- Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
+- Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
 - Outbound artifact delivery attempts are recorded in the audit log
 
 Tool output behavior:
@@ -193,6 +202,12 @@ Run the interactive-selection smoke test:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:interaction-flow
 ```
 
+Run the multi-channel routing smoke test:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:multi-channel
+```
+
 Check Telegram credentials without printing the token:
 
 ```powershell
@@ -210,6 +225,12 @@ Run a local fake command sequence:
 
 Hitch intentionally does not expose Pi, Codex, OpenCode, or other agent servers directly. The hub owns chat authorization, cwd binding, session state, and delivery behavior.
 
+Channel behavior:
+
+- When multiple live channels are enabled, Hitch starts all enabled adapters in the same process.
+- Outbound replies and artifacts are routed by the inbound event target platform.
+- `--fake-message` remains a fake-only smoke-test mode.
+
 Pi config behavior:
 
 - `config_scope: system` starts Pi like your terminal Pi and leaves `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and `PI_OFFLINE` untouched.
@@ -220,7 +241,8 @@ Pi config behavior:
 ## Roadmap
 
 - Robust live Telegram and WeChat usage testing
-- Richer artifact discovery and durable delivery tracking
+- Minimal `hitch.send_media` hub tool, with MCP transport for agents that support it
+- Durable delivery tracking and user-visible delivery failures
 - Richer approval rendering across non-Telegram channels
 - Discord adapter
 - Additional agent backends

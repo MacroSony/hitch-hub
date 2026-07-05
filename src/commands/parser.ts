@@ -5,6 +5,7 @@ export type HubCommand =
   | { type: "switch"; ref: string }
   | { type: "cwd" }
   | { type: "abort" }
+  | { type: "send"; path: string; caption?: string }
   | { type: "approve"; id: string }
   | { type: "deny"; id: string }
   | { type: "agent_command"; raw: string }
@@ -59,6 +60,18 @@ export function parseCommand(text: string): HubCommand {
       return { type: "cwd" };
     case "abort":
       return { type: "abort" };
+    case "send": {
+      const [mediaPath, ...captionParts] = args;
+      if (!mediaPath) {
+        throw new Error("Usage: !send <absolute-path> [caption]");
+      }
+      const caption = captionParts.join(" ").trim();
+      return {
+        type: "send",
+        path: mediaPath,
+        ...(caption.length > 0 ? { caption } : {}),
+      };
+    }
     case "model": {
       return { type: "agent_command", raw: args.length > 0 ? `/model ${args.join(" ")}` : "/model" };
     }

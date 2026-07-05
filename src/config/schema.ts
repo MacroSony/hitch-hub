@@ -34,6 +34,8 @@ const piAgentSchema = z.object({
 const mediaSchema = z.object({
   max_inbound_bytes: z.number().int().positive().default(20 * 1024 * 1024),
   max_outbound_bytes: z.number().int().positive().default(50 * 1024 * 1024),
+  auto_discovery: z.boolean().default(false),
+  outbound_roots: z.array(z.string()).default([]),
 });
 
 const deliverySchema = z.object({
@@ -48,6 +50,8 @@ export const configSchema = z.object({
   media: mediaSchema.default({
     max_inbound_bytes: 20 * 1024 * 1024,
     max_outbound_bytes: 50 * 1024 * 1024,
+    auto_discovery: false,
+    outbound_roots: [],
   }),
   delivery: deliverySchema.default({
     full_tool_output: false,
@@ -108,4 +112,5 @@ export type HubConfig = z.output<typeof configSchema> & {
   dataDir: string;
   defaultCwd?: string;
   allowedRoots: string[];
+  outboundRoots: string[];
 };

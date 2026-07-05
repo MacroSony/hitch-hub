@@ -274,7 +274,9 @@ export class SessionRegistry {
   recoverInterruptedSessions(): void {
     const now = new Date().toISOString();
     this.db
-      .prepare("UPDATE hub_sessions SET status = 'idle', process_id = NULL, updated_at = ? WHERE status IN ('running', 'waiting_approval')")
+      .prepare(
+        "UPDATE hub_sessions SET status = 'idle', process_id = NULL, updated_at = ? WHERE status IN ('running', 'waiting_approval', 'waiting_input')",
+      )
       .run(now);
     this.db
       .prepare("UPDATE approval_requests SET status = 'expired', updated_at = ? WHERE status = 'pending'")
@@ -388,7 +390,7 @@ export class SessionRegistry {
         input.title,
         JSON.stringify(input.options),
         0,
-        Math.max(1, Math.min(input.pageSize ?? 9, 9)),
+        Math.max(1, Math.min(input.pageSize ?? 10, 10)),
         input.expiresAt,
         now,
         now,

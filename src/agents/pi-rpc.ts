@@ -129,6 +129,10 @@ export class PiRpcBackend implements AgentBackend {
         for (const event of mapPiEvent(value)) {
           this.eventsQueue.push(event);
         }
+        const autoResponse = piExtensionUiAutoResponse(value);
+        if (autoResponse) {
+          this.writeCommand(autoResponse);
+        }
       },
       (error) => {
         this.eventsQueue.push({ type: "final", text: `Pi RPC parse error: ${error.message}` });
@@ -198,15 +202,22 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async executeSelection(input: AgentSelectionInput): Promise<AgentCommandResult> {
-    if (input.kind !== "pi.model.select") {
-      throw new Error(`Unsupported Pi selection kind: ${input.kind}`);
-    }
-    if (!isRecord(input.value) || typeof input.value.provider !== "string" || typeof input.value.modelId !== "string") {
-      throw new Error("Invalid Pi model selection payload.");
+    if (input.kind === "pi.ui.select") {
+      const payload = piUiSelectionPayload(input.value);
+      this.writeCommand({ type: "extension_ui_response", id: payload.requestId, value: payload.value });
+      return { text: `Selected: ${input.label}` };
     }
 
-    const selected = await this.setModel(`${input.value.provider}/${input.value.modelId}`);
-    return { text: `Model switched to ${formatModel(selected)}.` };
+    if (input.kind === "pi.model.select") {
+      if (!isRecord(input.value) || typeof input.value.provider !== "string" || typeof input.value.modelId !== "string") {
+        throw new Error("Invalid Pi model selection payload.");
+      }
+
+      const selected = await this.setModel(`${input.value.provider}/${input.value.modelId}`);
+      return { text: `Model switched to ${formatModel(selected)}.` };
+    }
+
+    throw new Error(`Unsupported Pi selection kind: ${input.kind}`);
   }
 
   private async getState(): Promise<{ model?: AgentModelInfo }> {
@@ -407,7 +418,7 @@ function modelSelectionInteraction(models: AgentModelInfo[], title: string): Age
           modelId: model.id,
         },
       })),
-    pageSize: 9,
+    pageSize: 10,
   };
 }
 
@@ -468,10 +479,23 @@ function mapPiEvent(value: unknown): AgentEvent[] {
 
   if (type === "extension_ui_request") {
     if (record.method === "notify" && typeof record.message === "string") {
-      return [{ type: "tool_result", name: "Pi notification", succeeded: true, text: record.message }];
+      return [{ type: "notification", text: record.message, ...(typeof record.notifyType === "string" ? { level: record.notifyType } : {}) }];
     }
     if (isFireAndForgetExtensionUi(record)) {
       return [];
+    }
+    if (record.method === "input") {
+      return [{ type: "notification", text: piUiInputText(record), completesTurn: true }];
+    }
+    if (record.method === "editor") {
+      const text = piUiEditorText(record);
+      return text ? [{ type: "notification", text, completesTurn: true }] : [{ type: "notification", text: "Pi editor requested.", completesTurn: true }];
+    }
+    if (record.method === "select") {
+      const interaction = piUiSelectInteraction(record);
+      if (interaction) {
+        return [{ type: "interaction_request", interaction, raw: record }];
+      }
     }
     return [{ type: "approval_request", raw: record }];
   }
@@ -504,6 +528,111 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
+function piUiSelectInteraction(record: Record<string, unknown>): AgentInteraction | undefined {
+  if (typeof record.id !== "string") {
+    return undefined;
+  }
+
+  const options = piUiSelectOptions(record.id, record.options ?? record.items ?? record.choices);
+  if (options.length === 0) {
+    return undefined;
+  }
+
+  return {
+    kind: "pi.ui.select",
+    title: piUiTitle(record),
+    options,
+    pageSize: 10,
+  };
+}
+
+function piUiSelectOptions(requestId: string, rawOptions: unknown): Array<{ label: string; description?: string; value: unknown }> {
+  if (!Array.isArray(rawOptions)) {
+    return [];
+  }
+
+  return rawOptions.map((option) => piUiSelectOption(requestId, option)).filter((option): option is AgentInteraction["options"][number] => option !== undefined);
+}
+
+function piUiSelectOption(requestId: string, option: unknown): AgentInteraction["options"][number] | undefined {
+  if (typeof option === "string") {
+    return { label: option, value: { requestId, value: option } };
+  }
+  if (!isRecord(option)) {
+    return undefined;
+  }
+
+  const label = stringField(option, ["label", "text", "name", "title", "id", "key", "value"]);
+  if (!label) {
+    return undefined;
+  }
+
+  const description = stringField(option, ["description", "detail", "subtitle", "hint"]);
+  const value = firstPresentField(option, ["value", "id", "key", "name", "label", "text", "title"]) ?? option;
+  return {
+    label,
+    ...(description ? { description } : {}),
+    value: { requestId, value },
+  };
+}
+
+function piUiTitle(record: Record<string, unknown>): string {
+  return stringField(record, ["title", "message", "prompt", "label", "question"]) ?? "Select option";
+}
+
+function piUiSelectionPayload(value: unknown): { requestId: string; value: unknown } {
+  if (!isRecord(value) || typeof value.requestId !== "string" || !Object.prototype.hasOwnProperty.call(value, "value")) {
+    throw new Error("Invalid Pi UI selection payload.");
+  }
+  return { requestId: value.requestId, value: value.value };
+}
+
+function stringField(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
+function firstPresentField(record: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      return record[key];
+    }
+  }
+  return undefined;
+}
+
+function piUiEditorText(record: Record<string, unknown>): string | undefined {
+  const title = stringField(record, ["title", "message", "prompt", "label"]) ?? "Pi editor";
+  const text = typeof record.prefill === "string" ? record.prefill : typeof record.text === "string" ? record.text : "";
+  return text.length > 0 ? `Pi editor: ${title}\n\n${text}` : `Pi editor: ${title}`;
+}
+
+function piUiInputText(record: Record<string, unknown>): string {
+  const title = stringField(record, ["title", "message", "prompt", "label"]) ?? "Pi input";
+  const placeholder = typeof record.placeholder === "string" && record.placeholder.length > 0 ? `\n${record.placeholder}` : "";
+  return `Pi input requested: ${title}${placeholder}`;
+}
+
+function piExtensionUiAutoResponse(raw: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(raw) || raw.type !== "extension_ui_request" || typeof raw.id !== "string") {
+    return undefined;
+  }
+
+  if (raw.method === "input" || raw.method === "editor") {
+    return { type: "extension_ui_response", id: raw.id, cancelled: true };
+  }
+
+  return undefined;
+}
+
 function piApprovalResponse(raw: unknown, decision: "allowed" | "denied"): Record<string, unknown> {
   if (!isRecord(raw) || raw.type !== "extension_ui_request" || typeof raw.id !== "string") {
     throw new Error("Approval is not a Pi extension UI request.");
@@ -530,9 +659,7 @@ function piApprovalResponse(raw: unknown, decision: "allowed" | "denied"): Recor
     }
     case "input":
     case "editor":
-      return decision === "allowed"
-        ? { type: "extension_ui_response", id: raw.id, value: "" }
-        : { type: "extension_ui_response", id: raw.id, cancelled: true };
+      return { type: "extension_ui_response", id: raw.id, cancelled: true };
     default:
       throw new Error(`Unsupported Pi extension UI approval method: ${method || "unknown"}`);
   }

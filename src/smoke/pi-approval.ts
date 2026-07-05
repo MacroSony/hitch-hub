@@ -33,8 +33,12 @@ class ApprovalSmokeChannel implements ChannelAdapter {
   };
   private readonly sessionReady = deferred<void>();
   private readonly approvalId = deferred<string>();
+  private readonly decisionRecorded = deferred<void>();
+  private readonly statusChecked = deferred<void>();
   private readonly completed = deferred<void>();
   private decisionSubmitted = false;
+  private statusRequested = false;
+  private completedSeen = false;
 
   constructor(private readonly decision: Decision) {}
 
@@ -47,6 +51,11 @@ class ApprovalSmokeChannel implements ChannelAdapter {
     const approvalId = await withTimeout(this.approvalId.promise, 8_000, "Timed out waiting for approval request");
     this.decisionSubmitted = true;
     yield this.event(`${this.decision === "allowed" ? "!approve" : "!deny"} ${approvalId}`);
+    await withTimeout(this.decisionRecorded.promise, 5_000, "Timed out waiting for approval decision");
+
+    this.statusRequested = true;
+    yield this.event("!status");
+    await withTimeout(this.statusChecked.promise, 5_000, "Timed out waiting for post-approval status");
 
     await withTimeout(this.completed.promise, 12_000, "Timed out waiting for Pi to finish after approval decision");
     yield this.event("!abort");
@@ -68,8 +77,29 @@ class ApprovalSmokeChannel implements ChannelAdapter {
       return;
     }
 
-    if (this.decisionSubmitted && !/^Approval [0-9a-f-]+ (allowed|denied)\.$/i.test(text.trim())) {
-      this.completed.resolve();
+    const decisionText = /^Approval [0-9a-f-]+ (allowed|denied)\.$/i.test(text.trim());
+    if (this.decisionSubmitted && decisionText) {
+      this.decisionRecorded.resolve();
+      return;
+    }
+
+    if (this.statusRequested && text.startsWith("Session ")) {
+      if (text.includes("status: waiting_approval")) {
+        this.statusChecked.reject(new Error("Session still reported waiting_approval after approval decision."));
+        return;
+      }
+      this.statusChecked.resolve();
+      if (this.completedSeen) {
+        this.completed.resolve();
+      }
+      return;
+    }
+
+    if (this.decisionSubmitted) {
+      this.completedSeen = true;
+      if (this.statusRequested) {
+        this.completed.resolve();
+      }
     }
   }
 
@@ -103,11 +133,14 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,
       max_outbound_bytes: 50 * 1024 * 1024,
+      auto_discovery: false,
+      outbound_roots: [],
     },
     delivery: {
       full_tool_output: false,
     },
     allowedRoots: [path.resolve(".")],
+    outboundRoots: [],
     users: {
       smoke: {
         telegram_ids: [],
@@ -150,6 +183,9 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
   }
   if (!channel.sentTexts.some((text) => expectedDecisionText.test(text.trim()))) {
     throw new Error(`Approval ${decision} smoke did not record the decision.`);
+  }
+  if (channel.sentTexts.some((text) => text.startsWith("Session ") && text.includes("status: waiting_approval"))) {
+    throw new Error(`Approval ${decision} smoke left the session waiting_approval after the decision.`);
   }
 
   rmSync(dataDir, { force: true, recursive: true });

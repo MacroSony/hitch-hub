@@ -1,6 +1,6 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a roadmap and architecture planning document, not a verified implementation inventory. See `README.md` for the current implemented surface. Some roadmap items such as `!sessions`, `!switch`, WeChat, inline Telegram approval buttons, native image input for supported Pi image MIME types, and basic outbound artifact upload have landed; additional backends/channels, `!cd`, `!compact`, richer artifact discovery, and robust delivery queues remain planned.
+> Current-state note: this is a roadmap and architecture planning document, not a verified implementation inventory. See `README.md` for the current implemented surface, `implementation_steps.md` for active work, and `docs/completed-work.md` for finished checkpoint history. Some roadmap items such as `!sessions`, `!switch`, WeChat, inline Telegram approval buttons, native image input for supported Pi image MIME types, and basic outbound artifact upload have landed. The current outbound artifact path scanner is a prototype; the target design is explicit hub tools with MCP as an agent-facing transport. See `docs/hub-tools-mcp.md`.
 
 ## 1. Project Goal
 
@@ -152,7 +152,8 @@ Responsibilities:
 - Optional image compression/conversion
 - Optional OCR/transcription later
 - Map media into each agent backend's supported format
-- Upload outbound artifacts to chat platforms
+- Upload outbound artifacts to chat platforms through explicit hub-owned tools
+- Avoid treating every mentioned local path as an artifact
 
 Suggested model:
 
@@ -733,7 +734,7 @@ Add:
 - Inline approval buttons
 - User prompts / questions
 - OpenCode backend
-- Improved artifact discovery
+- Explicit hub artifact tools and MCP transport
 - Configurable command namespace
 - Crash recovery
 - Idle timeout

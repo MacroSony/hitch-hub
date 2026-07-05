@@ -6,6 +6,7 @@ import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
 import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
+import { HubToolService } from "./hub-tools.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
@@ -15,6 +16,7 @@ const INTERACTION_TTL_MS = 5 * 60 * 1000;
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
+  private readonly tools: HubToolService;
   private readonly workers = new Map<string, AgentBackend>();
   private readonly inFlight = new Set<Promise<void>>();
 
@@ -26,12 +28,13 @@ export class RemoteAgentHub {
     this.sessions = new SessionRegistry(config.dataDir);
     this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
+    this.tools = new HubToolService(config, channel, this.audit);
   }
 
   async run(): Promise<void> {
     try {
       for await (const event of this.channel.receive()) {
-        if (shouldHandleInBackground(event)) {
+        if (this.shouldHandleInBackground(event)) {
           const task = this.handleEvent(event).catch((error: unknown) => {
             process.stderr.write(`[hitch] Event handling failed: ${formatError(error)}\n`);
           });
@@ -47,6 +50,19 @@ export class RemoteAgentHub {
     } finally {
       await Promise.allSettled(this.inFlight);
       await this.stopWorkers();
+    }
+  }
+
+  private shouldHandleInBackground(event: InboundChatEvent): boolean {
+    if (selectionReplyFromText(event.text) !== undefined && this.sessions.getPendingInteractionForTarget(event.target)) {
+      return false;
+    }
+
+    try {
+      const command = parseCommand(event.text);
+      return command.type === "prompt" || command.type === "agent_command";
+    } catch {
+      return false;
     }
   }
 
@@ -81,6 +97,9 @@ export class RemoteAgentHub {
           return;
         case "abort":
           await this.handleAbort(event);
+          return;
+        case "send":
+          await this.handleSendMedia(event, command.path, command.caption);
           return;
         case "approve":
           await this.handleApprovalDecision(event, command.id, "allowed");
@@ -227,6 +246,24 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Stopped session ${shortId(session)}.`);
   }
 
+  private async handleSendMedia(event: InboundChatEvent, mediaPath: string, caption?: string): Promise<void> {
+    const result = await this.tools.sendMedia(
+      event.target,
+      {
+        path: mediaPath,
+        ...(caption ? { caption } : {}),
+      },
+      { source: "hub_command" },
+    );
+
+    if (result.status === "sent") {
+      await this.sendChunkedText(event.target, `Media sent: ${path.basename(result.path)}`);
+      return;
+    }
+
+    await this.sendChunkedText(event.target, `Media delivery failed: ${result.message ?? "unknown error"}`);
+  }
+
   private async handleAgentCommand(event: InboundChatEvent, raw: string): Promise<void> {
     const session = this.sessions.getActiveForTarget(event.target);
     if (!session) {
@@ -363,6 +400,12 @@ export class RemoteAgentHub {
     }
 
     this.sessions.updateApprovalStatus(approvalId, decision);
+    if (this.sessions.countPendingApprovalsForSession(approval.sessionId) === 0) {
+      const current = this.sessions.getById(approval.sessionId);
+      if (current?.status === "waiting_approval") {
+        this.updateStatusUnlessStopped(approval.sessionId, backend?.respondToApproval ? "running" : "idle");
+      }
+    }
     await this.audit.write({
       type: "approval.decided",
       sessionId: approval.sessionId,
@@ -374,7 +417,7 @@ export class RemoteAgentHub {
   }
 
   private async handlePendingInteractionSelection(event: InboundChatEvent): Promise<boolean> {
-    const selection = selectionNumberFromText(event.text);
+    const selection = selectionReplyFromText(event.text);
     if (selection === undefined) {
       return false;
     }
@@ -386,15 +429,19 @@ export class RemoteAgentHub {
 
     const page = interactionPage(interaction);
     const pageCount = Math.max(1, Math.ceil(interaction.options.length / interaction.pageSize));
-    if (selection === 0) {
-      const updated = this.sessions.updatePendingInteractionPage(interaction.id, (interaction.pageIndex + 1) % pageCount);
+    if (selection.type === "next" || selection.type === "previous") {
+      const nextPage =
+        selection.type === "next"
+          ? (interaction.pageIndex + 1) % pageCount
+          : (interaction.pageIndex - 1 + pageCount) % pageCount;
+      const updated = this.sessions.updatePendingInteractionPage(interaction.id, nextPage);
       await this.sendInteractionMenu(event.target, updated ?? interaction);
       return true;
     }
 
-    const option = page[selection - 1];
+    const option = page[selection.index];
     if (!option) {
-      await this.sendChunkedText(event.target, `No option ${selection} for this menu.`);
+      await this.sendChunkedText(event.target, `No option ${selection.index} for this menu.`);
       await this.sendInteractionMenu(event.target, interaction);
       return true;
     }
@@ -419,7 +466,7 @@ export class RemoteAgentHub {
       await this.sendChunkedText(target, "The selected session is no longer available.");
       return;
     }
-    if (isTurnBlocked(session)) {
+    if (isTurnBlocked(session) && session.status !== "waiting_input") {
       await this.sendChunkedText(target, blockedTurnMessage(session, "selection"));
       return;
     }
@@ -433,6 +480,9 @@ export class RemoteAgentHub {
     try {
       const processId = await backend.start(session);
       this.sessions.setBackendProcess(session.id, processId);
+      if (this.sessions.getById(session.id)?.status === "waiting_input") {
+        this.updateStatusUnlessStopped(session.id, "running");
+      }
       const result = await backend.executeSelection({
         kind: interaction.kind,
         label: option.label,
@@ -691,6 +741,12 @@ export class RemoteAgentHub {
       case "tool_result":
         await this.sendChunkedText(target, this.formatToolResult(event));
         return false;
+      case "notification":
+        if (event.completesTurn) {
+          this.updateStatusUnlessStopped(session.id, "idle");
+        }
+        await this.sendChunkedText(target, this.formatNotification(event));
+        return event.completesTurn === true;
       case "approval_request": {
         const method = piUiMethod(event.raw);
         const expiresAt = new Date(Date.now() + this.config.approval_timeout_ms).toISOString();
@@ -718,6 +774,17 @@ export class RemoteAgentHub {
         );
         return false;
       }
+      case "interaction_request":
+        this.sessions.updateStatus(session.id, "waiting_input");
+        await this.createAndSendInteraction(target, {
+          owner: "agent",
+          sessionId: session.id,
+          kind: event.interaction.kind,
+          title: event.interaction.title,
+          options: event.interaction.options,
+          ...(event.interaction.pageSize ? { pageSize: event.interaction.pageSize } : {}),
+        });
+        return false;
       case "status":
         this.updateStatusUnlessStopped(
           session.id,
@@ -757,6 +824,10 @@ export class RemoteAgentHub {
     return this.config.delivery.full_tool_output && event.preview ? `${summary}\n${event.preview}` : summary;
   }
 
+  private formatNotification(event: Extract<AgentEvent, { type: "notification" }>): string {
+    return event.text.startsWith("Pi ") ? event.text : `Pi notification: ${event.text}`;
+  }
+
   private async safeSendText(
     target: InboundChatEvent["target"],
     text: string,
@@ -774,7 +845,7 @@ export class RemoteAgentHub {
     text: string,
     deliveredArtifactPaths: Set<string>,
   ): Promise<void> {
-    if (!this.channel.sendArtifact) {
+    if (!this.config.media.auto_discovery || !this.channel.sendArtifact) {
       return;
     }
 
@@ -783,30 +854,13 @@ export class RemoteAgentHub {
       .slice(0, Math.max(0, 5 - deliveredArtifactPaths.size));
     for (const artifact of artifacts) {
       deliveredArtifactPaths.add(path.resolve(artifact.path));
-      try {
-        const size = statSync(artifact.path).size;
-        if (size > this.config.media.max_outbound_bytes) {
-          await this.audit.write({
-            type: "artifact.delivery",
-            target,
-            details: { path: artifact.path, kind: artifact.kind, status: "skipped", reason: "too_large", size },
-          });
-          continue;
-        }
-
-        await this.channel.sendArtifact(target, artifact);
-        await this.audit.write({
-          type: "artifact.delivery",
-          target,
-          details: { path: artifact.path, kind: artifact.kind, status: "sent", size },
-        });
-      } catch (error) {
-        await this.audit.write({
-          type: "artifact.delivery",
-          target,
-          details: { path: artifact.path, kind: artifact.kind, status: "failed", error: formatError(error) },
-        });
-        process.stderr.write(`[hitch] Artifact send failed for ${artifact.path}: ${formatError(error)}\n`);
+      const result = await this.tools.sendMedia(target, artifact, {
+        source: "auto_discovery",
+        notifyOnFailure: true,
+        extraAllowedRoots: [this.config.dataDir, ...this.config.allowedRoots],
+      });
+      if (result.status === "failed") {
+        process.stderr.write(`[hitch] Artifact send failed for ${artifact.path}: ${result.message ?? "unknown error"}\n`);
       }
     }
   }
@@ -852,19 +906,6 @@ function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
 }
 
-function shouldHandleInBackground(event: InboundChatEvent): boolean {
-  if (selectionNumberFromText(event.text) !== undefined) {
-    return false;
-  }
-
-  try {
-    const command = parseCommand(event.text);
-    return command.type === "prompt" || command.type === "agent_command";
-  } catch {
-    return false;
-  }
-}
-
 function targetMatchesSession(target: ChatTarget, session: HubSession): boolean {
   return (
     target.platform === session.platform &&
@@ -875,25 +916,34 @@ function targetMatchesSession(target: ChatTarget, session: HubSession): boolean 
 }
 
 function isTurnBlocked(session: HubSession): boolean {
-  return session.status === "running" || session.status === "waiting_approval";
+  return session.status === "running" || session.status === "waiting_approval" || session.status === "waiting_input";
 }
 
 function blockedTurnMessage(session: HubSession, inputKind: string): string {
   if (session.status === "waiting_approval") {
     return `Session is waiting for approval since ${session.updatedAt}. Use \`!approve <id>\`, \`!deny <id>\`, \`!status\`, or \`!abort\` before sending another ${inputKind}.`;
   }
+  if (session.status === "waiting_input") {
+    return `Session is waiting for a selection since ${session.updatedAt}. Reply with an option, use \`!status\`, or use \`!abort\` before sending another ${inputKind}.`;
+  }
 
   return `Session is still running since ${session.updatedAt}. Wait for Pi to finish, use \`!status\`, or use \`!abort\` before sending another ${inputKind}.`;
 }
 
-function selectionNumberFromText(text: string): number | undefined {
-  const trimmed = text.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    return undefined;
-  }
+type SelectionReply = { type: "option"; index: number } | { type: "next" } | { type: "previous" };
 
-  const value = Number(trimmed);
-  return Number.isSafeInteger(value) ? value : undefined;
+function selectionReplyFromText(text: string): SelectionReply | undefined {
+  const trimmed = text.trim().toLowerCase();
+  if (/^[0-9]$/.test(trimmed)) {
+    return { type: "option", index: Number(trimmed) };
+  }
+  if (trimmed === "n") {
+    return { type: "next" };
+  }
+  if (trimmed === "p") {
+    return { type: "previous" };
+  }
+  return undefined;
 }
 
 function interactionPage(interaction: PendingInteraction): PendingInteractionOption[] {
@@ -906,10 +956,10 @@ function renderInteractionMenu(interaction: PendingInteraction): string {
   const pageCount = Math.max(1, Math.ceil(interaction.options.length / interaction.pageSize));
   const lines = [
     `${interaction.title}${pageCount > 1 ? ` (${interaction.pageIndex + 1}/${pageCount})` : ""}`,
-    ...page.map((option, index) => `${index + 1}. ${formatInteractionOption(option)}`),
+    ...page.map((option, index) => `${index}. ${formatInteractionOption(option)}`),
   ];
   if (pageCount > 1) {
-    lines.push("0. Next page");
+    lines.push("n. Next page", "p. Previous page");
   }
   return lines.join("\n");
 }

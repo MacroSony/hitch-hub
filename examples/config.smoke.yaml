@@ -6,6 +6,8 @@ approval_timeout_ms: 20000
 media:
   max_inbound_bytes: 20971520
   max_outbound_bytes: 52428800
+  auto_discovery: false
+  outbound_roots: []
 
 delivery:
   full_tool_output: false
