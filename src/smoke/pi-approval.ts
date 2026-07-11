@@ -138,6 +138,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     },
     delivery: {
       full_tool_output: false,
+      tool_status_batch_ms: 0,
     },
     allowedRoots: [path.resolve(".")],
     outboundRoots: [],

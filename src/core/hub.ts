@@ -645,6 +645,9 @@ export class RemoteAgentHub {
     let timedOut = false;
     const deliveredArtifactPaths = new Set<string>();
     const target = targetForSession(session);
+    const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, (text) =>
+      this.sendChunkedText(target, text),
+    );
     const toolContext = this.toolBridge.contextFor(session.id);
     let toolDrain = Promise.resolve();
     const drainToolRequests = () => {
@@ -666,7 +669,7 @@ export class RemoteAgentHub {
         if (this.sessions.getById(session.id)?.status === "stopped") {
           return;
         }
-        const finished = await this.handleAgentEvent(session, agentEvent, streamedText, deliveredArtifactPaths);
+        const finished = await this.handleAgentEvent(session, agentEvent, streamedText, deliveredArtifactPaths, toolMessages);
         if (agentEvent.type === "text_delta") {
           streamedText += agentEvent.text;
         }
@@ -683,6 +686,7 @@ export class RemoteAgentHub {
     } finally {
       clearTimeout(timeout);
       clearInterval(toolDrainInterval);
+      toolMessages.cancelTimer();
       drainToolRequests();
       await toolDrain;
     }
@@ -694,6 +698,7 @@ export class RemoteAgentHub {
         sessionId: session.id,
         details: { timeoutMs: this.config.agent_turn_timeout_ms },
       });
+      await toolMessages.flush();
       await this.sendChunkedText(
         target,
         `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`,
@@ -711,6 +716,7 @@ export class RemoteAgentHub {
       sessionId: session.id,
       details: { streamedTextLength: streamedText.length },
     });
+    await toolMessages.flush();
     await this.sendChunkedText(
       target,
       streamedText.length > 0 ? streamedText : "Pi worker exited before reporting a final response; session is idle.",
@@ -722,6 +728,7 @@ export class RemoteAgentHub {
     event: AgentEvent,
     streamedText: string,
     deliveredArtifactPaths: Set<string>,
+    toolMessages: ToolStatusBatcher,
   ): Promise<boolean> {
     if (this.sessions.getById(session.id)?.status === "stopped") {
       return true;
@@ -734,23 +741,26 @@ export class RemoteAgentHub {
         return false;
       case "final": {
         const finalText = streamedText.length > 0 && event.text === "Pi completed." ? streamedText : event.text;
+        await toolMessages.flush();
         await this.sendChunkedText(target, finalText);
         await this.sendArtifactsMentionedInText(target, finalText, deliveredArtifactPaths);
         return true;
       }
       case "tool_call":
-        await this.sendChunkedText(target, this.formatToolStart(event));
+        await toolMessages.add(this.formatToolStart(event));
         return false;
       case "tool_result":
-        await this.sendChunkedText(target, this.formatToolResult(event));
+        await toolMessages.add(this.formatToolResult(event));
         return false;
       case "notification":
         if (event.completesTurn) {
           this.updateStatusUnlessStopped(session.id, "idle");
         }
+        await toolMessages.flush();
         await this.sendChunkedText(target, this.formatNotification(event));
         return event.completesTurn === true;
       case "approval_request": {
+        await toolMessages.flush();
         const method = piUiMethod(event.raw);
         const expiresAt = new Date(Date.now() + this.config.approval_timeout_ms).toISOString();
         const approvalId = this.sessions.createApproval({
@@ -778,6 +788,7 @@ export class RemoteAgentHub {
         return false;
       }
       case "interaction_request":
+        await toolMessages.flush();
         this.sessions.updateStatus(session.id, "waiting_input");
         await this.createAndSendInteraction(target, {
           owner: "agent",
@@ -817,9 +828,19 @@ export class RemoteAgentHub {
   }
 
   private formatToolResult(event: Extract<AgentEvent, { type: "tool_result" }>): string {
-    const status = event.succeeded === false ? "failed" : "succeeded";
+    const status =
+      event.succeeded === true
+        ? "succeeded"
+        : event.succeeded === false
+          ? "failed"
+          : "completed";
     const summary = `Tool finished: ${event.name} (${status})`;
-    return this.config.delivery.full_tool_output && event.text ? `${summary}\n${event.text}` : summary;
+    // Always surface tool output for failures so the user (and the chat) sees the
+    // real error; only gate successful/noisy output behind full_tool_output.
+    if (event.text && (event.succeeded === false || this.config.delivery.full_tool_output)) {
+      return `${summary}\n${event.text}`;
+    }
+    return summary;
   }
 
   private formatToolStart(event: Extract<AgentEvent, { type: "tool_call" }>): string {
@@ -902,6 +923,48 @@ export class RemoteAgentHub {
     }
 
     return false;
+  }
+}
+
+class ToolStatusBatcher {
+  private messages: string[] = [];
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private flushQueue = Promise.resolve();
+
+  constructor(
+    private readonly batchMs: number,
+    private readonly send: (text: string) => Promise<void>,
+  ) {}
+
+  async add(message: string): Promise<void> {
+    if (this.batchMs <= 0) {
+      await this.send(message);
+      return;
+    }
+
+    this.messages.push(message);
+    if (!this.timer) {
+      this.timer = setTimeout(() => {
+        void this.flush();
+      }, this.batchMs);
+    }
+  }
+
+  async flush(): Promise<void> {
+    this.cancelTimer();
+    const text = this.messages.splice(0).join("\n");
+    if (text.length > 0) {
+      this.flushQueue = this.flushQueue.then(() => this.send(text));
+    }
+    await this.flushQueue;
+  }
+
+  cancelTimer(): void {
+    if (!this.timer) {
+      return;
+    }
+    clearTimeout(this.timer);
+    this.timer = undefined;
   }
 }
 

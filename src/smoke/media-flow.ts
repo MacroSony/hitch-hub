@@ -164,6 +164,7 @@ class BridgeMediaBackend implements AgentBackend {
 async function main(): Promise<void> {
   const summary = await runScenario(false);
   await runScenario(true);
+  await runToolStatusBatchScenario();
   await runExplicitSendScenario();
   await runAutoDiscoveryDisabledScenario();
   await runToolBridgeScenario();
@@ -243,6 +244,50 @@ async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; 
   }
 
   return { inbound: backend.receivedInput.attachments.length, outbound: channel.artifacts.length };
+}
+
+async function runToolStatusBatchScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", "batched-tools");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+
+  const artifactPath = path.join(dataDir, "batched.png");
+  writeFileSync(artifactPath, PNG_1X1);
+
+  const target: ChatTarget = {
+    platform: "fake",
+    chatId: "media-flow-batched-tools",
+    userId: "media-user",
+  };
+  const channel = new MediaFlowChannel([
+    {
+      id: "new",
+      target,
+      text: "!new pi",
+      receivedAt: new Date().toISOString(),
+    },
+    {
+      id: "prompt",
+      target,
+      text: "Inspect this with batched tool statuses.",
+      receivedAt: new Date().toISOString(),
+    },
+  ]);
+  const config = mediaFlowConfig(dataDir, false, false, 60_000);
+  const backend = new MediaFlowBackend(artifactPath);
+  const hub = new RemoteAgentHub(config, channel, () => backend);
+  await hub.run();
+
+  const batchIndex = channel.texts.findIndex(
+    (text) => text.includes("Tool started: read_file") && text.includes("Tool finished: read_file (succeeded)"),
+  );
+  const finalIndex = channel.texts.findIndex((text) => text.startsWith(`Generated artifact: "${artifactPath}"`));
+  if (batchIndex === -1) {
+    throw new Error(`Expected tool start/result to be batched into one message: ${JSON.stringify(channel.texts)}`);
+  }
+  if (finalIndex === -1 || batchIndex > finalIndex) {
+    throw new Error("Expected batched tool status message to be sent before final agent text.");
+  }
 }
 
 async function runExplicitSendScenario(): Promise<void> {
@@ -375,7 +420,7 @@ function findBridgeResultPath(dataDir: string): string | undefined {
   return undefined;
 }
 
-function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery = true): HubConfig {
+function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery = true, toolStatusBatchMs = 0): HubConfig {
   const cwd = path.resolve(".");
   return {
     data_dir: dataDir,
@@ -392,6 +437,7 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
     },
     delivery: {
       full_tool_output: fullToolOutput,
+      tool_status_batch_ms: toolStatusBatchMs,
     },
     allowedRoots: [cwd, dataDir],
     outboundRoots: [dataDir],

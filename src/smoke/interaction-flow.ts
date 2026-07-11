@@ -279,6 +279,7 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
     },
     delivery: {
       full_tool_output: false,
+      tool_status_batch_ms: 0,
     },
     allowedRoots: [cwd],
     outboundRoots: [],

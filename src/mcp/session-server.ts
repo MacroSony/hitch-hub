@@ -23,6 +23,19 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+const OUTBOUND_MEDIA_PROMPT = [
+  "You are connected to Hitch, a local hub that owns outbound chat delivery.",
+  "",
+  "When a user asks you to generate, paint, edit, export, or otherwise produce an image or file that should be visible in the remote chat:",
+  "1. Create the media file locally and wait until it exists on disk.",
+  "2. Call the MCP tool `hitch.send_media` with the absolute local file path.",
+  "3. Include a short caption when useful, and set `kind` to `image` for generated images.",
+  "4. Report the structured delivery result truthfully to the user.",
+  "",
+  "Do not only mention the file path in your final message when the user expects the chat to receive the media.",
+  "Do not send directly to Telegram, WeChat, or another chat provider. Hitch chooses the active chat target and enforces path policy.",
+].join("\n");
+
 server.registerTool(
   "hitch.send_media",
   {
@@ -62,6 +75,26 @@ server.registerTool(
       structuredContent: result,
     };
   },
+);
+
+server.registerPrompt(
+  "hitch.outbound_media",
+  {
+    title: "Hitch Outbound Media",
+    description: "Instructions for sending generated images and files through Hitch using hitch.send_media.",
+  },
+  async () => ({
+    description: "Use Hitch's explicit media tool when generated media should be delivered to the active remote chat.",
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: OUTBOUND_MEDIA_PROMPT,
+        },
+      },
+    ],
+  }),
 );
 
 async function main(): Promise<void> {

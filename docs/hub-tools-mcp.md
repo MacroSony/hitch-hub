@@ -241,6 +241,15 @@ The hub drains that outbox only while it is consuming an active agent turn, vali
 
 For MCP-capable agents, `npm run mcp:session` starts a stdio MCP server that exposes `hitch.send_media` and uses the same outbox/result protocol. The agent must launch it with the `HITCH_TOOL_*` environment variables inherited from the hub-started worker.
 
+The same server also exposes the MCP prompt `hitch.outbound_media`. That prompt is the agent-facing guidance for generated media:
+
+- create the media file locally
+- call `hitch.send_media` with the absolute path
+- report the structured delivery result
+- do not rely on final-message path mentions as the delivery mechanism
+
+MCP prompts are discoverable templates. They are not guaranteed to be injected into every client automatically. A client that supports MCP prompt selection or auto-loading should load `hitch.outbound_media`; otherwise Hitch needs a small client-specific adapter. The inspected Pi 0.80.2 install explicitly says it has no built-in MCP and exposes extension, skill, and prompt-template resources instead of a native MCP server list.
+
 The raw JSONL request shape is:
 
 ```json
@@ -283,10 +292,11 @@ Rules:
 3. Add user-visible delivery failure messages.
 4. Add Pi bridge through session-scoped JSONL outbox and result files.
 5. Expose MCP `hitch.send_media` only.
-6. Update Pi guidance so generated images are sent explicitly.
+6. Expose MCP prompt `hitch.outbound_media` as the canonical guidance for explicit generated-media delivery.
 7. Gate current text path scanner behind `media.auto_discovery`.
 8. Default auto-discovery to off.
-9. Add richer artifact tools only after the single-tool flow is reliable.
+9. Add Pi-native MCP server list wiring when available, or a Pi extension adapter if Pi does not consume MCP prompts/tools natively.
+10. Add richer artifact tools only after the single-tool flow is reliable.
 
 ## Non-Goals
 

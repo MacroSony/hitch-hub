@@ -475,11 +475,12 @@ function mapPiEvent(value: unknown): AgentEvent[] {
 
   if (type === "tool_execution_end") {
     const text = extractTextContent(record.result) ?? extractErrorText(record);
+    const succeeded = inferToolSucceeded(record);
     return [
       {
         type: "tool_result",
         name: String(record.toolName ?? "tool"),
-        succeeded: inferToolSucceeded(record) ?? true,
+        ...(succeeded === undefined ? {} : { succeeded }),
         ...(text ? { text } : {}),
       },
     ];
@@ -784,6 +785,11 @@ function extractErrorText(record: Record<string, unknown>): string | undefined {
 }
 
 function inferToolSucceeded(record: Record<string, unknown>): boolean | undefined {
+  // pi's `tool_execution_end` event carries `isError` at the top level
+  // (see pi docs/extensions.md: tool_execution_end -> event.isError).
+  if (typeof record.isError === "boolean") {
+    return !record.isError;
+  }
   if (typeof record.success === "boolean") {
     return record.success;
   }

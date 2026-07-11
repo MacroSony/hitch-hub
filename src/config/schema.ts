@@ -40,6 +40,7 @@ const mediaSchema = z.object({
 
 const deliverySchema = z.object({
   full_tool_output: z.boolean().default(false),
+  tool_status_batch_ms: z.number().int().min(0).default(0),
 });
 
 export const configSchema = z.object({
@@ -55,6 +56,7 @@ export const configSchema = z.object({
   }),
   delivery: deliverySchema.default({
     full_tool_output: false,
+    tool_status_batch_ms: 0,
   }),
   users: z.record(z.string(), userSchema).default({}),
   channels: z

@@ -69,6 +69,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
+- `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
@@ -142,7 +143,8 @@ Media behavior:
 - Inbound and outbound media byte limits are configured under `media`
 - Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
 - Agent tool bridge: active Pi workers receive `HITCH_TOOL_*` environment variables for a session-scoped media-send bridge
-- MCP bridge: `npm run mcp:session` exposes `hitch.send_media` over stdio for agents that can launch a session-scoped MCP server
+- MCP bridge: `npm run mcp:session` exposes `hitch.send_media` and the `hitch.outbound_media` prompt over stdio for agents that can launch a session-scoped MCP server
+- MCP-capable agents should load the `hitch.outbound_media` prompt so generated images/files are sent explicitly instead of only mentioned by path
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
 - Outbound artifact delivery attempts are recorded in the audit log
@@ -151,6 +153,7 @@ Tool output behavior:
 
 - Tool calls show the tool name and completion status by default.
 - Full tool result text is hidden unless `delivery.full_tool_output: true` is configured.
+- Tool call/result status messages are sent immediately by default; set `delivery.tool_status_batch_ms` to batch bursts into one message and flush them before final agent text, notifications, approval prompts, or interaction prompts.
 - Hidden tool result text is not scanned for outbound artifact upload.
 
 WeChat behavior:
@@ -244,7 +247,7 @@ Pi config behavior:
 ## Roadmap
 
 - Robust live Telegram and WeChat usage testing
-- Minimal `hitch.send_media` hub tool, with MCP transport for agents that support it
+- Pi-native MCP server list wiring, once Pi exposes a stable MCP client configuration surface
 - Durable delivery tracking and user-visible delivery failures
 - Richer approval rendering across non-Telegram channels
 - Discord adapter

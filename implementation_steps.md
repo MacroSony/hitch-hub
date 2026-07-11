@@ -70,7 +70,8 @@ Checklist:
   - interim option: local CLI/outbox shim authenticated to the active session
 - [x] Add active session/turn scoping for agent-initiated media sends.
 - [x] Add hub MCP transport exposing only the session-scoped `hitch.send_media` tool for the first MCP milestone.
-- [ ] Update Pi guidance/skill prompt to call `hitch.send_media` instead of merely mentioning paths.
+- [x] Expose MCP prompt guidance through `hitch.outbound_media` so MCP-capable agents can learn when to call `hitch.send_media`.
+- [ ] Add Pi-native MCP server list wiring when Pi exposes a stable MCP client configuration surface, or add a small Pi extension adapter if needed.
 - [x] Gate current final-text path scanner behind `media.auto_discovery`.
 - [x] Default auto-discovery to off.
 - [~] Add smoke tests for:
@@ -80,12 +81,14 @@ Checklist:
   - channel send failure audited and surfaced
   - auto-discovery disabled by default
   - MCP `hitch.send_media` outbox/result protocol
+  - MCP `hitch.outbound_media` prompt discovery
 
 ## Open Decisions
 
 - [!] MCP process shape: one hub MCP server with short-lived session tokens, or one per-session MCP server/process.
 - [x] Transport for first bridge: session-scoped JSONL outbox and result file.
 - [x] Agent-initiated `send_media` is processed only while the hub is consuming an active agent turn.
+- [!] Whether Pi will consume MCP prompts automatically from a native MCP server list, or whether Hitch needs a Pi extension adapter to fetch/apply the prompt.
 - [!] Whether non-image file sends should be supported by the first `send_media` tool or require a stronger opt-in than images.
 
 ## Design Decision: Agent Config Ownership

@@ -36,6 +36,18 @@ async function main(): Promise<void> {
 
   try {
     await client.connect(transport);
+    const prompts = await client.listPrompts();
+    if (!prompts.prompts.some((prompt) => prompt.name === "hitch.outbound_media")) {
+      throw new Error("Expected hitch.outbound_media prompt to be registered.");
+    }
+    const prompt = await client.getPrompt({ name: "hitch.outbound_media" });
+    const promptText = prompt.messages
+      .map((message) => (message.content.type === "text" ? message.content.text : ""))
+      .join("\n");
+    if (!promptText.includes("hitch.send_media") || !promptText.includes("Do not only mention the file path")) {
+      throw new Error(`Unexpected MCP prompt content: ${JSON.stringify(prompt)}`);
+    }
+
     const tools = await client.listTools();
     if (!tools.tools.some((tool) => tool.name === "hitch.send_media")) {
       throw new Error("Expected hitch.send_media tool to be registered.");
