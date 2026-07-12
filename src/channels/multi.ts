@@ -1,5 +1,5 @@
 import type { Platform } from "../core/types.js";
-import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
 
 type ChannelEntry = {
   platform: Platform;
@@ -117,6 +117,10 @@ export class MultiChannelAdapter implements ChannelAdapter {
       throw new Error(`Channel does not support artifact delivery: ${target.platform}`);
     }
     await adapter.sendArtifact(target, artifact, opts);
+  }
+
+  health(target: InboundChatEvent["target"]): ChannelHealth {
+    return this.adapterFor(target.platform).health?.(target) ?? { state: "healthy" };
   }
 
   private adapterFor(platform: Platform): ChannelAdapter {

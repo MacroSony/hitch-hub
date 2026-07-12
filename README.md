@@ -70,6 +70,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
+- `delivery.send_timeout_ms`: maximum end-to-end time for one queued outbound text/media delivery before Hitch records a failure and continues
 
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
@@ -155,6 +156,13 @@ Tool output behavior:
 - Full tool result text is hidden unless `delivery.full_tool_output: true` is configured.
 - Tool call/result status messages are sent immediately by default; set `delivery.tool_status_batch_ms` to batch bursts into one message and flush them before final agent text, notifications, approval prompts, or interaction prompts.
 - Hidden tool result text is not scanned for outbound artifact upload.
+
+Runtime health behavior:
+
+- Agent turns have an authoritative wall-clock deadline; Hitch marks the turn as an error even if Pi never closes its event stream.
+- Outbound text is queued per chat and delivery attempts are bounded by `delivery.send_timeout_ms`, so a slow chat API does not block Pi event consumption.
+- `!status` reports active-turn age/deadline, worker liveness, pending/recent delivery health, and channel receive health.
+- Text delivery attempts are recorded in the audit log without storing message contents.
 
 WeChat behavior:
 

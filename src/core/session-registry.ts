@@ -278,6 +278,9 @@ export class SessionRegistry {
         "UPDATE hub_sessions SET status = 'idle', process_id = NULL, updated_at = ? WHERE status IN ('running', 'waiting_approval', 'waiting_input')",
       )
       .run(now);
+    // Backend PIDs belong to the previous hub process and are never reusable,
+    // including for sessions that happened to persist as idle or error.
+    this.db.prepare("UPDATE hub_sessions SET process_id = NULL WHERE process_id IS NOT NULL").run();
     this.db
       .prepare("UPDATE approval_requests SET status = 'expired', updated_at = ? WHERE status = 'pending'")
       .run(now);

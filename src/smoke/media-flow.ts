@@ -438,6 +438,7 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
     delivery: {
       full_tool_output: fullToolOutput,
       tool_status_batch_ms: toolStatusBatchMs,
+      send_timeout_ms: 5_000,
     },
     allowedRoots: [cwd, dataDir],
     outboundRoots: [dataDir],

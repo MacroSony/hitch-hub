@@ -35,7 +35,43 @@ hub sends via Telegram/WeChat/etc.
 hub returns a structured result and audits the delivery
 ```
 
-## Active Iteration: Minimal `send_media` Tool
+## Active Iteration: Runtime Reliability
+
+Goal: prevent channel delivery failures or stale agent streams from leaving a session indefinitely marked as running.
+
+Checklist:
+
+- [x] Make `agent_turn_timeout_ms` an authoritative wall-clock deadline even when Pi does not close its event stream.
+- [x] Move outbound text onto an ordered per-target delivery queue with bounded send attempts.
+- [x] Apply the same bounded send deadline to explicit media delivery.
+- [x] Give every active session turn an in-memory owner/turn ID so late events and overlapping prompts cannot mutate a newer turn.
+- [x] Expand `!status` with active-turn age/deadline, worker liveness, delivery queue health, and channel receive health.
+- [x] Persist text delivery successes/failures in the audit log.
+- [x] Add a regression flow covering an ignored abort, a send client that ignores cancellation, an overlapping prompt, a late stale event, and recovery on a new turn.
+- [~] Run live WeChat failure/recovery verification; the deployed hub was restarted on this iteration on 2026-07-11 and is under away testing.
+
+## Proposed Next Iteration: Operability and Delivery Evidence
+
+Goal: turn the now-bounded runtime into a service that can explain, survive, and recover from live channel failures without relying on a tmux scrollback.
+
+Recommended scope:
+
+- [ ] Add graceful `SIGINT`/`SIGTERM` shutdown so channel receive loops stop, active workers are aborted, queued audit writes drain, and restart state is deterministic.
+- [ ] Add a sample user-level systemd service with restart-on-failure and a documented health/startup check; keep tmux as a development option.
+- [ ] Audit channel-health transitions with de-duplication/rate limiting instead of logging every repeated poll error.
+- [ ] Give outbound text deliveries IDs and persist their lifecycle (`queued`, `sending`, `sent`, `failed`, `expired`) so missing replies can be traced after the process exits.
+- [ ] Add a small `!health` or expanded hub-level diagnostic command for channel state, delivery backlog, last successful receive/send, process uptime, and recent failure counts.
+- [ ] Add deterministic WeChat adapter tests for `ret=-2`, expired context tokens, queue expiry, polling recovery, and cancellation during CDN upload.
+- [ ] Add audit/log retention limits before per-message delivery auditing is used continuously.
+
+Exit criteria:
+
+- A killed or crashed hub restarts automatically and reports a clear recovery state.
+- Every accepted outbound message has a durable terminal delivery state or an explicit expiry.
+- Repeated WeChat transport failures produce one useful health transition instead of an unbounded terminal-only error stream.
+- An operator can distinguish agent, delivery, and channel failures without shell access.
+
+## Previous Iteration: Minimal `send_media` Tool
 
 Goal: replace implicit outbound-media path discovery with one explicit, blocking hub-owned media send operation.
 

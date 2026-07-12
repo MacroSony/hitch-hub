@@ -98,6 +98,7 @@ function createConfiguredAdapter(config: ReturnType<typeof loadConfig>, mediaCac
         unsafeAllowAll: wechat.unsafe_allow_all,
         botType: wechat.bot_type,
         maxInboundBytes: config.media.max_inbound_bytes,
+        sendTimeoutMs: config.delivery.send_timeout_ms,
       }),
     });
   }

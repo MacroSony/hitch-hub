@@ -1,5 +1,5 @@
 import type { ChatTarget } from "../core/types.js";
-import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
 
 export class FakeChannelAdapter implements ChannelAdapter {
   private readonly events: InboundChatEvent[];
@@ -33,5 +33,9 @@ export class FakeChannelAdapter implements ChannelAdapter {
   async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, _opts?: SendOptions): Promise<void> {
     const label = `${target.platform}:${target.chatId}`;
     process.stdout.write(`[${label}] artifact ${artifact.kind}: ${artifact.path}${artifact.caption ? `\n${artifact.caption}` : ""}\n`);
+  }
+
+  health(): ChannelHealth {
+    return { state: "healthy", lastSuccessAt: new Date().toISOString() };
   }
 }

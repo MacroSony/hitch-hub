@@ -12,6 +12,7 @@ media:
 delivery:
   full_tool_output: false
   tool_status_batch_ms: 0
+  send_timeout_ms: 30000
 
 users:
   local:

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
 import type { MediaCache, StoreAttachmentInput } from "../core/media-cache.js";
-import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
 
 type TelegramUpdate = {
   update_id: number;
@@ -52,6 +52,7 @@ type TelegramGetFileResponse = {
 
 export class TelegramAdapter implements ChannelAdapter {
   private updateOffset = 0;
+  private channelHealth: ChannelHealth = { state: "starting" };
 
   constructor(
     private readonly botToken: string,
@@ -69,7 +70,13 @@ export class TelegramAdapter implements ChannelAdapter {
       try {
         updates = await this.getUpdates();
         retryDelayMs = 1_000;
+        this.channelHealth = { state: "healthy", lastSuccessAt: new Date().toISOString() };
       } catch (error) {
+        this.channelHealth = {
+          state: error instanceof TelegramFatalError ? "stopped" : "degraded",
+          lastErrorAt: new Date().toISOString(),
+          lastError: formatError(error),
+        };
         if (error instanceof TelegramFatalError) {
           throw error;
         }
@@ -134,7 +141,7 @@ export class TelegramAdapter implements ChannelAdapter {
     }
   }
 
-  async sendText(target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
+  async sendText(target: ChatTarget, text: string, opts?: SendOptions): Promise<void> {
     const url = `https://api.telegram.org/bot${this.botToken}/sendMessage`;
     const response = await fetchWithRetry(
       url,
@@ -145,9 +152,10 @@ export class TelegramAdapter implements ChannelAdapter {
           chat_id: target.chatId,
           text,
           ...(target.threadId ? { message_thread_id: target.threadId } : {}),
-          ...(_opts?.replyToEventId ? { reply_to_message_id: _opts.replyToEventId } : {}),
-          ...(_opts?.buttons ? { reply_markup: telegramInlineKeyboard(_opts.buttons) } : {}),
+          ...(opts?.replyToEventId ? { reply_to_message_id: opts.replyToEventId } : {}),
+          ...(opts?.buttons ? { reply_markup: telegramInlineKeyboard(opts.buttons) } : {}),
         }),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
       },
       { attempts: 3, baseDelayMs: 750 },
     );
@@ -181,6 +189,7 @@ export class TelegramAdapter implements ChannelAdapter {
       {
         method: "POST",
         body: form,
+        ...(opts?.signal ? { signal: opts.signal } : {}),
       },
       { attempts: 3, baseDelayMs: 750 },
     );
@@ -188,6 +197,10 @@ export class TelegramAdapter implements ChannelAdapter {
     if (!response.ok) {
       throw new Error(`Telegram ${method} failed: ${response.status} ${await response.text()}`);
     }
+  }
+
+  health(): ChannelHealth {
+    return { ...this.channelHealth };
   }
 
   private async getUpdates(): Promise<TelegramUpdate[]> {
@@ -362,6 +375,7 @@ async function fetchWithRetry(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+    init?.signal?.throwIfAborted();
     try {
       const response = await fetch(input, init);
       if (!isRetryableStatus(response.status) || attempt === options.attempts) {
@@ -374,7 +388,7 @@ async function fetchWithRetry(
       }
     }
 
-    await sleep(options.baseDelayMs * attempt);
+    await sleep(options.baseDelayMs * attempt, init?.signal ?? undefined);
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -384,9 +398,24 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("Operation aborted"));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

@@ -1,26 +1,39 @@
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
-import type { ChannelAdapter, InboundChatEvent } from "../channels/types.js";
+import type { ChannelAdapter, ChannelHealth, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
 import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { HubToolService } from "./hub-tools.js";
 import { AgentToolBridge } from "./tool-bridge.js";
+import { DeliveryCoordinator, type DeliveryHealth } from "./delivery-coordinator.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
 
 const INTERACTION_TTL_MS = 5 * 60 * 1000;
 
+type ActiveTurn = {
+  id: string;
+  sessionId: string;
+  startedAt: string;
+  deadlineAt: string;
+  lastEventAt?: string;
+  phase: "running" | "waiting_approval" | "waiting_input" | "timed_out";
+};
+
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
   private readonly tools: HubToolService;
   private readonly toolBridge: AgentToolBridge;
+  private readonly delivery: DeliveryCoordinator;
   private readonly workers = new Map<string, AgentBackend>();
   private readonly inFlight = new Set<Promise<void>>();
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private readonly activeTurns = new Map<string, ActiveTurn>();
 
   constructor(
     private readonly config: HubConfig,
@@ -30,7 +43,10 @@ export class RemoteAgentHub {
     this.sessions = new SessionRegistry(config.dataDir);
     this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
-    this.tools = new HubToolService(config, channel, this.audit);
+    this.delivery = new DeliveryCoordinator(channel, this.audit, config.delivery.send_timeout_ms);
+    this.tools = new HubToolService(config, channel, this.audit, async (target, text) => {
+      this.delivery.enqueueText(target, text);
+    });
     this.toolBridge = new AgentToolBridge(config.dataDir);
   }
 
@@ -52,6 +68,8 @@ export class RemoteAgentHub {
       }
     } finally {
       await Promise.allSettled(this.inFlight);
+      await Promise.allSettled(this.backgroundTasks);
+      await this.delivery.drain();
       await this.stopWorkers();
     }
   }
@@ -72,7 +90,7 @@ export class RemoteAgentHub {
   private async handleEvent(event: InboundChatEvent): Promise<void> {
     try {
       if (!this.isAuthorizedTarget(event)) {
-        await this.channel.sendText(event.target, "Unauthorized chat/user.");
+        await this.safeSendText(event.target, "Unauthorized chat/user.");
         return;
       }
 
@@ -142,7 +160,7 @@ export class RemoteAgentHub {
         target: event.target,
         details: { cwd },
       });
-      await this.channel.sendText(event.target, `Rejected cwd outside allowed roots: ${cwd}`);
+      await this.safeSendText(event.target, `Rejected cwd outside allowed roots: ${cwd}`);
       return;
     }
 
@@ -177,10 +195,21 @@ export class RemoteAgentHub {
       return;
     }
 
-    await this.sendChunkedText(
-      event.target,
-      `Session ${shortId(session)}\nagent: ${session.agent}\nstatus: ${session.status}\ncwd: ${session.cwd}`,
-    );
+    const turn = this.activeTurns.get(session.id);
+    const worker = this.workers.get(session.id);
+    const delivery = this.delivery.health(event.target);
+    const channel = this.channel.health?.(event.target);
+    const lines = [
+      `Session ${shortId(session)}`,
+      `agent: ${session.agent}`,
+      `status: ${session.status}`,
+      `turn: ${formatTurnHealth(turn, session.status)}`,
+      `worker: ${formatWorkerHealth(worker, session.processId, Boolean(turn))}`,
+      `delivery: ${formatDeliveryHealth(delivery)}`,
+      `channel: ${formatChannelHealth(channel)}`,
+      `cwd: ${session.cwd}`,
+    ];
+    await this.sendChunkedText(event.target, lines.join("\n"));
   }
 
   private async handleSessions(event: InboundChatEvent): Promise<void> {
@@ -240,7 +269,9 @@ export class RemoteAgentHub {
     const worker = this.workers.get(session.id);
     await worker?.abort();
     this.workers.delete(session.id);
+    this.activeTurns.delete(session.id);
     this.sessions.updateStatus(session.id, "stopped");
+    this.sessions.setBackendProcess(session.id, undefined);
     await this.audit.write({
       type: "session.aborted",
       sessionId: session.id,
@@ -274,7 +305,7 @@ export class RemoteAgentHub {
       return;
     }
 
-    if (isTurnBlocked(session)) {
+    if (this.activeTurns.has(session.id) || isTurnBlocked(session)) {
       await this.sendBlockedTurn(event, session, "agent command");
       return;
     }
@@ -286,6 +317,8 @@ export class RemoteAgentHub {
       return;
     }
 
+    const turn = this.beginTurn(session.id);
+    this.sessions.updateStatus(session.id, "running");
     try {
       const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
       this.sessions.setBackendProcess(session.id, processId);
@@ -298,9 +331,9 @@ export class RemoteAgentHub {
 
       const input = event.attachments ? { raw, attachments: event.attachments } : { raw };
       const result = await backend.executeCommand(input);
-      await this.handleAgentCommandResult(event.target, session, backend, result);
+      await this.handleAgentCommandResult(event.target, session, backend, result, turn);
     } catch (error) {
-      this.updateStatusUnlessStopped(session.id, "error");
+      this.updateStatusForTurn(turn, "error");
       await this.audit.write({
         type: "agent_command.error",
         sessionId: session.id,
@@ -309,8 +342,10 @@ export class RemoteAgentHub {
       });
       await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
     } finally {
+      this.releaseTurn(turn);
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
+        this.sessions.setBackendProcess(session.id, undefined);
       }
     }
   }
@@ -322,11 +357,12 @@ export class RemoteAgentHub {
       return;
     }
 
-    if (isTurnBlocked(session)) {
+    if (this.activeTurns.has(session.id) || isTurnBlocked(session)) {
       await this.sendBlockedTurn(event, session, "message");
       return;
     }
 
+    const turn = this.beginTurn(session.id);
     this.sessions.updateStatus(session.id, "running");
     await this.audit.write({
       type: "prompt.received",
@@ -348,9 +384,9 @@ export class RemoteAgentHub {
       });
 
       await backend.send(event.attachments ? { text, attachments: event.attachments } : { text });
-      await this.consumeAgentEvents(session, backend);
+      await this.consumeAgentEvents(session, backend, turn);
     } catch (error) {
-      this.updateStatusUnlessStopped(session.id, "error");
+      this.updateStatusForTurn(turn, "error");
       await this.audit.write({
         type: "worker.error",
         sessionId: session.id,
@@ -359,8 +395,10 @@ export class RemoteAgentHub {
       });
       await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
     } finally {
+      this.releaseTurn(turn);
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
+        this.sessions.setBackendProcess(session.id, undefined);
       }
     }
   }
@@ -407,6 +445,10 @@ export class RemoteAgentHub {
       const current = this.sessions.getById(approval.sessionId);
       if (current?.status === "waiting_approval") {
         this.updateStatusUnlessStopped(approval.sessionId, backend?.respondToApproval ? "running" : "idle");
+        const turn = this.activeTurns.get(approval.sessionId);
+        if (turn && backend?.respondToApproval) {
+          this.setTurnPhase(turn, "running");
+        }
       }
     }
     await this.audit.write({
@@ -543,6 +585,7 @@ export class RemoteAgentHub {
     session: HubSession,
     backend: AgentBackend,
     result: AgentCommandResult,
+    turn?: ActiveTurn,
   ): Promise<void> {
     if (result.text) {
       await this.sendChunkedText(target, result.text);
@@ -558,8 +601,21 @@ export class RemoteAgentHub {
       });
     }
     if (result.consumesEvents) {
-      this.sessions.updateStatus(session.id, "running");
-      await this.consumeAgentEvents(session, backend);
+      const existingTurn = this.activeTurns.get(session.id);
+      const consumingTurn = turn ?? existingTurn ?? this.beginTurn(session.id);
+      const ownsTurn = turn === undefined && existingTurn === undefined;
+      this.updateStatusForTurn(consumingTurn, "running");
+      try {
+        await this.consumeAgentEvents(session, backend, consumingTurn);
+      } finally {
+        if (ownsTurn) {
+          this.releaseTurn(consumingTurn);
+        }
+      }
+      return;
+    }
+    if (turn) {
+      this.updateStatusForTurn(turn, "idle");
     }
   }
 
@@ -640,9 +696,8 @@ export class RemoteAgentHub {
     await Promise.allSettled(workers.map((worker) => worker.stop()));
   }
 
-  private async consumeAgentEvents(session: HubSession, backend: AgentBackend): Promise<void> {
+  private async consumeAgentEvents(session: HubSession, backend: AgentBackend, turn: ActiveTurn): Promise<void> {
     let streamedText = "";
-    let timedOut = false;
     const deliveredArtifactPaths = new Set<string>();
     const target = targetForSession(session);
     const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, (text) =>
@@ -659,62 +714,67 @@ export class RemoteAgentHub {
     };
     drainToolRequests();
     const toolDrainInterval = setInterval(drainToolRequests, 250);
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      void backend.abort();
-    }, this.config.agent_turn_timeout_ms);
+    const deadline = turnDeadline(turn);
+    const iterator = backend.events()[Symbol.asyncIterator]();
 
     try {
-      for await (const agentEvent of backend.events()) {
+      while (true) {
+        const next = await Promise.race([
+          iterator.next().then((result) => ({ type: "event" as const, result })),
+          deadline.promise,
+        ]);
+        if (next.type === "timeout") {
+          await this.handleTurnTimeout(session, backend, turn, target, toolMessages);
+          return;
+        }
+        if (next.result.done) {
+          break;
+        }
+        const agentEvent = next.result.value;
         if (this.sessions.getById(session.id)?.status === "stopped") {
           return;
         }
-        const finished = await this.handleAgentEvent(session, agentEvent, streamedText, deliveredArtifactPaths, toolMessages);
+        this.touchTurn(turn);
+        const handled = await Promise.race([
+          this.handleAgentEvent(session, turn, agentEvent, streamedText, deliveredArtifactPaths, toolMessages).then(
+            (finished) => ({ type: "handled" as const, finished }),
+          ),
+          deadline.promise,
+        ]);
+        if (handled.type === "timeout") {
+          await this.handleTurnTimeout(session, backend, turn, target, toolMessages);
+          return;
+        }
         if (agentEvent.type === "text_delta") {
           streamedText += agentEvent.text;
         }
-        if (finished) {
-          this.updateStatusUnlessStopped(session.id, "idle");
+        if (handled.finished) {
+          this.updateStatusForTurn(turn, "idle");
           await this.audit.write({
             type: "worker.completed",
             sessionId: session.id,
-            details: { streamedTextLength: streamedText.length },
+            details: { turnId: turn.id, streamedTextLength: streamedText.length },
           });
           return;
         }
       }
     } finally {
-      clearTimeout(timeout);
+      deadline.cancel();
       clearInterval(toolDrainInterval);
       toolMessages.cancelTimer();
       drainToolRequests();
-      await toolDrain;
-    }
-
-    if (timedOut) {
-      this.updateStatusUnlessStopped(session.id, "error");
-      await this.audit.write({
-        type: "worker.timeout",
-        sessionId: session.id,
-        details: { timeoutMs: this.config.agent_turn_timeout_ms },
-      });
-      await toolMessages.flush();
-      await this.sendChunkedText(
-        target,
-        `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`,
-      );
-      return;
+      this.trackBackground(toolDrain);
     }
 
     if (this.sessions.getById(session.id)?.status === "stopped") {
       return;
     }
 
-    this.sessions.updateStatus(session.id, "idle");
+    this.updateStatusForTurn(turn, "idle");
     await this.audit.write({
       type: "worker.exited",
       sessionId: session.id,
-      details: { streamedTextLength: streamedText.length },
+      details: { turnId: turn.id, streamedTextLength: streamedText.length },
     });
     await toolMessages.flush();
     await this.sendChunkedText(
@@ -725,12 +785,13 @@ export class RemoteAgentHub {
 
   private async handleAgentEvent(
     session: HubSession,
+    turn: ActiveTurn,
     event: AgentEvent,
     streamedText: string,
     deliveredArtifactPaths: Set<string>,
     toolMessages: ToolStatusBatcher,
   ): Promise<boolean> {
-    if (this.sessions.getById(session.id)?.status === "stopped") {
+    if (!this.isTurnCurrent(turn) || this.sessions.getById(session.id)?.status === "stopped") {
       return true;
     }
 
@@ -754,7 +815,7 @@ export class RemoteAgentHub {
         return false;
       case "notification":
         if (event.completesTurn) {
-          this.updateStatusUnlessStopped(session.id, "idle");
+          this.updateStatusForTurn(turn, "idle");
         }
         await toolMessages.flush();
         await this.sendChunkedText(target, this.formatNotification(event));
@@ -774,7 +835,8 @@ export class RemoteAgentHub {
           raw: event.raw,
           expiresAt,
         });
-        this.sessions.updateStatus(session.id, "waiting_approval");
+        this.setTurnPhase(turn, "waiting_approval");
+        this.updateStatusForTurn(turn, "waiting_approval");
         await this.safeSendText(
           target,
           `Approval requested: ${approvalId}\nexpires: ${expiresAt}\n\nFallback commands:\n!approve ${approvalId}\n!deny ${approvalId}`,
@@ -789,7 +851,8 @@ export class RemoteAgentHub {
       }
       case "interaction_request":
         await toolMessages.flush();
-        this.sessions.updateStatus(session.id, "waiting_input");
+        this.setTurnPhase(turn, "waiting_input");
+        this.updateStatusForTurn(turn, "waiting_input");
         await this.createAndSendInteraction(target, {
           owner: "agent",
           sessionId: session.id,
@@ -800,10 +863,12 @@ export class RemoteAgentHub {
         });
         return false;
       case "status":
-        this.updateStatusUnlessStopped(
-          session.id,
-          event.state === "running" ? "running" : event.state === "error" ? "error" : "idle",
-        );
+        if (event.state === "running") {
+          this.setTurnPhase(turn, "running");
+          this.updateStatusForTurn(turn, "running");
+        } else if (event.state === "error") {
+          this.updateStatusForTurn(turn, "error");
+        }
         return false;
     }
   }
@@ -818,6 +883,82 @@ export class RemoteAgentHub {
     for (let start = 0; start < text.length; start += maxLength) {
       await this.safeSendText(target, text.slice(start, start + maxLength));
     }
+  }
+
+  private beginTurn(sessionId: string): ActiveTurn {
+    if (this.activeTurns.has(sessionId)) {
+      throw new Error(`Session ${sessionId.slice(0, 8)} already has an active turn.`);
+    }
+    const startedAtMs = Date.now();
+    const turn: ActiveTurn = {
+      id: crypto.randomUUID(),
+      sessionId,
+      startedAt: new Date(startedAtMs).toISOString(),
+      deadlineAt: new Date(startedAtMs + this.config.agent_turn_timeout_ms).toISOString(),
+      phase: "running",
+    };
+    this.activeTurns.set(sessionId, turn);
+    return turn;
+  }
+
+  private trackBackground(task: Promise<void>): void {
+    this.backgroundTasks.add(task);
+    void task.finally(() => {
+      this.backgroundTasks.delete(task);
+    });
+  }
+
+  private releaseTurn(turn: ActiveTurn): void {
+    if (this.isTurnCurrent(turn)) {
+      this.activeTurns.delete(turn.sessionId);
+    }
+  }
+
+  private isTurnCurrent(turn: ActiveTurn): boolean {
+    return this.activeTurns.get(turn.sessionId)?.id === turn.id;
+  }
+
+  private touchTurn(turn: ActiveTurn): void {
+    if (this.isTurnCurrent(turn)) {
+      turn.lastEventAt = new Date().toISOString();
+    }
+  }
+
+  private setTurnPhase(turn: ActiveTurn, phase: ActiveTurn["phase"]): void {
+    if (this.isTurnCurrent(turn)) {
+      turn.phase = phase;
+    }
+  }
+
+  private updateStatusForTurn(turn: ActiveTurn, status: HubSession["status"]): void {
+    if (this.isTurnCurrent(turn)) {
+      this.updateStatusUnlessStopped(turn.sessionId, status);
+    }
+  }
+
+  private async handleTurnTimeout(
+    session: HubSession,
+    backend: AgentBackend,
+    turn: ActiveTurn,
+    target: ChatTarget,
+    toolMessages: ToolStatusBatcher,
+  ): Promise<void> {
+    if (!this.isTurnCurrent(turn)) {
+      return;
+    }
+    this.setTurnPhase(turn, "timed_out");
+    this.updateStatusForTurn(turn, "error");
+    void backend.abort().catch((error: unknown) => {
+      process.stderr.write(`[hitch] Agent abort after timeout failed: ${formatError(error)}\n`);
+    });
+    await this.audit.write({
+      type: "worker.timeout",
+      sessionId: session.id,
+      target,
+      details: { turnId: turn.id, timeoutMs: this.config.agent_turn_timeout_ms },
+    });
+    await toolMessages.flush();
+    await this.sendChunkedText(target, `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`);
   }
 
   private updateStatusUnlessStopped(id: string, status: HubSession["status"]): void {
@@ -857,11 +998,7 @@ export class RemoteAgentHub {
     text: string,
     opts?: Parameters<ChannelAdapter["sendText"]>[2],
   ): Promise<void> {
-    try {
-      await this.channel.sendText(target, text, opts);
-    } catch (error) {
-      process.stderr.write(`[hitch] Send failed: ${formatError(error)}\n`);
-    }
+    this.delivery.enqueueText(target, text, opts);
   }
 
   private async sendArtifactsMentionedInText(
@@ -966,6 +1103,85 @@ class ToolStatusBatcher {
     clearTimeout(this.timer);
     this.timer = undefined;
   }
+}
+
+function turnDeadline(turn: ActiveTurn): {
+  promise: Promise<{ type: "timeout" }>;
+  cancel: () => void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const remainingMs = Math.max(0, Date.parse(turn.deadlineAt) - Date.now());
+  const promise = new Promise<{ type: "timeout" }>((resolve) => {
+    timer = setTimeout(() => resolve({ type: "timeout" }), remainingMs);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    },
+  };
+}
+
+function formatTurnHealth(turn: ActiveTurn | undefined, persistedStatus: HubSession["status"]): string {
+  if (!turn) {
+    return persistedStatus === "running" || persistedStatus === "waiting_approval" || persistedStatus === "waiting_input"
+      ? "stale (no active in-memory turn)"
+      : "none";
+  }
+  const ageMs = Math.max(0, Date.now() - Date.parse(turn.startedAt));
+  const remainingMs = Math.max(0, Date.parse(turn.deadlineAt) - Date.now());
+  return `${turn.phase}; active ${formatDuration(ageMs)}; deadline in ${formatDuration(remainingMs)}${
+    turn.lastEventAt ? `; last event ${formatDuration(Math.max(0, Date.now() - Date.parse(turn.lastEventAt)))} ago` : "; no agent events yet"
+  }`;
+}
+
+function formatWorkerHealth(worker: AgentBackend | undefined, storedPid: number | undefined, turnActive: boolean): string {
+  if (worker) {
+    return `${worker.isAlive() ? "alive" : "not alive"}${storedPid ? ` (pid ${storedPid})` : ""}`;
+  }
+  if (turnActive) {
+    return `missing${storedPid ? ` (stored pid ${storedPid})` : ""}`;
+  }
+  return storedPid ? `not loaded (stored pid ${storedPid})` : "not loaded";
+}
+
+function formatDeliveryHealth(health: DeliveryHealth): string {
+  const fields: string[] = [`${health.state}`, `pending ${health.pending}`];
+  if (health.lastSuccessAt) {
+    fields.push(`last success ${formatDuration(Math.max(0, Date.now() - Date.parse(health.lastSuccessAt)))} ago`);
+  }
+  if (health.lastError) {
+    fields.push(`last error: ${health.lastError}`);
+  }
+  return fields.join("; ");
+}
+
+function formatChannelHealth(health: ChannelHealth | undefined): string {
+  if (!health) {
+    return "unknown";
+  }
+  const fields: string[] = [health.state];
+  if (health.lastSuccessAt) {
+    fields.push(`last success ${formatDuration(Math.max(0, Date.now() - Date.parse(health.lastSuccessAt)))} ago`);
+  }
+  if (health.lastError) {
+    fields.push(`last error: ${health.lastError}`);
+  }
+  return fields.join("; ");
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1_000) {
+    return `${Math.ceil(ms)}ms`;
+  }
+  const seconds = Math.ceil(ms / 1_000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
 }
 
 function shortId(session: HubSession): string {

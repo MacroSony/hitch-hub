@@ -1,6 +1,19 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a roadmap and architecture planning document, not a verified implementation inventory. See `README.md` for the current implemented surface, `implementation_steps.md` for active work, and `docs/completed-work.md` for finished checkpoint history. Some roadmap items such as `!sessions`, `!switch`, WeChat, inline Telegram approval buttons, native image input for supported Pi image MIME types, and basic outbound artifact upload have landed. The current outbound artifact path scanner is a prototype; the target design is explicit hub tools with MCP as an agent-facing transport. See `docs/hub-tools-mcp.md`.
+> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound media, explicit outbound media foundation, multi-channel routing, bounded delivery queue, hard turn deadlines, and health-aware status have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, and `docs/completed-work.md` for checkpoint history.
+
+## Current Roadmap Reset (July 2026)
+
+The original milestones correctly prioritized proving Telegram + Pi, but the implementation has moved beyond that sequence: WeChat arrived before Discord and a second backend, while live delivery behavior exposed operability gaps that matter more than adding breadth.
+
+Recommended order from the current state:
+
+1. Finish live validation of hard deadlines, turn ownership, and bounded WeChat delivery.
+2. Add service supervision, graceful shutdown, durable delivery lifecycle records, channel-health transition auditing, and operator diagnostics.
+3. Finish the Pi-facing explicit media tool adapter so `hitch.send_media` is naturally available in normal Pi sessions, not only through the session bridge/MCP wrapper.
+4. Reassess whether the next breadth investment should be Discord or a second structured backend based on actual use; do not build both in one iteration.
+
+This keeps the project aligned with its lightweight positioning: make one local deployment trustworthy before multiplying channel/backend combinations.
 
 ## 1. Project Goal
 
@@ -992,18 +1005,16 @@ remote-agent-hub/
 
 ## 21. Recommended Immediate Next Step
 
-Build a tiny proof of concept:
+Run the deployed reliability iteration under normal WeChat use, then make the hub operationally self-explaining and self-restarting.
 
-```text
-Telegram text message
-        ↓
-hub
-        ↓
-Pi RPC process in selected cwd
-        ↓
-streamed Pi response
-        ↓
-Telegram reply
-```
+The next implementation slice should be "Operability and Delivery Evidence":
 
-Then add image input before adding more backends or platforms. If Telegram + Pi RPC + images works cleanly, the architecture is validated.
+- graceful shutdown and deterministic recovery
+- a user-level service definition with restart-on-failure
+- durable per-delivery lifecycle records
+- rate-limited channel-health transition auditing
+- a hub-level health diagnostic
+- deterministic WeChat failure/recovery tests
+- audit/log retention
+
+Do not add Discord and a second backend in this slice. Those multiply the state space before the current deployment can reliably distinguish an agent stall, a delivery failure, and a channel outage.

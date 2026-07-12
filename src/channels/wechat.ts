@@ -16,7 +16,7 @@ import {
 } from "wechat-ilink-client";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
 import type { MediaCache, StoreAttachmentInput } from "../core/media-cache.js";
-import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
 
 type WeChatAdapterOptions = {
   dataDir: string;
@@ -25,6 +25,7 @@ type WeChatAdapterOptions = {
   unsafeAllowAll: boolean;
   botType: string;
   maxInboundBytes: number;
+  sendTimeoutMs: number;
 };
 
 type SavedCredentials = {
@@ -88,6 +89,7 @@ export class WeChatAdapter implements ChannelAdapter {
   private sendQueue: Promise<void> = Promise.resolve();
   private lastSendAttemptAt = 0;
   private client: WeChatClient | undefined;
+  private channelHealth: ChannelHealth = { state: "starting" };
 
   constructor(private readonly options: WeChatAdapterOptions) {
     this.stateDir = path.join(options.dataDir, "wechat");
@@ -106,9 +108,19 @@ export class WeChatAdapter implements ChannelAdapter {
       });
     });
     client.on("error", (error) => {
+      this.channelHealth = {
+        state: "degraded",
+        lastErrorAt: new Date().toISOString(),
+        lastError: formatError(error),
+      };
       process.stderr.write(`[hitch] WeChat polling failed: ${formatError(error)}\n`);
     });
     client.on("sessionExpired", () => {
+      this.channelHealth = {
+        state: "stopped",
+        lastErrorAt: new Date().toISOString(),
+        lastError: "WeChat session expired",
+      };
       process.stderr.write("[hitch] WeChat session expired; remove saved credentials and restart to scan a fresh QR code.\n");
     });
 
@@ -118,6 +130,11 @@ export class WeChatAdapter implements ChannelAdapter {
         saveSyncBuf: (buf) => this.saveSyncBuf(buf),
       })
       .catch((error: unknown) => {
+        this.channelHealth = {
+          state: "stopped",
+          lastErrorAt: new Date().toISOString(),
+          lastError: formatError(error),
+        };
         process.stderr.write(`[hitch] WeChat receive loop stopped: ${formatError(error)}\n`);
       })
       .finally(() => {
@@ -138,7 +155,7 @@ export class WeChatAdapter implements ChannelAdapter {
     await client.sendText(to, text, contextToken);
   }
 
-  async sendArtifact(target: ChatTarget, artifact: OutboundArtifact): Promise<void> {
+  async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void> {
     const client = await this.ensureClient();
     const api = client.api;
     this.instrumentSendMessage(api);
@@ -157,7 +174,9 @@ export class WeChatAdapter implements ChannelAdapter {
       api,
       cdnBaseUrl: api.cdnBaseUrl,
       mediaType: isImage ? UploadMediaType.IMAGE : UploadMediaType.FILE,
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     });
+    opts?.signal?.throwIfAborted();
     if (isImage) {
       await client.sendUploadedImage(to, uploaded, artifact.caption, contextToken);
     } else {
@@ -184,13 +203,14 @@ export class WeChatAdapter implements ChannelAdapter {
     };
     const orig = api.sendMessage.bind(api);
     api.sendMessage = async (req: Parameters<typeof orig>[0]): Promise<void> => {
+      const deadlineAt = Date.now() + this.options.sendTimeoutMs;
       await this.enqueueSend(async () => {
         let currentReq = req;
         let triedTokenlessFallback = false;
         let retryIndex = 0;
         for (;;) {
           try {
-            await this.sendMessageOnce(privy, currentReq);
+            await this.sendMessageOnce(privy, currentReq, deadlineAt);
             return;
           } catch (error) {
             if (isRetMinusTwo(error) && !triedTokenlessFallback && hasContextToken(currentReq)) {
@@ -208,7 +228,7 @@ export class WeChatAdapter implements ChannelAdapter {
             process.stderr.write(
               `[hitch] WeChat sendMessage returned ret=-2; retrying in ${delayMs}ms (${retryIndex + 1}/${WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS.length + 1}).\n`,
             );
-            await sleep(delayMs);
+            await sleepBeforeDeadline(delayMs, deadlineAt, this.options.sendTimeoutMs);
           }
         }
       });
@@ -221,12 +241,20 @@ export class WeChatAdapter implements ChannelAdapter {
       buildBaseInfo: () => unknown;
     },
     req: SendMessageReq,
+    deadlineAt: number,
   ): Promise<void> {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`WeChat sendMessage timed out after ${this.options.sendTimeoutMs}ms`);
+    }
     await this.waitForSendSlot();
+    if (deadlineAt <= Date.now()) {
+      throw new Error(`WeChat sendMessage timed out after ${this.options.sendTimeoutMs}ms`);
+    }
     const raw = await privy.apiFetch({
       endpoint: "ilink/bot/sendmessage",
       body: JSON.stringify({ ...req, base_info: privy.buildBaseInfo() }),
-      timeoutMs: 30_000,
+      timeoutMs: Math.min(30_000, Math.max(1, deadlineAt - Date.now())),
     });
     assertWeChatApiOk(parseWeChatApiResponse(raw), "WeChat sendMessage");
   }
@@ -235,6 +263,10 @@ export class WeChatAdapter implements ChannelAdapter {
     const run = this.sendQueue.then(send, send);
     this.sendQueue = run.catch(() => undefined);
     await run;
+  }
+
+  health(): ChannelHealth {
+    return { ...this.channelHealth };
   }
 
   private async waitForSendSlot(): Promise<void> {
@@ -372,6 +404,7 @@ export class WeChatAdapter implements ChannelAdapter {
 
   private saveSyncBuf(buf: string): void {
     writeSecureJson(this.syncBufPath, { buf });
+    this.channelHealth = { state: "healthy", lastSuccessAt: new Date().toISOString() };
   }
 
   private loadContextTokens(): void {
@@ -459,8 +492,10 @@ async function uploadMediaFullUrl(opts: {
   api: ApiClient;
   cdnBaseUrl: string;
   mediaType: number;
+  signal?: AbortSignal;
 }): Promise<UploadedMedia> {
-  const { filePath, toUserId, api, cdnBaseUrl, mediaType } = opts;
+  const { filePath, toUserId, api, cdnBaseUrl, mediaType, signal } = opts;
+  signal?.throwIfAborted();
   const plaintext = await readFile(filePath);
   const rawsize = plaintext.length;
   const rawfilemd5 = createHash("md5").update(plaintext).digest("hex");
@@ -478,6 +513,7 @@ async function uploadMediaFullUrl(opts: {
     no_need_thumb: true,
     aeskey: aeskey.toString("hex"),
   });
+  signal?.throwIfAborted();
   assertWeChatApiOk(resp as WeChatApiResponse, "WeChat getUploadUrl");
 
   // `upload_full_url` is returned by current servers but is not on the
@@ -495,7 +531,7 @@ async function uploadMediaFullUrl(opts: {
   }
 
   const ciphertext = encryptAesEcb(plaintext, aeskey);
-  const downloadEncryptedQueryParam = await postCiphertextToCdn(uploadUrl, ciphertext);
+  const downloadEncryptedQueryParam = await postCiphertextToCdn(uploadUrl, ciphertext, signal);
   return {
     filekey,
     downloadEncryptedQueryParam,
@@ -505,7 +541,7 @@ async function uploadMediaFullUrl(opts: {
   };
 }
 
-async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer): Promise<string> {
+async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer, signal?: AbortSignal): Promise<string> {
   let lastError: Error | undefined;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -513,6 +549,7 @@ async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer): Promi
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: new Uint8Array(ciphertext),
+        ...(signal ? { signal } : {}),
       });
       if (res.status >= 400 && res.status < 500) {
         const msg = res.headers.get("x-error-message") ?? (await res.text());
@@ -531,7 +568,10 @@ async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer): Promi
       lastError = err instanceof Error ? err : new Error(String(err));
       // 4xx is a permanent client error; don't retry.
       if (err instanceof Error && err.message.includes("client error")) throw err;
-      if (attempt < 3) await sleep(750 * attempt);
+      if (attempt < 3) {
+        signal?.throwIfAborted();
+        await sleep(750 * attempt);
+      }
     }
   }
   throw lastError ?? new Error("CDN upload failed");
@@ -539,6 +579,14 @@ async function postCiphertextToCdn(uploadUrl: string, ciphertext: Buffer): Promi
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sleepBeforeDeadline(delayMs: number, deadlineAt: number, timeoutMs: number): Promise<void> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= delayMs) {
+    throw new Error(`WeChat sendMessage timed out after ${timeoutMs}ms`);
+  }
+  await sleep(delayMs);
 }
 
 function parseWeChatApiResponse(raw: string): WeChatApiResponse {

@@ -7,6 +7,7 @@ import { sniffMimeType } from "./media-cache.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import type { ChatTarget } from "./types.js";
 import type { AuditLog } from "./audit-log.js";
+import { runWithTimeout } from "./delivery-coordinator.js";
 
 export type SendMediaInput = {
   path: string;
@@ -35,6 +36,8 @@ export class HubToolService {
     private readonly config: HubConfig,
     private readonly channel: ChannelAdapter,
     private readonly audit: AuditLog,
+    private readonly sendText: (target: ChatTarget, text: string) => Promise<void> = (target, text) =>
+      channel.sendText(target, text),
   ) {}
 
   async sendMedia(target: ChatTarget, input: SendMediaInput, options: SendMediaOptions = {}): Promise<SendMediaResult> {
@@ -47,7 +50,11 @@ export class HubToolService {
       }
 
       const artifact = this.validateMediaInput(input, options.extraAllowedRoots ?? []);
-      await this.channel.sendArtifact(target, artifact);
+      await runWithTimeout(
+        (signal) => this.channel.sendArtifact!(target, artifact, { signal }),
+        this.config.delivery.send_timeout_ms,
+        `Media delivery timed out after ${this.config.delivery.send_timeout_ms}ms`,
+      );
       const result: SendMediaResult = {
         deliveryId,
         status: "sent",
@@ -129,7 +136,7 @@ export class HubToolService {
 
   private async notifyFailure(target: ChatTarget, mediaPath: string, message: string): Promise<void> {
     try {
-      await this.channel.sendText(target, `Media delivery failed for ${path.basename(mediaPath)}: ${message}`);
+      await this.sendText(target, `Media delivery failed for ${path.basename(mediaPath)}: ${message}`);
     } catch (error) {
       process.stderr.write(`[hitch] Media delivery failure notification failed: ${formatError(error)}\n`);
     }

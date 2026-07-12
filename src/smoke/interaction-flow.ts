@@ -280,6 +280,7 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
     delivery: {
       full_tool_output: false,
       tool_status_batch_ms: 0,
+      send_timeout_ms: 5_000,
     },
     allowedRoots: [cwd],
     outboundRoots: [],
