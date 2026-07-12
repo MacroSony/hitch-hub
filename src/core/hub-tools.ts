@@ -7,7 +7,6 @@ import { sniffMimeType } from "./media-cache.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import type { ChatTarget } from "./types.js";
 import type { AuditLog } from "./audit-log.js";
-import { runWithTimeout } from "./delivery-coordinator.js";
 
 export type SendMediaInput = {
   path: string;
@@ -38,6 +37,12 @@ export class HubToolService {
     private readonly audit: AuditLog,
     private readonly sendText: (target: ChatTarget, text: string) => Promise<void> = (target, text) =>
       channel.sendText(target, text),
+    private readonly sendArtifact: (target: ChatTarget, artifact: OutboundArtifact) => Promise<void> = (target, artifact) => {
+      if (!channel.sendArtifact) {
+        throw new Error(`Channel does not support media delivery: ${target.platform}`);
+      }
+      return channel.sendArtifact(target, artifact);
+    },
   ) {}
 
   async sendMedia(target: ChatTarget, input: SendMediaInput, options: SendMediaOptions = {}): Promise<SendMediaResult> {
@@ -45,16 +50,8 @@ export class HubToolService {
     const source = options.source ?? "agent_tool";
 
     try {
-      if (!this.channel.sendArtifact) {
-        throw new Error(`Channel does not support media delivery: ${target.platform}`);
-      }
-
       const artifact = this.validateMediaInput(input, options.extraAllowedRoots ?? []);
-      await runWithTimeout(
-        (signal) => this.channel.sendArtifact!(target, artifact, { signal }),
-        this.config.delivery.send_timeout_ms,
-        `Media delivery timed out after ${this.config.delivery.send_timeout_ms}ms`,
-      );
+      await this.sendArtifact(target, artifact);
       const result: SendMediaResult = {
         deliveryId,
         status: "sent",

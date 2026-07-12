@@ -1,4 +1,4 @@
-import type { ChannelAdapter, SendOptions } from "../channels/types.js";
+import type { ChannelAdapter, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { AuditLog } from "./audit-log.js";
 import type { ChatTarget } from "./types.js";
 
@@ -9,6 +9,7 @@ export type DeliveryHealth = {
   lastSuccessAt?: string;
   lastFailureAt?: string;
   lastError?: string;
+  cooldownUntil?: string;
 };
 
 type DeliveryState = DeliveryHealth & {
@@ -22,6 +23,7 @@ export class DeliveryCoordinator {
     private readonly channel: ChannelAdapter,
     private readonly audit: AuditLog,
     private readonly timeoutMs: number,
+    private readonly wechatFailureCooldownMs = 0,
   ) {}
 
   enqueueText(target: ChatTarget, text: string, opts?: SendOptions): void {
@@ -31,7 +33,6 @@ export class DeliveryCoordinator {
 
     const state = this.stateFor(target);
     const enqueuedAtMs = Date.now();
-    const deadlineAtMs = enqueuedAtMs + this.timeoutMs;
     state.pending += 1;
     if (state.state !== "degraded") {
       state.state = "pending";
@@ -41,19 +42,13 @@ export class DeliveryCoordinator {
       const attemptedAt = new Date().toISOString();
       state.lastAttemptAt = attemptedAt;
       try {
-        const remainingMs = deadlineAtMs - Date.now();
-        if (remainingMs <= 0) {
-          throw new Error(`Text delivery expired in the queue after ${this.timeoutMs}ms`);
-        }
+        this.assertNotCoolingDown(target, state);
         await runWithTimeout(
           (signal) => this.channel.sendText(target, text, mergeSignal(opts, signal)),
-          remainingMs,
+          this.timeoutMs,
           `Text delivery timed out after ${this.timeoutMs}ms`,
         );
-        state.lastSuccessAt = new Date().toISOString();
-        if (state.pending === 1) {
-          state.state = "healthy";
-        }
+        this.markSuccess(state);
         await this.writeAudit({
           type: "text.delivery",
           target,
@@ -61,9 +56,7 @@ export class DeliveryCoordinator {
         });
       } catch (error) {
         const message = formatError(error);
-        state.state = "degraded";
-        state.lastFailureAt = new Date().toISOString();
-        state.lastError = message;
+        this.markFailure(target, state, error, message);
         await this.writeAudit({
           type: "text.delivery",
           target,
@@ -81,6 +74,50 @@ export class DeliveryCoordinator {
     state.tail = run.catch(() => undefined);
   }
 
+  async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void> {
+    if (!this.channel.sendArtifact) {
+      throw new Error(`Channel does not support artifact delivery: ${target.platform}`);
+    }
+
+    const state = this.stateFor(target);
+    state.pending += 1;
+    if (state.state !== "degraded") {
+      state.state = "pending";
+    }
+
+    const run = state.tail.then(async () => {
+      state.lastAttemptAt = new Date().toISOString();
+      try {
+        this.assertNotCoolingDown(target, state);
+        await runWithTimeout(
+          (signal) => this.channel.sendArtifact!(target, artifact, mergeSignal(opts, signal)),
+          this.timeoutMs,
+          `Media delivery timed out after ${this.timeoutMs}ms`,
+        );
+        this.markSuccess(state);
+      } catch (error) {
+        const message = formatError(error);
+        this.markFailure(target, state, error, message);
+        throw error;
+      } finally {
+        state.pending -= 1;
+        if (state.pending > 0 && state.state !== "degraded") {
+          state.state = "pending";
+        }
+      }
+    });
+
+    state.tail = run.catch(() => undefined);
+    await run;
+  }
+
+  noteInbound(target: ChatTarget): void {
+    const state = this.states.get(targetKey(target));
+    if (state) {
+      delete state.cooldownUntil;
+    }
+  }
+
   health(target: ChatTarget): DeliveryHealth {
     const state = this.states.get(targetKey(target));
     if (!state) {
@@ -93,6 +130,7 @@ export class DeliveryCoordinator {
       ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
       ...(state.lastFailureAt ? { lastFailureAt: state.lastFailureAt } : {}),
       ...(state.lastError ? { lastError: state.lastError } : {}),
+      ...(state.cooldownUntil ? { cooldownUntil: state.cooldownUntil } : {}),
     };
   }
 
@@ -115,12 +153,53 @@ export class DeliveryCoordinator {
     return created;
   }
 
+  private assertNotCoolingDown(target: ChatTarget, state: DeliveryState): void {
+    if (target.platform !== "wechat" || !state.cooldownUntil) {
+      return;
+    }
+    const remainingMs = Date.parse(state.cooldownUntil) - Date.now();
+    if (remainingMs <= 0) {
+      delete state.cooldownUntil;
+      return;
+    }
+    throw new DeliveryCooldownError(
+      `WeChat delivery cooling down for ${Math.ceil(remainingMs / 1_000)}s after: ${state.lastError ?? "send failure"}`,
+    );
+  }
+
+  private markSuccess(state: DeliveryState): void {
+    state.lastSuccessAt = new Date().toISOString();
+    delete state.cooldownUntil;
+    if (state.pending === 1) {
+      state.state = "healthy";
+    }
+  }
+
+  private markFailure(target: ChatTarget, state: DeliveryState, error: unknown, message: string): void {
+    state.state = "degraded";
+    state.lastFailureAt = new Date().toISOString();
+    if (error instanceof DeliveryCooldownError) {
+      return;
+    }
+    state.lastError = message;
+    if (target.platform === "wechat" && this.wechatFailureCooldownMs > 0) {
+      state.cooldownUntil = new Date(Date.now() + this.wechatFailureCooldownMs).toISOString();
+    }
+  }
+
   private async writeAudit(event: Parameters<AuditLog["write"]>[0]): Promise<void> {
     try {
       await this.audit.write(event);
     } catch (error) {
       process.stderr.write(`[hitch] Delivery audit failed: ${formatError(error)}\n`);
     }
+  }
+}
+
+class DeliveryCooldownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryCooldownError";
   }
 }
 

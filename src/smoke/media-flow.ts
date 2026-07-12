@@ -165,10 +165,35 @@ async function main(): Promise<void> {
   const summary = await runScenario(false);
   await runScenario(true);
   await runToolStatusBatchScenario();
+  await runFailureOnlyToolStatusScenario();
   await runExplicitSendScenario();
   await runAutoDiscoveryDisabledScenario();
   await runToolBridgeScenario();
   process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
+}
+
+async function runFailureOnlyToolStatusScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-media-flow", "failure-only-tools");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const artifactPath = path.join(dataDir, "quiet.png");
+  writeFileSync(artifactPath, PNG_1X1);
+  const target: ChatTarget = { platform: "fake", chatId: "failure-only-tools", userId: "media-user" };
+  const channel = new MediaFlowChannel([
+    { id: "new", target, text: "!new pi", receivedAt: new Date().toISOString() },
+    { id: "prompt", target, text: "Keep successful tools quiet.", receivedAt: new Date().toISOString() },
+  ]);
+  const config = mediaFlowConfig(dataDir, false);
+  config.delivery.tool_status_mode = "failures";
+  const hub = new RemoteAgentHub(config, channel, () => new MediaFlowBackend(artifactPath));
+  await hub.run();
+
+  if (channel.texts.some((text) => text.startsWith("Tool started:") || text.startsWith("Tool finished:"))) {
+    throw new Error(`Failure-only tool status mode leaked successful tool chatter: ${JSON.stringify(channel.texts)}`);
+  }
+  if (!channel.texts.some((text) => text.startsWith(`Generated artifact: "${artifactPath}"`))) {
+    throw new Error("Failure-only tool status mode suppressed the final agent response.");
+  }
 }
 
 async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; outbound: number }> {
@@ -437,6 +462,7 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
     },
     delivery: {
       full_tool_output: fullToolOutput,
+      tool_status_mode: "all",
       tool_status_batch_ms: toolStatusBatchMs,
       send_timeout_ms: 5_000,
     },
@@ -461,6 +487,8 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
         enabled: false,
         allowed_chat_ids: [],
         bot_type: "3",
+        send_min_interval_ms: 4_000,
+        failure_cooldown_ms: 60_000,
         unsafe_allow_all: false,
       },
     },

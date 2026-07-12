@@ -138,6 +138,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     },
     delivery: {
       full_tool_output: false,
+      tool_status_mode: "all",
       tool_status_batch_ms: 0,
       send_timeout_ms: 5_000,
     },
@@ -162,6 +163,8 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
         enabled: false,
         allowed_chat_ids: [],
         bot_type: "3",
+        send_min_interval_ms: 4_000,
+        failure_cooldown_ms: 60_000,
         unsafe_allow_all: false,
       },
     },

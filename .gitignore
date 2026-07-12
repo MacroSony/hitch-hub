@@ -5,6 +5,7 @@ dist/
 .remote-agent-hub/
 .remote-agent-hub-smoke/
 .remote-agent-hub-media-flow/
+.remote-agent-hub-mcp-smoke/
 .remote-agent-hub-wechat/
 .pi/
 npm-debug.log*

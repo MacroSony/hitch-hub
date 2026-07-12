@@ -99,6 +99,7 @@ function createConfiguredAdapter(config: ReturnType<typeof loadConfig>, mediaCac
         botType: wechat.bot_type,
         maxInboundBytes: config.media.max_inbound_bytes,
         sendTimeoutMs: config.delivery.send_timeout_ms,
+        sendMinIntervalMs: wechat.send_min_interval_ms,
       }),
     });
   }

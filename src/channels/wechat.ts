@@ -26,6 +26,7 @@ type WeChatAdapterOptions = {
   botType: string;
   maxInboundBytes: number;
   sendTimeoutMs: number;
+  sendMinIntervalMs: number;
 };
 
 type SavedCredentials = {
@@ -34,8 +35,7 @@ type SavedCredentials = {
   baseUrl?: string;
 };
 
-const WECHAT_SEND_MIN_INTERVAL_MS = 2_000;
-const WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS = [5_000, 12_000, 25_000] as const;
+const WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS = [15_000] as const;
 
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
@@ -203,8 +203,11 @@ export class WeChatAdapter implements ChannelAdapter {
     };
     const orig = api.sendMessage.bind(api);
     api.sendMessage = async (req: Parameters<typeof orig>[0]): Promise<void> => {
-      const deadlineAt = Date.now() + this.options.sendTimeoutMs;
       await this.enqueueSend(async () => {
+        // Start the deadline only when this request owns the adapter send slot.
+        // The hub has its own per-target queue, but this adapter queue also
+        // serializes different WeChat targets that share one API client.
+        const deadlineAt = Date.now() + this.options.sendTimeoutMs;
         let currentReq = req;
         let triedTokenlessFallback = false;
         let retryIndex = 0;
@@ -226,7 +229,7 @@ export class WeChatAdapter implements ChannelAdapter {
             }
             retryIndex += 1;
             process.stderr.write(
-              `[hitch] WeChat sendMessage returned ret=-2; retrying in ${delayMs}ms (${retryIndex + 1}/${WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS.length + 1}).\n`,
+              `[hitch] WeChat sendMessage returned ret=-2; delayed retry in ${delayMs}ms (${retryIndex}/${WECHAT_RET_MINUS_TWO_RETRY_DELAYS_MS.length}).\n`,
             );
             await sleepBeforeDeadline(delayMs, deadlineAt, this.options.sendTimeoutMs);
           }
@@ -271,7 +274,7 @@ export class WeChatAdapter implements ChannelAdapter {
 
   private async waitForSendSlot(): Promise<void> {
     const now = Date.now();
-    const waitMs = this.lastSendAttemptAt + WECHAT_SEND_MIN_INTERVAL_MS - now;
+    const waitMs = this.lastSendAttemptAt + this.options.sendMinIntervalMs - now;
     if (waitMs > 0) {
       await sleep(waitMs);
     }

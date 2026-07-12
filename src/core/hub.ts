@@ -43,10 +43,21 @@ export class RemoteAgentHub {
     this.sessions = new SessionRegistry(config.dataDir);
     this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
-    this.delivery = new DeliveryCoordinator(channel, this.audit, config.delivery.send_timeout_ms);
-    this.tools = new HubToolService(config, channel, this.audit, async (target, text) => {
-      this.delivery.enqueueText(target, text);
-    });
+    this.delivery = new DeliveryCoordinator(
+      channel,
+      this.audit,
+      config.delivery.send_timeout_ms,
+      config.channels.wechat.failure_cooldown_ms,
+    );
+    this.tools = new HubToolService(
+      config,
+      channel,
+      this.audit,
+      async (target, text) => {
+        this.delivery.enqueueText(target, text);
+      },
+      (target, artifact) => this.delivery.sendArtifact(target, artifact),
+    );
     this.toolBridge = new AgentToolBridge(config.dataDir);
   }
 
@@ -89,6 +100,9 @@ export class RemoteAgentHub {
 
   private async handleEvent(event: InboundChatEvent): Promise<void> {
     try {
+      // A fresh inbound message proves the user is present and supplies a new
+      // WeChat context token, so allow one new delivery attempt immediately.
+      this.delivery.noteInbound(event.target);
       if (!this.isAuthorizedTarget(event)) {
         await this.safeSendText(event.target, "Unauthorized chat/user.");
         return;
@@ -808,10 +822,17 @@ export class RemoteAgentHub {
         return true;
       }
       case "tool_call":
-        await toolMessages.add(this.formatToolStart(event));
+        if (this.config.delivery.tool_status_mode === "all") {
+          await toolMessages.add(this.formatToolStart(event));
+        }
         return false;
       case "tool_result":
-        await toolMessages.add(this.formatToolResult(event));
+        if (
+          this.config.delivery.tool_status_mode === "all" ||
+          (this.config.delivery.tool_status_mode === "failures" && event.succeeded === false)
+        ) {
+          await toolMessages.add(this.formatToolResult(event));
+        }
         return false;
       case "notification":
         if (event.completesTurn) {
@@ -1155,6 +1176,9 @@ function formatDeliveryHealth(health: DeliveryHealth): string {
   }
   if (health.lastError) {
     fields.push(`last error: ${health.lastError}`);
+  }
+  if (health.cooldownUntil && Date.parse(health.cooldownUntil) > Date.now()) {
+    fields.push(`cooldown ${formatDuration(Date.parse(health.cooldownUntil) - Date.now())}`);
   }
   return fields.join("; ");
 }

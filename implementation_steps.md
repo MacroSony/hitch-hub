@@ -49,6 +49,10 @@ Checklist:
 - [x] Persist text delivery successes/failures in the audit log.
 - [x] Add a regression flow covering an ignored abort, a send client that ignores cancellation, an overlapping prompt, a late stale event, and recovery on a new turn.
 - [~] Run live WeChat failure/recovery verification; the deployed hub was restarted on this iteration on 2026-07-11 and is under away testing.
+- [x] Put text and media on one per-target delivery queue so mixed WeChat bursts cannot race through separate outer queues.
+- [x] Start send deadlines when an item reaches the front of the queue instead of consuming its budget while waiting.
+- [x] Add configurable WeChat send pacing, failure cooldown, and failure-only tool status delivery for lower-volume live usage.
+- [x] Fail the remainder of a broken WeChat batch quickly and reopen delivery on fresh inbound activity.
 
 ## Proposed Next Iteration: Operability and Delivery Evidence
 

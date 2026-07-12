@@ -5,6 +5,8 @@ import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact,
 import type { HubConfig } from "../config/schema.js";
 import { RemoteAgentHub } from "../core/hub.js";
 import type { ChatTarget, HubSession } from "../core/types.js";
+import { AuditLog } from "../core/audit-log.js";
+import { DeliveryCoordinator } from "../core/delivery-coordinator.js";
 
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
@@ -160,6 +162,43 @@ class StalledMediaChannel implements ChannelAdapter {
   }
 }
 
+class OrderedMixedChannel implements ChannelAdapter {
+  readonly order: string[] = [];
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    return;
+  }
+
+  async sendText(_target: ChatTarget, _text: string): Promise<void> {
+    this.order.push("text:start");
+    await sleep(20);
+    this.order.push("text:end");
+  }
+
+  async sendArtifact(_target: ChatTarget, _artifact: OutboundArtifact): Promise<void> {
+    this.order.push("media:start");
+    await sleep(20);
+    this.order.push("media:end");
+  }
+}
+
+class CooldownChannel implements ChannelAdapter {
+  attempts = 0;
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    return;
+  }
+
+  async sendText(): Promise<void> {}
+
+  async sendArtifact(): Promise<void> {
+    this.attempts += 1;
+    if (this.attempts === 1) {
+      throw new Error("WeChat sendMessage timed out after 30ms");
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-flow");
   rmSync(dataDir, { force: true, recursive: true });
@@ -221,8 +260,58 @@ async function main(): Promise<void> {
   }
 
   await runMediaTimeoutScenario();
+  await runUnifiedDeliveryScenario();
+  await runWechatCooldownScenario();
 
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
+}
+
+async function runUnifiedDeliveryScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-unified-delivery");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new OrderedMixedChannel();
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), 30);
+  const target: ChatTarget = { platform: "wechat", chatId: "ordered", userId: "smoke" };
+
+  delivery.enqueueText(target, "before media");
+  await delivery.sendArtifact(target, { path: "/tmp/ordered.png", kind: "image" });
+  await delivery.drain();
+
+  const order = channel.order.join(",");
+  if (order !== "text:start,text:end,media:start,media:end") {
+    throw new Error(`Text and media did not share one ordered queue: ${order}`);
+  }
+}
+
+async function runWechatCooldownScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-wechat-cooldown");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new CooldownChannel();
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), 30, 60_000);
+  const target: ChatTarget = { platform: "wechat", chatId: "cooldown", userId: "smoke" };
+  const artifact: OutboundArtifact = { path: "/tmp/cooldown.png", kind: "image" };
+
+  await delivery.sendArtifact(target, artifact).then(
+    () => {
+      throw new Error("Expected the first WeChat delivery to fail.");
+    },
+    () => undefined,
+  );
+  const secondError = await delivery.sendArtifact(target, artifact).then(
+    () => "",
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  );
+  if (!secondError.includes("cooling down") || channel.attempts !== 1) {
+    throw new Error(`Expected a fast cooldown failure after one channel attempt: ${secondError}/${channel.attempts}`);
+  }
+
+  delivery.noteInbound(target);
+  await delivery.sendArtifact(target, artifact);
+  if (Number(channel.attempts) !== 2) {
+    throw new Error(`Fresh inbound did not reopen WeChat delivery: ${channel.attempts}`);
+  }
 }
 
 async function runMediaTimeoutScenario(): Promise<void> {
@@ -270,6 +359,7 @@ function reliabilityConfig(dataDir: string): HubConfig {
     },
     delivery: {
       full_tool_output: false,
+      tool_status_mode: "all",
       tool_status_batch_ms: 0,
       send_timeout_ms: 30,
     },
@@ -290,6 +380,8 @@ function reliabilityConfig(dataDir: string): HubConfig {
         enabled: false,
         allowed_chat_ids: [],
         bot_type: "3",
+        send_min_interval_ms: 4_000,
+        failure_cooldown_ms: 60_000,
         unsafe_allow_all: false,
       },
     },

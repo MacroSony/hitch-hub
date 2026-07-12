@@ -21,6 +21,8 @@ const wechatChannelSchema = z.object({
   enabled: z.boolean().default(false),
   allowed_chat_ids: z.array(z.string()).default([]),
   bot_type: z.string().default("3"),
+  send_min_interval_ms: z.number().int().min(0).default(4_000),
+  failure_cooldown_ms: z.number().int().min(0).default(60_000),
   unsafe_allow_all: z.boolean().default(false),
 });
 
@@ -40,6 +42,7 @@ const mediaSchema = z.object({
 
 const deliverySchema = z.object({
   full_tool_output: z.boolean().default(false),
+  tool_status_mode: z.enum(["all", "failures", "none"]).default("all"),
   tool_status_batch_ms: z.number().int().min(0).default(0),
   send_timeout_ms: z.number().int().positive().default(30_000),
 });
@@ -57,6 +60,7 @@ export const configSchema = z.object({
   }),
   delivery: deliverySchema.default({
     full_tool_output: false,
+    tool_status_mode: "all",
     tool_status_batch_ms: 0,
     send_timeout_ms: 30_000,
   }),
@@ -74,6 +78,8 @@ export const configSchema = z.object({
         enabled: false,
         allowed_chat_ids: [],
         bot_type: "3",
+        send_min_interval_ms: 4_000,
+        failure_cooldown_ms: 60_000,
         unsafe_allow_all: false,
       }),
     })
@@ -89,6 +95,8 @@ export const configSchema = z.object({
         enabled: false,
         allowed_chat_ids: [],
         bot_type: "3",
+        send_min_interval_ms: 4_000,
+        failure_cooldown_ms: 60_000,
         unsafe_allow_all: false,
       },
     }),
