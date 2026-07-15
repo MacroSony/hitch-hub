@@ -129,6 +129,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     default_cwd: path.resolve("."),
     defaultCwd: path.resolve("."),
     agent_turn_timeout_ms: 20_000,
+    worker_idle_timeout_ms: 30 * 60 * 1000,
     approval_timeout_ms: 20_000,
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,

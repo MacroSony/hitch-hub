@@ -16,7 +16,14 @@ import {
 } from "wechat-ilink-client";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
 import type { MediaCache, StoreAttachmentInput } from "../core/media-cache.js";
-import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelHealthReporter,
+  InboundChatEvent,
+  OutboundArtifact,
+  SendOptions,
+} from "./types.js";
 
 type WeChatAdapterOptions = {
   dataDir: string;
@@ -90,6 +97,9 @@ export class WeChatAdapter implements ChannelAdapter {
   private lastSendAttemptAt = 0;
   private client: WeChatClient | undefined;
   private channelHealth: ChannelHealth = { state: "starting" };
+  private healthReporter: ChannelHealthReporter | undefined;
+  private stopped = false;
+  private receiveFailure: unknown;
 
   constructor(private readonly options: WeChatAdapterOptions) {
     this.stateDir = path.join(options.dataDir, "wechat");
@@ -104,24 +114,28 @@ export class WeChatAdapter implements ChannelAdapter {
     const client = await this.ensureClient();
     client.on("message", (message) => {
       void this.enqueueMessage(message).catch((error: unknown) => {
-        process.stderr.write(`[hitch] WeChat message handling failed: ${formatError(error)}\n`);
+        process.stderr.write(`[hitch ${new Date().toISOString()}] WeChat message handling failed: ${formatError(error)}\n`);
       });
     });
     client.on("error", (error) => {
-      this.channelHealth = {
+      if (this.stopped) {
+        return;
+      }
+      this.updateHealth({
         state: "degraded",
         lastErrorAt: new Date().toISOString(),
         lastError: formatError(error),
-      };
-      process.stderr.write(`[hitch] WeChat polling failed: ${formatError(error)}\n`);
+      });
     });
     client.on("sessionExpired", () => {
-      this.channelHealth = {
+      const error = new Error("WeChat session expired");
+      this.receiveFailure = error;
+      this.updateHealth({
         state: "stopped",
         lastErrorAt: new Date().toISOString(),
-        lastError: "WeChat session expired",
-      };
-      process.stderr.write("[hitch] WeChat session expired; remove saved credentials and restart to scan a fresh QR code.\n");
+        lastError: error.message,
+      });
+      client.stop();
     });
 
     void client
@@ -130,18 +144,24 @@ export class WeChatAdapter implements ChannelAdapter {
         saveSyncBuf: (buf) => this.saveSyncBuf(buf),
       })
       .catch((error: unknown) => {
-        this.channelHealth = {
+        if (this.stopped) {
+          return;
+        }
+        this.receiveFailure = error;
+        this.updateHealth({
           state: "stopped",
           lastErrorAt: new Date().toISOString(),
           lastError: formatError(error),
-        };
-        process.stderr.write(`[hitch] WeChat receive loop stopped: ${formatError(error)}\n`);
+        });
       })
       .finally(() => {
         this.queue.close();
       });
 
     yield* this.queue.iterate();
+    if (this.receiveFailure) {
+      throw this.receiveFailure;
+    }
   }
 
   async sendText(target: ChatTarget, text: string, _opts?: SendOptions): Promise<void> {
@@ -270,6 +290,23 @@ export class WeChatAdapter implements ChannelAdapter {
 
   health(): ChannelHealth {
     return { ...this.channelHealth };
+  }
+
+  setHealthReporter(reporter: ChannelHealthReporter): void {
+    this.healthReporter = reporter;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    this.client?.stop();
+    this.queue.close();
+    this.updateHealth({
+      state: "stopped",
+      ...(this.channelHealth.lastSuccessAt ? { lastSuccessAt: this.channelHealth.lastSuccessAt } : {}),
+    });
   }
 
   private async waitForSendSlot(): Promise<void> {
@@ -407,7 +444,7 @@ export class WeChatAdapter implements ChannelAdapter {
 
   private saveSyncBuf(buf: string): void {
     writeSecureJson(this.syncBufPath, { buf });
-    this.channelHealth = { state: "healthy", lastSuccessAt: new Date().toISOString() };
+    this.updateHealth({ state: "healthy", lastSuccessAt: new Date().toISOString() });
   }
 
   private loadContextTokens(): void {
@@ -422,6 +459,25 @@ export class WeChatAdapter implements ChannelAdapter {
 
   private saveContextTokens(): void {
     writeSecureJson(this.contextTokensPath, Object.fromEntries(this.contextTokens));
+  }
+
+  private updateHealth(health: ChannelHealth): void {
+    const previous = this.channelHealth;
+    this.channelHealth = health;
+    if (previous.state === health.state) {
+      return;
+    }
+    const transition = {
+      platform: "wechat" as const,
+      previousState: previous.state,
+      health: { ...health },
+      at: new Date().toISOString(),
+    };
+    this.healthReporter?.(transition);
+    const detail = health.lastError ? `: ${health.lastError}` : "";
+    process.stderr.write(
+      `[hitch ${transition.at}] WeChat channel ${previous.state} -> ${health.state}${detail}\n`,
+    );
   }
 }
 

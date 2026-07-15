@@ -38,7 +38,7 @@ export type AgentCommandResult = {
 
 export type AgentEvent =
   | { type: "text_delta"; text: string }
-  | { type: "final"; text: string }
+  | { type: "final"; text: string; interrupted?: boolean }
   | { type: "tool_call"; name: string; preview?: string }
   | { type: "tool_result"; name: string; text?: string; succeeded?: boolean }
   | { type: "notification"; text: string; level?: string; completesTurn?: boolean }

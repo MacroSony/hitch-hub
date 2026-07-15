@@ -1,5 +1,12 @@
 import type { Platform } from "../core/types.js";
-import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelHealthReporter,
+  InboundChatEvent,
+  OutboundArtifact,
+  SendOptions,
+} from "./types.js";
 
 type ChannelEntry = {
   platform: Platform;
@@ -86,7 +93,7 @@ export class MultiChannelAdapter implements ChannelAdapter {
           }
         } catch (error) {
           lastError = error;
-          process.stderr.write(`[hitch] ${platform} channel receive stopped: ${formatError(error)}\n`);
+          process.stderr.write(`[hitch ${new Date().toISOString()}] ${platform} channel receive stopped: ${formatError(error)}\n`);
         } finally {
           active -= 1;
           if (active === 0) {
@@ -121,6 +128,16 @@ export class MultiChannelAdapter implements ChannelAdapter {
 
   health(target: InboundChatEvent["target"]): ChannelHealth {
     return this.adapterFor(target.platform).health?.(target) ?? { state: "healthy" };
+  }
+
+  setHealthReporter(reporter: ChannelHealthReporter): void {
+    for (const adapter of this.adapters.values()) {
+      adapter.setHealthReporter?.(reporter);
+    }
+  }
+
+  async stop(): Promise<void> {
+    await Promise.allSettled([...this.adapters.values()].map((adapter) => adapter.stop?.()));
   }
 
   private adapterFor(platform: Platform): ChannelAdapter {

@@ -72,6 +72,8 @@ Edit `examples/config.example.yaml` for your machine:
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress successful tool chatter, or `none` for no tool-status messages
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
 - `delivery.send_timeout_ms`: maximum time for one outbound text/media send attempt after it reaches the front of its queue
+- `agent_turn_timeout_ms`: authoritative wall-clock turn limit; interrupted Pi output received during bounded cancellation is returned as a labeled partial result
+- `worker_idle_timeout_ms`: how long an idle agent worker remains loaded before Hitch stops it; `0` disables idle eviction
 - `channels.wechat.send_min_interval_ms`: minimum gap between WeChat API sends; `4000` is the conservative default for mixed text/media bursts
 - `channels.wechat.failure_cooldown_ms`: cooldown after a failed WeChat send; remaining items fail quickly until the cooldown expires or a fresh inbound message arrives
 
@@ -163,11 +165,27 @@ Tool output behavior:
 Runtime health behavior:
 
 - Agent turns have an authoritative wall-clock deadline; Hitch marks the turn as an error even if Pi never closes its event stream.
+- When Pi returns an explicitly interrupted final during bounded deadline cancellation, Hitch labels and delivers it as a partial result before stopping the worker.
+- Idle workers are stopped after `worker_idle_timeout_ms`; their persisted Pi session remains available and is resumed by a new worker on the next prompt.
 - Outbound text is queued per chat and delivery attempts are bounded by `delivery.send_timeout_ms`, so a slow chat API does not block Pi event consumption.
 - Text and media share one ordered per-chat queue. A queued item receives its full send deadline when its own attempt begins.
 - After a WeChat send failure, the rest of that broken batch fails quickly instead of consuming one full timeout per item; a new inbound message reopens delivery immediately.
 - `!status` reports active-turn age/deadline, worker liveness, pending/recent delivery health, and channel receive health.
 - Text delivery attempts are recorded in the audit log without storing message contents.
+- Delivery audit records include a delivery ID and, when available, session/turn correlation.
+- Channel health is logged and audited on state transitions, suppressing repeated identical polling errors until recovery.
+
+## Service Operation
+
+For a continuously running Linux deployment, copy [examples/hitch-hub.service](examples/hitch-hub.service) to `~/.config/systemd/user/hitch-hub.service`. Adjust `WorkingDirectory` and the config filename if your checkout differs, then run:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hitch-hub.service
+systemctl --user status hitch-hub.service
+```
+
+The sample uses restart-on-failure and gives Hitch 45 seconds to handle `SIGTERM`, stop channel receive loops and workers, and drain bounded delivery/audit work. Tmux remains useful for development, but it does not restart a crashed hub.
 
 WeChat behavior:
 

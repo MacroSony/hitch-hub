@@ -1,4 +1,4 @@
-import type { ChatTarget, HubAttachment } from "../core/types.js";
+import type { ChatTarget, HubAttachment, Platform } from "../core/types.js";
 
 export type InboundChatEvent = {
   id: string;
@@ -24,6 +24,15 @@ export type ChannelHealth = {
   lastError?: string;
 };
 
+export type ChannelHealthTransition = {
+  platform: Platform;
+  previousState: ChannelHealth["state"];
+  health: ChannelHealth;
+  at: string;
+};
+
+export type ChannelHealthReporter = (transition: ChannelHealthTransition) => void;
+
 export type OutboundArtifact = {
   path: string;
   kind: "image" | "file";
@@ -35,4 +44,6 @@ export interface ChannelAdapter {
   sendText(target: ChatTarget, text: string, opts?: SendOptions): Promise<void>;
   sendArtifact?(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void>;
   health?(target: ChatTarget): ChannelHealth;
+  setHealthReporter?(reporter: ChannelHealthReporter): void;
+  stop?(): Promise<void>;
 }

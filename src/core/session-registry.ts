@@ -286,6 +286,10 @@ export class SessionRegistry {
       .run(now);
   }
 
+  close(): void {
+    this.db.close();
+  }
+
   createApproval(input: {
     sessionId: string;
     agent: AgentName;

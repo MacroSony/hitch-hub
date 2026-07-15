@@ -8,12 +8,17 @@ import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/typ
 import { AuditLog } from "./audit-log.js";
 import { HubToolService } from "./hub-tools.js";
 import { AgentToolBridge } from "./tool-bridge.js";
-import { DeliveryCoordinator, type DeliveryHealth } from "./delivery-coordinator.js";
+import {
+  DeliveryCoordinator,
+  type DeliveryContext,
+  type DeliveryHealth,
+} from "./delivery-coordinator.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
 
 const INTERACTION_TTL_MS = 5 * 60 * 1000;
+const TIMEOUT_PARTIAL_GRACE_MS = 2_000;
 
 type ActiveTurn = {
   id: string;
@@ -34,6 +39,10 @@ export class RemoteAgentHub {
   private readonly inFlight = new Set<Promise<void>>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
+  private readonly workerLastUsedAt = new Map<string, number>();
+  private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
 
   constructor(
     private readonly config: HubConfig,
@@ -43,6 +52,21 @@ export class RemoteAgentHub {
     this.sessions = new SessionRegistry(config.dataDir);
     this.sessions.recoverInterruptedSessions();
     this.audit = new AuditLog(config.dataDir);
+    channel.setHealthReporter?.((transition) => {
+      void this.audit
+        .write({
+          type: "channel.health",
+          details: {
+            platform: transition.platform,
+            previousState: transition.previousState,
+            state: transition.health.state,
+            ...(transition.health.lastError ? { error: transition.health.lastError } : {}),
+          },
+        })
+        .catch((error: unknown) => {
+          process.stderr.write(`[hitch] Channel health audit failed: ${formatError(error)}\n`);
+        });
+    });
     this.delivery = new DeliveryCoordinator(
       channel,
       this.audit,
@@ -54,7 +78,7 @@ export class RemoteAgentHub {
       channel,
       this.audit,
       async (target, text) => {
-        this.delivery.enqueueText(target, text);
+        this.delivery.enqueueText(target, text, undefined, this.deliveryContextFor(target));
       },
       (target, artifact) => this.delivery.sendArtifact(target, artifact),
     );
@@ -62,8 +86,12 @@ export class RemoteAgentHub {
   }
 
   async run(): Promise<void> {
+    this.startWorkerSweep();
     try {
       for await (const event of this.channel.receive()) {
+        if (this.shuttingDown) {
+          break;
+        }
         if (this.shouldHandleInBackground(event)) {
           const task = this.handleEvent(event).catch((error: unknown) => {
             process.stderr.write(`[hitch] Event handling failed: ${formatError(error)}\n`);
@@ -78,11 +106,28 @@ export class RemoteAgentHub {
         await this.handleEvent(event);
       }
     } finally {
+      this.stopWorkerSweep();
       await Promise.allSettled(this.inFlight);
       await Promise.allSettled(this.backgroundTasks);
       await this.delivery.drain();
-      await this.stopWorkers();
+      await this.stopWorkers("hub_exit");
+      await this.audit.drain();
+      this.sessions.close();
     }
+  }
+
+  async shutdown(reason: "SIGINT" | "SIGTERM" | "requested" = "requested"): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+    this.shuttingDown = true;
+    this.stopWorkerSweep();
+    this.shutdownPromise = (async () => {
+      await this.audit.write({ type: "hub.shutdown", details: { reason } });
+      await this.channel.stop?.();
+      await this.stopWorkers("shutdown");
+    })();
+    return this.shutdownPromise;
   }
 
   private shouldHandleInBackground(event: InboundChatEvent): boolean {
@@ -99,6 +144,9 @@ export class RemoteAgentHub {
   }
 
   private async handleEvent(event: InboundChatEvent): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
     try {
       // A fresh inbound message proves the user is present and supplies a new
       // WeChat context token, so allow one new delivery attempt immediately.
@@ -281,10 +329,12 @@ export class RemoteAgentHub {
     }
 
     const worker = this.workers.get(session.id);
-    await worker?.abort();
-    this.workers.delete(session.id);
     this.activeTurns.delete(session.id);
     this.sessions.updateStatus(session.id, "stopped");
+    if (worker) {
+      await worker.abort();
+      await this.stopWorker(session.id, worker, "user_abort");
+    }
     this.sessions.setBackendProcess(session.id, undefined);
     await this.audit.write({
       type: "session.aborted",
@@ -334,8 +384,7 @@ export class RemoteAgentHub {
     const turn = this.beginTurn(session.id);
     this.sessions.updateStatus(session.id, "running");
     try {
-      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
-      this.sessions.setBackendProcess(session.id, processId);
+      await this.startBackendForTurn(session, backend, turn, event.target);
       await this.audit.write({
         type: "agent_command.received",
         sessionId: session.id,
@@ -359,6 +408,7 @@ export class RemoteAgentHub {
       this.releaseTurn(turn);
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
+        this.workerLastUsedAt.delete(session.id);
         this.sessions.setBackendProcess(session.id, undefined);
       }
     }
@@ -388,21 +438,14 @@ export class RemoteAgentHub {
     const backend = this.getWorker(session);
 
     try {
-      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
-      this.sessions.setBackendProcess(session.id, processId);
-      await this.audit.write({
-        type: "worker.started",
-        sessionId: session.id,
-        target: event.target,
-        details: { processId },
-      });
+      await this.startBackendForTurn(session, backend, turn, event.target);
 
       await backend.send(event.attachments ? { text, attachments: event.attachments } : { text });
       await this.consumeAgentEvents(session, backend, turn);
     } catch (error) {
       this.updateStatusForTurn(turn, "error");
       await this.audit.write({
-        type: "worker.error",
+        type: "turn.error",
         sessionId: session.id,
         target: event.target,
         details: { error: error instanceof Error ? error.message : String(error) },
@@ -412,6 +455,7 @@ export class RemoteAgentHub {
       this.releaseTurn(turn);
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
+        this.workerLastUsedAt.delete(session.id);
         this.sessions.setBackendProcess(session.id, undefined);
       }
     }
@@ -554,6 +598,10 @@ export class RemoteAgentHub {
     } finally {
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
+        this.workerLastUsedAt.delete(session.id);
+        this.sessions.setBackendProcess(session.id, undefined);
+      } else {
+        this.workerLastUsedAt.set(session.id, Date.now());
       }
     }
   }
@@ -696,18 +744,112 @@ export class RemoteAgentHub {
   private getWorker(session: HubSession): AgentBackend {
     const existing = this.workers.get(session.id);
     if (existing) {
+      this.workerLastUsedAt.set(session.id, Date.now());
       return existing;
     }
 
     const backend = this.backendFactory(this.config);
     this.workers.set(session.id, backend);
+    this.workerLastUsedAt.set(session.id, Date.now());
     return backend;
   }
 
-  private async stopWorkers(): Promise<void> {
-    const workers = [...this.workers.values()];
-    this.workers.clear();
-    await Promise.allSettled(workers.map((worker) => worker.stop()));
+  private async startBackendForTurn(
+    session: HubSession,
+    backend: AgentBackend,
+    turn: ActiveTurn,
+    target: ChatTarget,
+  ): Promise<number | undefined> {
+    const wasAlive = backend.isAlive();
+    const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
+    this.sessions.setBackendProcess(session.id, processId);
+    if (!wasAlive) {
+      await this.audit.write({
+        type: "worker.spawned",
+        sessionId: session.id,
+        target,
+        details: { processId },
+      });
+    }
+    await this.audit.write({
+      type: "turn.started",
+      sessionId: session.id,
+      target,
+      details: { turnId: turn.id, processId, workerReused: wasAlive },
+    });
+    return processId;
+  }
+
+  private async stopWorker(sessionId: string, worker: AgentBackend, reason: string): Promise<void> {
+    if (this.workers.get(sessionId) === worker) {
+      this.workers.delete(sessionId);
+      this.workerLastUsedAt.delete(sessionId);
+    }
+    const session = this.sessions.getById(sessionId);
+    const processId = session?.processId;
+    let stopError: string | undefined;
+    try {
+      await worker.stop();
+    } catch (error) {
+      stopError = formatError(error);
+      process.stderr.write(`[hitch] Worker stop failed for ${sessionId.slice(0, 8)}: ${stopError}\n`);
+    } finally {
+      if (!this.workers.has(sessionId)) {
+        this.sessions.setBackendProcess(sessionId, undefined);
+      }
+      await this.audit.write({
+        type: "worker.stopped",
+        sessionId,
+        details: { reason, ...(processId ? { processId } : {}), ...(stopError ? { error: stopError } : {}) },
+      });
+    }
+  }
+
+  private async stopWorkers(reason: string): Promise<void> {
+    const workers = [...this.workers.entries()];
+    await Promise.allSettled(
+      workers.map(async ([sessionId, worker]) => {
+        if (this.activeTurns.has(sessionId)) {
+          await worker.abort().catch(() => undefined);
+        }
+        await this.stopWorker(sessionId, worker, reason);
+      }),
+    );
+  }
+
+  private startWorkerSweep(): void {
+    const idleTimeoutMs = this.config.worker_idle_timeout_ms;
+    if (idleTimeoutMs <= 0 || this.workerSweepTimer) {
+      return;
+    }
+    const intervalMs = Math.min(60_000, Math.max(25, Math.floor(idleTimeoutMs / 2)));
+    this.workerSweepTimer = setInterval(() => {
+      const task = this.evictIdleWorkers();
+      this.trackBackground(task);
+    }, intervalMs);
+    this.workerSweepTimer.unref();
+  }
+
+  private stopWorkerSweep(): void {
+    if (!this.workerSweepTimer) {
+      return;
+    }
+    clearInterval(this.workerSweepTimer);
+    this.workerSweepTimer = undefined;
+  }
+
+  private async evictIdleWorkers(): Promise<void> {
+    const idleTimeoutMs = this.config.worker_idle_timeout_ms;
+    const now = Date.now();
+    const evictions: Promise<void>[] = [];
+    for (const [sessionId, worker] of this.workers) {
+      const lastUsedAt = this.workerLastUsedAt.get(sessionId) ?? now;
+      if (this.activeTurns.has(sessionId) || now - lastUsedAt < idleTimeoutMs) {
+        continue;
+      }
+      evictions.push(this.stopWorker(sessionId, worker, "idle_timeout"));
+    }
+    await Promise.allSettled(evictions);
   }
 
   private async consumeAgentEvents(session: HubSession, backend: AgentBackend, turn: ActiveTurn): Promise<void> {
@@ -733,12 +875,25 @@ export class RemoteAgentHub {
 
     try {
       while (true) {
+        if (this.shuttingDown) {
+          return;
+        }
+        const pendingNext = iterator.next();
         const next = await Promise.race([
-          iterator.next().then((result) => ({ type: "event" as const, result })),
+          pendingNext.then((result) => ({ type: "event" as const, result })),
           deadline.promise,
         ]);
         if (next.type === "timeout") {
-          await this.handleTurnTimeout(session, backend, turn, target, toolMessages);
+          await this.handleTurnTimeout(
+            session,
+            backend,
+            turn,
+            target,
+            toolMessages,
+            iterator,
+            pendingNext,
+            streamedText,
+          );
           return;
         }
         if (next.result.done) {
@@ -756,7 +911,7 @@ export class RemoteAgentHub {
           deadline.promise,
         ]);
         if (handled.type === "timeout") {
-          await this.handleTurnTimeout(session, backend, turn, target, toolMessages);
+          await this.handleTurnTimeout(session, backend, turn, target, toolMessages, iterator, undefined, streamedText);
           return;
         }
         if (agentEvent.type === "text_delta") {
@@ -765,7 +920,7 @@ export class RemoteAgentHub {
         if (handled.finished) {
           this.updateStatusForTurn(turn, "idle");
           await this.audit.write({
-            type: "worker.completed",
+            type: "turn.completed",
             sessionId: session.id,
             details: { turnId: turn.id, streamedTextLength: streamedText.length },
           });
@@ -781,6 +936,9 @@ export class RemoteAgentHub {
     }
 
     if (this.sessions.getById(session.id)?.status === "stopped") {
+      return;
+    }
+    if (this.shuttingDown) {
       return;
     }
 
@@ -805,7 +963,7 @@ export class RemoteAgentHub {
     deliveredArtifactPaths: Set<string>,
     toolMessages: ToolStatusBatcher,
   ): Promise<boolean> {
-    if (!this.isTurnCurrent(turn) || this.sessions.getById(session.id)?.status === "stopped") {
+    if (this.shuttingDown || !this.isTurnCurrent(turn) || this.sessions.getById(session.id)?.status === "stopped") {
       return true;
     }
 
@@ -932,6 +1090,9 @@ export class RemoteAgentHub {
   private releaseTurn(turn: ActiveTurn): void {
     if (this.isTurnCurrent(turn)) {
       this.activeTurns.delete(turn.sessionId);
+      if (this.workers.has(turn.sessionId)) {
+        this.workerLastUsedAt.set(turn.sessionId, Date.now());
+      }
     }
   }
 
@@ -963,23 +1124,36 @@ export class RemoteAgentHub {
     turn: ActiveTurn,
     target: ChatTarget,
     toolMessages: ToolStatusBatcher,
+    iterator: AsyncIterator<AgentEvent>,
+    pendingNext: Promise<IteratorResult<AgentEvent>> | undefined,
+    streamedText: string,
   ): Promise<void> {
     if (!this.isTurnCurrent(turn)) {
       return;
     }
     this.setTurnPhase(turn, "timed_out");
     this.updateStatusForTurn(turn, "error");
-    void backend.abort().catch((error: unknown) => {
+    await backend.abort().catch((error: unknown) => {
       process.stderr.write(`[hitch] Agent abort after timeout failed: ${formatError(error)}\n`);
     });
+    const partialText = await interruptedFinalAfterTimeout(iterator, pendingNext, streamedText, TIMEOUT_PARTIAL_GRACE_MS);
+    await this.stopWorker(session.id, backend, "turn_timeout");
     await this.audit.write({
-      type: "worker.timeout",
+      type: "turn.timeout",
       sessionId: session.id,
       target,
-      details: { turnId: turn.id, timeoutMs: this.config.agent_turn_timeout_ms },
+      details: {
+        turnId: turn.id,
+        timeoutMs: this.config.agent_turn_timeout_ms,
+        partialResultLength: partialText?.length ?? 0,
+      },
     });
     await toolMessages.flush();
-    await this.sendChunkedText(target, `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`);
+    const notice = `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`;
+    await this.sendChunkedText(
+      target,
+      partialText ? `${notice}\n\nPartial result from the cancelled turn:\n${partialText}` : notice,
+    );
   }
 
   private updateStatusUnlessStopped(id: string, status: HubSession["status"]): void {
@@ -1019,7 +1193,19 @@ export class RemoteAgentHub {
     text: string,
     opts?: Parameters<ChannelAdapter["sendText"]>[2],
   ): Promise<void> {
-    this.delivery.enqueueText(target, text, opts);
+    this.delivery.enqueueText(target, text, opts, this.deliveryContextFor(target));
+  }
+
+  private deliveryContextFor(target: ChatTarget): DeliveryContext {
+    const session = this.sessions.getActiveForTarget(target);
+    if (!session) {
+      return {};
+    }
+    const turn = this.activeTurns.get(session.id);
+    return {
+      sessionId: session.id,
+      ...(turn ? { turnId: turn.id } : {}),
+    };
   }
 
   private async sendArtifactsMentionedInText(
@@ -1144,6 +1330,54 @@ function turnDeadline(turn: ActiveTurn): {
       }
     },
   };
+}
+
+async function interruptedFinalAfterTimeout(
+  iterator: AsyncIterator<AgentEvent>,
+  pendingNext: Promise<IteratorResult<AgentEvent>> | undefined,
+  streamedText: string,
+  graceMs: number,
+): Promise<string | undefined> {
+  const deadlineAt = Date.now() + graceMs;
+  let accumulatedText = streamedText;
+  let next = pendingNext ?? iterator.next();
+
+  while (Date.now() < deadlineAt) {
+    const result = await settleIteratorBefore(next, deadlineAt - Date.now());
+    if (!result || result.done) {
+      return undefined;
+    }
+    const event = result.value;
+    if (event.type === "text_delta") {
+      accumulatedText += event.text;
+    } else if (event.type === "final") {
+      if (!event.interrupted) {
+        return undefined;
+      }
+      return event.text === "Pi completed." && accumulatedText.length > 0 ? accumulatedText : event.text;
+    }
+    next = iterator.next();
+  }
+  return undefined;
+}
+
+async function settleIteratorBefore<T>(
+  next: Promise<IteratorResult<T>>,
+  remainingMs: number,
+): Promise<IteratorResult<T> | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      next,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), Math.max(0, remainingMs));
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function formatTurnHealth(turn: ActiveTurn | undefined, persistedStatus: HubSession["status"]): string {

@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 import type { ChatTarget, HubAttachment } from "../core/types.js";
 import type { MediaCache, StoreAttachmentInput } from "../core/media-cache.js";
-import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "./types.js";
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelHealthReporter,
+  InboundChatEvent,
+  OutboundArtifact,
+  SendOptions,
+} from "./types.js";
 
 type TelegramUpdate = {
   update_id: number;
@@ -53,6 +60,9 @@ type TelegramGetFileResponse = {
 export class TelegramAdapter implements ChannelAdapter {
   private updateOffset = 0;
   private channelHealth: ChannelHealth = { state: "starting" };
+  private readonly receiveController = new AbortController();
+  private healthReporter: ChannelHealthReporter | undefined;
+  private stopped = false;
 
   constructor(
     private readonly botToken: string,
@@ -65,25 +75,25 @@ export class TelegramAdapter implements ChannelAdapter {
   async *receive(): AsyncIterable<InboundChatEvent> {
     let retryDelayMs = 1_000;
 
-    while (true) {
+    while (!this.stopped) {
       let updates: TelegramUpdate[];
       try {
         updates = await this.getUpdates();
         retryDelayMs = 1_000;
-        this.channelHealth = { state: "healthy", lastSuccessAt: new Date().toISOString() };
+        this.updateHealth({ state: "healthy", lastSuccessAt: new Date().toISOString() });
       } catch (error) {
-        this.channelHealth = {
+        if (this.stopped || this.receiveController.signal.aborted) {
+          return;
+        }
+        this.updateHealth({
           state: error instanceof TelegramFatalError ? "stopped" : "degraded",
           lastErrorAt: new Date().toISOString(),
           lastError: formatError(error),
-        };
+        });
         if (error instanceof TelegramFatalError) {
           throw error;
         }
-        process.stderr.write(
-          `[hitch] Telegram receive failed: ${formatError(error)}. Retrying in ${retryDelayMs}ms.\n`,
-        );
-        await sleep(retryDelayMs);
+        await sleep(retryDelayMs, this.receiveController.signal);
         retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
         continue;
       }
@@ -203,13 +213,33 @@ export class TelegramAdapter implements ChannelAdapter {
     return { ...this.channelHealth };
   }
 
+  setHealthReporter(reporter: ChannelHealthReporter): void {
+    this.healthReporter = reporter;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    this.receiveController.abort(new Error("Telegram channel stopped"));
+    this.updateHealth({
+      state: "stopped",
+      ...(this.channelHealth.lastSuccessAt ? { lastSuccessAt: this.channelHealth.lastSuccessAt } : {}),
+    });
+  }
+
   private async getUpdates(): Promise<TelegramUpdate[]> {
     const url = new URL(`https://api.telegram.org/bot${this.botToken}/getUpdates`);
     url.searchParams.set("timeout", "30");
     url.searchParams.set("offset", String(this.updateOffset));
     url.searchParams.set("allowed_updates", JSON.stringify(["message", "callback_query"]));
 
-    const response = await fetchWithRetry(url, undefined, { attempts: 2, baseDelayMs: 1_000 });
+    const response = await fetchWithRetry(
+      url,
+      { signal: this.receiveController.signal },
+      { attempts: 2, baseDelayMs: 1_000 },
+    );
     if (!response.ok) {
       const text = await response.text();
       if (response.status === 401 || response.status === 403 || response.status === 404) {
@@ -224,6 +254,25 @@ export class TelegramAdapter implements ChannelAdapter {
     }
 
     return body.result ?? [];
+  }
+
+  private updateHealth(health: ChannelHealth): void {
+    const previous = this.channelHealth;
+    this.channelHealth = health;
+    if (previous.state === health.state) {
+      return;
+    }
+    const transition = {
+      platform: "telegram" as const,
+      previousState: previous.state,
+      health: { ...health },
+      at: new Date().toISOString(),
+    };
+    this.healthReporter?.(transition);
+    const detail = health.lastError ? `: ${health.lastError}` : "";
+    process.stderr.write(
+      `[hitch ${transition.at}] Telegram channel ${previous.state} -> ${health.state}${detail}\n`,
+    );
   }
 
   private async eventFromCallbackQuery(callback: TelegramUpdate["callback_query"]): Promise<InboundChatEvent | undefined> {

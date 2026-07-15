@@ -1,6 +1,6 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound media, explicit outbound media foundation, multi-channel routing, bounded delivery queue, hard turn deadlines, and health-aware status have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, and `docs/completed-work.md` for checkpoint history.
+> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound media, explicit outbound media foundation, multi-channel routing, bounded delivery queue, hard turn deadlines, and health-aware status have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, `docs/completed-work.md` for checkpoint history, and `docs/security-sandbox-automation-roadmap.md` for the accepted follow-on order covering principal authorization, persistent writable state, Bubblewrap, proactive triggers, and scheduling. Where this older broad roadmap differs on those topics, the focused follow-on document records the current decision and unresolved conflicts.
 
 ## Current Roadmap Reset (July 2026)
 

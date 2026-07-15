@@ -1,0 +1,19 @@
+[Unit]
+Description=Hitch remote coding agent hub
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/programming/hitch-hub
+ExecStart=/bin/bash -lc 'exec node --use-env-proxy --import tsx src/main.ts --config config.local.yaml'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

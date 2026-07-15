@@ -268,15 +268,27 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async abort(): Promise<void> {
-    if (this.proc && !this.proc.killed) {
+    if (this.proc && this.proc.exitCode === null && !this.proc.killed) {
       this.writeCommand({ type: "abort" });
     }
-    this.proc?.kill("SIGTERM");
   }
 
   async stop(): Promise<void> {
-    this.proc?.kill("SIGTERM");
-    this.proc = undefined;
+    const proc = this.proc;
+    if (!proc) {
+      return;
+    }
+
+    if (proc.exitCode === null && proc.signalCode === null) {
+      proc.kill("SIGTERM");
+      if (!(await waitForProcessExit(proc, 2_000))) {
+        proc.kill("SIGKILL");
+        await waitForProcessExit(proc, 1_000);
+      }
+    }
+    if (this.proc === proc) {
+      this.proc = undefined;
+    }
   }
 
   private writeCommand(command: Record<string, unknown>): void {
@@ -430,7 +442,7 @@ function modelSelectionInteraction(models: AgentModelInfo[], title: string): Age
   };
 }
 
-function mapPiEvent(value: unknown): AgentEvent[] {
+export function mapPiEvent(value: unknown): AgentEvent[] {
   if (!value || typeof value !== "object") {
     return [];
   }
@@ -450,7 +462,11 @@ function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "agent_end") {
-    return [{ type: "status", state: "idle" }, { type: "final", text: extractFinalText(record) }];
+    const interrupted = finalMessageWasInterrupted(record);
+    return [
+      { type: "status", state: "idle" },
+      { type: "final", text: extractFinalText(record), ...(interrupted ? { interrupted: true } : {}) },
+    ];
   }
 
   if (type === "message_update") {
@@ -719,6 +735,44 @@ function extractFinalText(record: Record<string, unknown>): string {
   }
 
   return "Pi completed.";
+}
+
+function finalMessageWasInterrupted(record: Record<string, unknown>): boolean {
+  const messages = record.messages;
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isRecord(message) || message.role !== "assistant") {
+      continue;
+    }
+    return message.stopReason === "aborted" || message.errorMessage === "Request was aborted";
+  }
+  return false;
+}
+
+async function waitForProcessExit(proc: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return true;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      proc.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    proc.once("exit", onExit);
+  });
 }
 
 function extractAssistantText(message: unknown): string {

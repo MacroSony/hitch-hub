@@ -136,6 +136,7 @@ function piUiSelectSmokeConfig(dataDir: string, editorResponsePath: string): Hub
     default_cwd: cwd,
     defaultCwd: cwd,
     agent_turn_timeout_ms: 10_000,
+    worker_idle_timeout_ms: 30 * 60 * 1000,
     approval_timeout_ms: 10_000,
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,

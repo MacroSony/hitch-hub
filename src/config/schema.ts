@@ -51,6 +51,7 @@ export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
   default_cwd: z.string().optional(),
   agent_turn_timeout_ms: z.number().int().positive().default(300_000),
+  worker_idle_timeout_ms: z.number().int().min(0).default(30 * 60 * 1000),
   approval_timeout_ms: z.number().int().positive().default(300_000),
   media: mediaSchema.default({
     max_inbound_bytes: 20 * 1024 * 1024,

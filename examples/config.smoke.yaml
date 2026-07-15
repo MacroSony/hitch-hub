@@ -1,6 +1,7 @@
 data_dir: .remote-agent-hub-smoke
 default_cwd: ..
 agent_turn_timeout_ms: 5000
+worker_idle_timeout_ms: 1800000
 approval_timeout_ms: 20000
 
 media:

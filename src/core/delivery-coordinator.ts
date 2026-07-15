@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ChannelAdapter, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { AuditLog } from "./audit-log.js";
 import type { ChatTarget } from "./types.js";
@@ -10,6 +11,11 @@ export type DeliveryHealth = {
   lastFailureAt?: string;
   lastError?: string;
   cooldownUntil?: string;
+};
+
+export type DeliveryContext = {
+  sessionId?: string;
+  turnId?: string;
 };
 
 type DeliveryState = DeliveryHealth & {
@@ -26,11 +32,12 @@ export class DeliveryCoordinator {
     private readonly wechatFailureCooldownMs = 0,
   ) {}
 
-  enqueueText(target: ChatTarget, text: string, opts?: SendOptions): void {
+  enqueueText(target: ChatTarget, text: string, opts?: SendOptions, context: DeliveryContext = {}): string | undefined {
     if (text.length === 0) {
-      return;
+      return undefined;
     }
 
+    const deliveryId = randomUUID();
     const state = this.stateFor(target);
     const enqueuedAtMs = Date.now();
     state.pending += 1;
@@ -51,16 +58,33 @@ export class DeliveryCoordinator {
         this.markSuccess(state);
         await this.writeAudit({
           type: "text.delivery",
+          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
           target,
-          details: { status: "sent", length: text.length, attemptedAt, queuedMs: Date.now() - enqueuedAtMs },
+          details: {
+            deliveryId,
+            status: "sent",
+            length: text.length,
+            attemptedAt,
+            queuedMs: Date.now() - enqueuedAtMs,
+            ...(context.turnId ? { turnId: context.turnId } : {}),
+          },
         });
       } catch (error) {
         const message = formatError(error);
         this.markFailure(target, state, error, message);
         await this.writeAudit({
           type: "text.delivery",
+          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
           target,
-          details: { status: "failed", length: text.length, attemptedAt, queuedMs: Date.now() - enqueuedAtMs, error: message },
+          details: {
+            deliveryId,
+            status: "failed",
+            length: text.length,
+            attemptedAt,
+            queuedMs: Date.now() - enqueuedAtMs,
+            error: message,
+            ...(context.turnId ? { turnId: context.turnId } : {}),
+          },
         });
         process.stderr.write(`[hitch] Send failed: ${message}\n`);
       } finally {
@@ -72,6 +96,7 @@ export class DeliveryCoordinator {
     });
 
     state.tail = run.catch(() => undefined);
+    return deliveryId;
   }
 
   async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void> {

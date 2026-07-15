@@ -63,6 +63,10 @@ This file archives completed implementation checkpoints so
 - Text chunking for long replies.
 - Delivery output defaults that summarize tool calls/results unless `delivery.full_tool_output: true`.
 - Audit logging for session, worker, prompt, approval, and artifact-delivery events.
+- Authoritative turn deadlines with bounded cancellation and labeled interrupted partial results.
+- Ordered, bounded per-target delivery with delivery/session/turn audit correlation.
+- Configurable idle-worker eviction and deterministic worker stop behavior.
+- Graceful signal shutdown, channel-health transition auditing, and a user-level systemd example.
 - Smoke tests for fake flow, media cache, media flow, interaction flow, Pi RPC, Pi approval, Pi UI selection, Telegram health checks, and multi-channel routing.
 
 ## Verification Snapshot
@@ -79,6 +83,8 @@ Latest local verification from the review pass:
 - `npm run smoke:pi-approval`: passed.
 - `npm run smoke:pi-ui-select`: passed.
 - `npm run smoke:multi-channel`: passed.
+- `npm run smoke:reliability-flow`: passed.
+- `npm run smoke:mcp-session`: passed.
 - `npm audit --omit=dev`: passed with zero reported vulnerabilities.
 
 ## Lessons Carried Forward

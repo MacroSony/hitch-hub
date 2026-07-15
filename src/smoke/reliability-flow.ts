@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
+import { mapPiEvent } from "../agents/pi-rpc.js";
 import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { HubConfig } from "../config/schema.js";
 import { RemoteAgentHub } from "../core/hub.js";
@@ -11,8 +12,12 @@ import { DeliveryCoordinator } from "../core/delivery-coordinator.js";
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
   private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private closed = false;
 
   push(value: T): void {
+    if (this.closed) {
+      return;
+    }
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter({ done: false, value });
@@ -21,12 +26,22 @@ class AsyncEventQueue<T> {
     this.values.push(value);
   }
 
+  close(): void {
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter({ done: true, value: undefined });
+    }
+  }
+
   async *iterate(): AsyncIterable<T> {
     while (true) {
       const value = this.values.shift();
       if (value) {
         yield value;
         continue;
+      }
+      if (this.closed) {
+        return;
       }
       const result = await new Promise<IteratorResult<T>>((resolve) => this.waiters.push(resolve));
       if (result.done) {
@@ -135,6 +150,166 @@ class CompletingBackend implements AgentBackend {
   async stop(): Promise<void> {}
 }
 
+class PartialOnAbortBackend implements AgentBackend {
+  private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  private alive = false;
+  abortCount = 0;
+  stopCount = 0;
+
+  async start(): Promise<number | undefined> {
+    this.alive = true;
+    return 333;
+  }
+
+  async send(): Promise<void> {}
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  isAlive(): boolean {
+    return this.alive;
+  }
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+    setTimeout(() => {
+      this.eventsQueue.push({
+        type: "final",
+        text: "Useful partial answer produced while cancellation completed.",
+        interrupted: true,
+      });
+    }, 5);
+  }
+
+  async stop(): Promise<void> {
+    this.stopCount += 1;
+    this.alive = false;
+    this.eventsQueue.close();
+  }
+}
+
+class ScriptedChannel implements ChannelAdapter {
+  readonly texts: string[] = [];
+  private readonly target: ChatTarget = { platform: "fake", chatId: crypto.randomUUID(), userId: "smoke" };
+
+  constructor(
+    private readonly messages: string[],
+    private readonly pauseBeforeLastMs = 0,
+  ) {}
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    for (let index = 0; index < this.messages.length; index += 1) {
+      if (index === this.messages.length - 1 && this.pauseBeforeLastMs > 0) {
+        await sleep(this.pauseBeforeLastMs);
+      }
+      yield this.event(this.messages[index] ?? "");
+    }
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    this.texts.push(text);
+  }
+
+  private event(text: string): InboundChatEvent {
+    return {
+      id: crypto.randomUUID(),
+      target: this.target,
+      text,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+}
+
+class EvictableBackend implements AgentBackend {
+  private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  private alive = false;
+  stopCount = 0;
+
+  async start(): Promise<number | undefined> {
+    this.alive = true;
+    return 444;
+  }
+
+  async send(): Promise<void> {
+    this.eventsQueue.push({ type: "final", text: "idle worker response" });
+  }
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  isAlive(): boolean {
+    return this.alive;
+  }
+
+  async abort(): Promise<void> {}
+
+  async stop(): Promise<void> {
+    this.stopCount += 1;
+    this.alive = false;
+    this.eventsQueue.close();
+  }
+}
+
+class BlockingChannel implements ChannelAdapter {
+  readonly eventsQueue = new AsyncEventQueue<InboundChatEvent>();
+  readonly target: ChatTarget = { platform: "fake", chatId: "shutdown", userId: "smoke" };
+  stopCount = 0;
+
+  receive(): AsyncIterable<InboundChatEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  async sendText(): Promise<void> {}
+
+  async stop(): Promise<void> {
+    this.stopCount += 1;
+    this.eventsQueue.close();
+  }
+
+  push(text: string): void {
+    this.eventsQueue.push({
+      id: crypto.randomUUID(),
+      target: this.target,
+      text,
+      receivedAt: new Date().toISOString(),
+    });
+  }
+}
+
+class ShutdownBackend implements AgentBackend {
+  private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  private alive = false;
+  abortCount = 0;
+  stopCount = 0;
+
+  async start(): Promise<number | undefined> {
+    this.alive = true;
+    return 555;
+  }
+
+  async send(): Promise<void> {}
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  isAlive(): boolean {
+    return this.alive;
+  }
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+  }
+
+  async stop(): Promise<void> {
+    this.stopCount += 1;
+    this.alive = false;
+    this.eventsQueue.close();
+  }
+}
+
 class StalledMediaChannel implements ChannelAdapter {
   readonly texts: string[] = [];
 
@@ -200,6 +375,21 @@ class CooldownChannel implements ChannelAdapter {
 }
 
 async function main(): Promise<void> {
+  const interrupted = mapPiEvent({
+    type: "agent_end",
+    messages: [
+      {
+        role: "assistant",
+        stopReason: "aborted",
+        errorMessage: "Request was aborted",
+        content: [{ type: "text", text: "mapped partial" }],
+      },
+    ],
+  }).find((event): event is Extract<AgentEvent, { type: "final" }> => event.type === "final");
+  if (!interrupted?.interrupted || interrupted.text !== "mapped partial") {
+    throw new Error(`Pi interrupted-final mapping regression: ${JSON.stringify(interrupted)}`);
+  }
+
   const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-flow");
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
@@ -248,22 +438,99 @@ async function main(): Promise<void> {
   const auditRows = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8")
     .trim()
     .split(/\n/)
-    .map((line) => JSON.parse(line) as { type?: string; details?: { status?: string } });
-  if (auditRows.filter((row) => row.type === "worker.timeout").length !== 1) {
-    throw new Error("Expected exactly one durable worker.timeout audit event.");
+    .map((line) => JSON.parse(line) as { type?: string; sessionId?: string; details?: { status?: string; deliveryId?: string; turnId?: string } });
+  if (auditRows.filter((row) => row.type === "turn.timeout").length !== 1) {
+    throw new Error("Expected exactly one durable turn.timeout audit event.");
   }
   if (auditRows.filter((row) => row.type === "prompt.received").length !== 2) {
     throw new Error("Expected the overlapping prompt to be rejected before it reached the backend.");
   }
-  if (!auditRows.some((row) => row.type === "text.delivery" && row.details?.status === "failed")) {
-    throw new Error("Expected stalled text delivery to be audited as failed.");
+  if (
+    !auditRows.some(
+      (row) =>
+        row.type === "text.delivery" &&
+        row.details?.status === "failed" &&
+        row.details.deliveryId &&
+        row.details.turnId &&
+        row.sessionId,
+    )
+  ) {
+    throw new Error("Expected stalled text delivery to be audited with delivery/session/turn correlation.");
   }
 
+  await runTimeoutPartialScenario();
+  await runIdleEvictionScenario();
+  await runGracefulShutdownScenario();
   await runMediaTimeoutScenario();
   await runUnifiedDeliveryScenario();
   await runWechatCooldownScenario();
 
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
+}
+
+async function runTimeoutPartialScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-partial");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new ScriptedChannel(["!new pi", "run past deadline"]);
+  const backend = new PartialOnAbortBackend();
+  const hub = new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => backend);
+  await hub.run();
+
+  const response = channel.texts.find((text) => text.includes("Partial result from the cancelled turn"));
+  if (!response?.includes("Useful partial answer") || backend.abortCount !== 1 || backend.stopCount !== 1) {
+    throw new Error(`Interrupted final was not surfaced and stopped deterministically: ${JSON.stringify(channel.texts)}`);
+  }
+  const timeout = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8")
+    .trim()
+    .split(/\n/)
+    .map((line) => JSON.parse(line) as { type?: string; details?: { partialResultLength?: number } })
+    .find((row) => row.type === "turn.timeout");
+  if (!timeout?.details?.partialResultLength) {
+    throw new Error("Timeout audit did not record the surfaced partial result length.");
+  }
+}
+
+async function runIdleEvictionScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-idle-eviction");
+  rmSync(dataDir, { force: true, recursive: true });
+  const config = reliabilityConfig(dataDir);
+  config.worker_idle_timeout_ms = 40;
+  const channel = new ScriptedChannel(["!new pi", "complete quickly", "!status"], 150);
+  const backend = new EvictableBackend();
+  const hub = new RemoteAgentHub(config, channel, () => backend);
+  await hub.run();
+
+  const status = channel.texts.find((text) => text.startsWith("Session ") && text.includes("worker:"));
+  if (backend.stopCount !== 1 || !status?.includes("worker: not loaded")) {
+    throw new Error(`Idle worker was not evicted: stopCount=${backend.stopCount} status=${status ?? "missing"}`);
+  }
+  const audit = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+  if (!audit.includes('"type":"worker.stopped"') || !audit.includes('"reason":"idle_timeout"')) {
+    throw new Error("Idle worker eviction was not audited.");
+  }
+}
+
+async function runGracefulShutdownScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-shutdown");
+  rmSync(dataDir, { force: true, recursive: true });
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 5_000;
+  const channel = new BlockingChannel();
+  const backend = new ShutdownBackend();
+  const hub = new RemoteAgentHub(config, channel, () => backend);
+  const run = hub.run();
+  channel.push("!new pi");
+  channel.push("keep running");
+  await sleep(30);
+  const startedAt = Date.now();
+  await hub.shutdown("SIGTERM");
+  await run;
+
+  if (Date.now() - startedAt > 500 || channel.stopCount !== 1 || backend.abortCount !== 1 || backend.stopCount !== 1) {
+    throw new Error(
+      `Graceful shutdown was not bounded: elapsed=${Date.now() - startedAt} channel=${channel.stopCount} abort=${backend.abortCount} stop=${backend.stopCount}`,
+    );
+  }
 }
 
 async function runUnifiedDeliveryScenario(): Promise<void> {
@@ -350,6 +617,7 @@ function reliabilityConfig(dataDir: string): HubConfig {
     default_cwd: cwd,
     defaultCwd: cwd,
     agent_turn_timeout_ms: 60,
+    worker_idle_timeout_ms: 0,
     approval_timeout_ms: 5_000,
     media: {
       max_inbound_bytes: 20 * 1024 * 1024,

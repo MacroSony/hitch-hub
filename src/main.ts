@@ -62,7 +62,25 @@ async function main(): Promise<void> {
       : createConfiguredAdapter(config, new MediaCache(config.dataDir));
 
   const hub = new RemoteAgentHub(config, adapter);
-  await hub.run();
+  const handleSignal = (signal: "SIGINT" | "SIGTERM") => {
+    process.stderr.write(`[hitch ${new Date().toISOString()}] Received ${signal}; shutting down.\n`);
+    void hub.shutdown(signal).catch((error: unknown) => {
+      process.stderr.write(
+        `[hitch ${new Date().toISOString()}] Graceful shutdown failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
+  };
+  const onSigint = () => handleSignal("SIGINT");
+  const onSigterm = () => handleSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  try {
+    await hub.run();
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  }
 }
 
 function createConfiguredAdapter(config: ReturnType<typeof loadConfig>, mediaCache: MediaCache): ChannelAdapter {
