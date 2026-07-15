@@ -13,6 +13,7 @@ import {
   type DeliveryContext,
   type DeliveryHealth,
 } from "./delivery-coordinator.js";
+import { DeliveryStore } from "./delivery-store.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
@@ -32,6 +33,7 @@ type ActiveTurn = {
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
+  private readonly deliveryStore: DeliveryStore;
   private readonly tools: HubToolService;
   private readonly toolBridge: AgentToolBridge;
   private readonly delivery: DeliveryCoordinator;
@@ -40,6 +42,12 @@ export class RemoteAgentHub {
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly workerLastUsedAt = new Map<string, number>();
+  private readonly lastInboundAt = new Map<string, string>();
+  private readonly inboundCounts = new Map<string, number>();
+  private readonly channelTransitionCounts = new Map<string, number>();
+  private readonly startedAtMs = Date.now();
+  private readonly recoveredDeliveryCount: number;
+  private readonly prunedDeliveryCount: number;
   private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -51,8 +59,18 @@ export class RemoteAgentHub {
   ) {
     this.sessions = new SessionRegistry(config.dataDir);
     this.sessions.recoverInterruptedSessions();
-    this.audit = new AuditLog(config.dataDir);
+    this.deliveryStore = new DeliveryStore(config.dataDir);
+    this.recoveredDeliveryCount = this.deliveryStore.recoverInterrupted();
+    this.prunedDeliveryCount = this.deliveryStore.pruneTerminal(config.delivery.retention_ms);
+    this.audit = new AuditLog(config.dataDir, {
+      maxBytes: config.audit.max_bytes,
+      maxFiles: config.audit.max_files,
+    });
     channel.setHealthReporter?.((transition) => {
+      this.channelTransitionCounts.set(
+        transition.platform,
+        (this.channelTransitionCounts.get(transition.platform) ?? 0) + 1,
+      );
       void this.audit
         .write({
           type: "channel.health",
@@ -70,8 +88,12 @@ export class RemoteAgentHub {
     this.delivery = new DeliveryCoordinator(
       channel,
       this.audit,
-      config.delivery.send_timeout_ms,
-      config.channels.wechat.failure_cooldown_ms,
+      {
+        sendTimeoutMs: config.delivery.send_timeout_ms,
+        queueTtlMs: config.delivery.queue_ttl_ms,
+        store: this.deliveryStore,
+        wechatFailureCooldownMs: config.channels.wechat.failure_cooldown_ms,
+      },
     );
     this.tools = new HubToolService(
       config,
@@ -80,12 +102,21 @@ export class RemoteAgentHub {
       async (target, text) => {
         this.delivery.enqueueText(target, text, undefined, this.deliveryContextFor(target));
       },
-      (target, artifact) => this.delivery.sendArtifact(target, artifact),
+      async (target, artifact, request) => {
+        await this.delivery.sendArtifact(target, artifact, undefined, this.deliveryContextFor(target), request);
+      },
     );
     this.toolBridge = new AgentToolBridge(config.dataDir);
   }
 
   async run(): Promise<void> {
+    await this.audit.write({
+      type: "hub.started",
+      details: {
+        recoveredDeliveries: this.recoveredDeliveryCount,
+        prunedDeliveries: this.prunedDeliveryCount,
+      },
+    });
     this.startWorkerSweep();
     try {
       for await (const event of this.channel.receive()) {
@@ -112,6 +143,7 @@ export class RemoteAgentHub {
       await this.delivery.drain();
       await this.stopWorkers("hub_exit");
       await this.audit.drain();
+      this.deliveryStore.close();
       this.sessions.close();
     }
   }
@@ -148,6 +180,9 @@ export class RemoteAgentHub {
       return;
     }
     try {
+      const key = targetRuntimeKey(event.target);
+      this.lastInboundAt.set(key, event.receivedAt);
+      this.inboundCounts.set(key, (this.inboundCounts.get(key) ?? 0) + 1);
       // A fresh inbound message proves the user is present and supplies a new
       // WeChat context token, so allow one new delivery attempt immediately.
       this.delivery.noteInbound(event.target);
@@ -168,6 +203,9 @@ export class RemoteAgentHub {
           return;
         case "status":
           await this.handleStatus(event);
+          return;
+        case "health":
+          await this.handleHealth(event);
           return;
         case "sessions":
           await this.handleSessions(event);
@@ -270,6 +308,31 @@ export class RemoteAgentHub {
       `delivery: ${formatDeliveryHealth(delivery)}`,
       `channel: ${formatChannelHealth(channel)}`,
       `cwd: ${session.cwd}`,
+    ];
+    await this.sendChunkedText(event.target, lines.join("\n"));
+  }
+
+  private async handleHealth(event: InboundChatEvent): Promise<void> {
+    const key = targetRuntimeKey(event.target);
+    const session = this.sessions.getActiveForTarget(event.target);
+    const turn = session ? this.activeTurns.get(session.id) : undefined;
+    const worker = session ? this.workers.get(session.id) : undefined;
+    const delivery = this.delivery.health(event.target);
+    const channel = this.channel.health?.(event.target);
+    const inboundAt = this.lastInboundAt.get(key);
+    const lines = [
+      "Hitch health",
+      `uptime: ${formatDuration(Date.now() - this.startedAtMs)}`,
+      `channel: ${formatChannelHealth(channel)}`,
+      `channel transitions: ${this.channelTransitionCounts.get(event.target.platform) ?? 0}`,
+      `last inbound: ${inboundAt ? `${formatDuration(Math.max(0, Date.now() - Date.parse(inboundAt)))} ago` : "none"}; received ${this.inboundCounts.get(key) ?? 0}`,
+      `delivery runtime: ${formatDeliveryHealth(delivery)}`,
+      `delivery ledger: ${formatDeliveryLedger(delivery)}`,
+      `workers: ${this.workers.size}; active turns: ${this.activeTurns.size}`,
+      session
+        ? `active session: ${shortId(session)}; ${session.status}; turn ${formatTurnHealth(turn, session.status)}; worker ${formatWorkerHealth(worker, session.processId, Boolean(turn))}`
+        : "active session: none",
+      `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}`,
     ];
     await this.sendChunkedText(event.target, lines.join("\n"));
   }
@@ -1417,6 +1480,25 @@ function formatDeliveryHealth(health: DeliveryHealth): string {
   return fields.join("; ");
 }
 
+function formatDeliveryLedger(health: DeliveryHealth): string {
+  const summary = health.durable;
+  const fields = [
+    `queued ${summary.queued}`,
+    `sending ${summary.sending}`,
+    `sent ${summary.sent}`,
+    `failed ${summary.failed}`,
+    `expired ${summary.expired}`,
+    `recent failures ${summary.recentFailures}`,
+  ];
+  if (summary.lastSentAt) {
+    fields.push(`last sent ${formatDuration(Math.max(0, Date.now() - Date.parse(summary.lastSentAt)))} ago`);
+  }
+  if (summary.lastError) {
+    fields.push(`last terminal error: ${summary.lastError}`);
+  }
+  return fields.join("; ");
+}
+
 function formatChannelHealth(health: ChannelHealth | undefined): string {
   if (!health) {
     return "unknown";
@@ -1444,6 +1526,10 @@ function formatDuration(ms: number): string {
 
 function shortId(session: HubSession): string {
   return session.id.slice(0, 8);
+}
+
+function targetRuntimeKey(target: ChatTarget): string {
+  return [target.platform, target.chatId, target.threadId ?? "", target.userId ?? ""].join(":");
 }
 
 function targetForSession(session: HubSession): ChatTarget {

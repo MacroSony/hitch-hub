@@ -1,6 +1,7 @@
 export type HubCommand =
   | { type: "new"; agent: string; cwd?: string; name?: string }
   | { type: "status" }
+  | { type: "health" }
   | { type: "sessions" }
   | { type: "switch"; ref: string }
   | { type: "cwd" }
@@ -47,6 +48,8 @@ export function parseCommand(text: string): HubCommand {
     }
     case "status":
       return { type: "status" };
+    case "health":
+      return { type: "health" };
     case "sessions":
       return { type: "sessions" };
     case "switch": {

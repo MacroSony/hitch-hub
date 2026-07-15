@@ -37,6 +37,7 @@ This file archives completed implementation checkpoints so
 - Hub commands:
   - `!new`
   - `!status`
+  - `!health`
   - `!sessions`
   - `!switch`
   - `!cwd`
@@ -67,6 +68,8 @@ This file archives completed implementation checkpoints so
 - Ordered, bounded per-target delivery with delivery/session/turn audit correlation.
 - Configurable idle-worker eviction and deterministic worker stop behavior.
 - Graceful signal shutdown, channel-health transition auditing, and a user-level systemd example.
+- SQLite-backed outbound delivery lifecycle with queue expiry, restart recovery, terminal retention, and no persisted message bodies or artifact paths.
+- Size-bounded JSONL audit rotation and hub-level `!health` diagnostics.
 - Smoke tests for fake flow, media cache, media flow, interaction flow, Pi RPC, Pi approval, Pi UI selection, Telegram health checks, and multi-channel routing.
 
 ## Verification Snapshot
@@ -84,6 +87,7 @@ Latest local verification from the review pass:
 - `npm run smoke:pi-ui-select`: passed.
 - `npm run smoke:multi-channel`: passed.
 - `npm run smoke:reliability-flow`: passed.
+- `npm run smoke:wechat-reliability`: passed.
 - `npm run smoke:mcp-session`: passed.
 - `npm audit --omit=dev`: passed with zero reported vulnerabilities.
 

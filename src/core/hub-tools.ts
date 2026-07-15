@@ -30,6 +30,12 @@ type SendMediaOptions = {
   extraAllowedRoots?: string[];
 };
 
+export type ArtifactDeliveryRequest = {
+  deliveryId: string;
+  source: NonNullable<SendMediaOptions["source"]>;
+  contentLength: number;
+};
+
 export class HubToolService {
   constructor(
     private readonly config: HubConfig,
@@ -37,7 +43,11 @@ export class HubToolService {
     private readonly audit: AuditLog,
     private readonly sendText: (target: ChatTarget, text: string) => Promise<void> = (target, text) =>
       channel.sendText(target, text),
-    private readonly sendArtifact: (target: ChatTarget, artifact: OutboundArtifact) => Promise<void> = (target, artifact) => {
+    private readonly sendArtifact: (
+      target: ChatTarget,
+      artifact: OutboundArtifact,
+      request: ArtifactDeliveryRequest,
+    ) => Promise<void> = (target, artifact) => {
       if (!channel.sendArtifact) {
         throw new Error(`Channel does not support media delivery: ${target.platform}`);
       }
@@ -51,14 +61,15 @@ export class HubToolService {
 
     try {
       const artifact = this.validateMediaInput(input, options.extraAllowedRoots ?? []);
-      await this.sendArtifact(target, artifact);
+      const size = statSync(artifact.path).size;
+      await this.sendArtifact(target, artifact, { deliveryId, source, contentLength: size });
       const result: SendMediaResult = {
         deliveryId,
         status: "sent",
         platform: target.platform,
         path: artifact.path,
         kind: artifact.kind,
-        size: statSync(artifact.path).size,
+        size,
       };
       await this.audit.write({
         type: "artifact.delivery",
@@ -75,6 +86,7 @@ export class HubToolService {
       return result;
     } catch (error) {
       const message = formatError(error);
+      const auditStatus = error instanceof Error && error.name === "DeliveryExpiredError" ? "expired" : "failed";
       const result: SendMediaResult = {
         deliveryId,
         status: "failed",
@@ -90,7 +102,7 @@ export class HubToolService {
           source,
           path: input.path,
           ...(input.kind ? { kind: input.kind } : {}),
-          status: result.status,
+          status: auditStatus,
           error: message,
         },
       });

@@ -109,7 +109,7 @@ Complete the live WeChat failure/recovery validation already in progress, then l
 - a restart-on-failure user service example
 - durable outbound delivery IDs and terminal delivery state
 
-Implementation note (2026-07-15): live delivery validation, graceful shutdown, deterministic worker cleanup, idle-worker eviction, channel-health transition auditing, delivery/session/turn correlation, and the user-service example have landed. Full durable delivery lifecycle recovery remains before this phase is complete.
+Implementation note (2026-07-15): the Phase 0 implementation is complete. It now includes live delivery validation, graceful shutdown, deterministic worker cleanup, idle-worker eviction, channel-health transition auditing, a user-service example, a durable outbound lifecycle with restart expiry and retention, bounded audit rotation, `!health`, and deterministic WeChat transport tests. The durable-ledger commit still needs a controlled live rollout after the current `27ba1a0` soak test before Phase 1 begins.
 
 Channel-health diagnostics and retention can continue in parallel, but proactive scheduling should not ship before service restart and delivery outcome behavior are explicit.
 

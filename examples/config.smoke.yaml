@@ -15,6 +15,12 @@ delivery:
   tool_status_mode: all
   tool_status_batch_ms: 0
   send_timeout_ms: 30000
+  queue_ttl_ms: 300000
+  retention_ms: 2592000000
+
+audit:
+  max_bytes: 10485760
+  max_files: 5
 
 users:
   smoke:

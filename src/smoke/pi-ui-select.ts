@@ -149,7 +149,10 @@ function piUiSelectSmokeConfig(dataDir: string, editorResponsePath: string): Hub
       tool_status_mode: "all",
       tool_status_batch_ms: 0,
       send_timeout_ms: 5_000,
+      queue_ttl_ms: 5 * 60 * 1000,
+      retention_ms: 30 * 24 * 60 * 60 * 1000,
     },
+    audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd],
     outboundRoots: [],
     users: {

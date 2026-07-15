@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ChannelAdapter, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { AuditLog } from "./audit-log.js";
+import type { DeliveryStore, DeliverySummary } from "./delivery-store.js";
 import type { ChatTarget } from "./types.js";
 
 export type DeliveryHealth = {
@@ -11,6 +12,7 @@ export type DeliveryHealth = {
   lastFailureAt?: string;
   lastError?: string;
   cooldownUntil?: string;
+  durable: DeliverySummary;
 };
 
 export type DeliveryContext = {
@@ -18,7 +20,20 @@ export type DeliveryContext = {
   turnId?: string;
 };
 
-type DeliveryState = DeliveryHealth & {
+export type DeliveryCoordinatorOptions = {
+  sendTimeoutMs: number;
+  queueTtlMs: number;
+  store: DeliveryStore;
+  wechatFailureCooldownMs?: number;
+};
+
+export type ArtifactDeliveryMetadata = {
+  deliveryId?: string;
+  source?: string;
+  contentLength?: number;
+};
+
+type DeliveryState = Omit<DeliveryHealth, "durable"> & {
   tail: Promise<void>;
 };
 
@@ -28,8 +43,7 @@ export class DeliveryCoordinator {
   constructor(
     private readonly channel: ChannelAdapter,
     private readonly audit: AuditLog,
-    private readonly timeoutMs: number,
-    private readonly wechatFailureCooldownMs = 0,
+    private readonly options: DeliveryCoordinatorOptions,
   ) {}
 
   enqueueText(target: ChatTarget, text: string, opts?: SendOptions, context: DeliveryContext = {}): string | undefined {
@@ -40,6 +54,17 @@ export class DeliveryCoordinator {
     const deliveryId = randomUUID();
     const state = this.stateFor(target);
     const enqueuedAtMs = Date.now();
+    const queuedAt = new Date(enqueuedAtMs).toISOString();
+    this.options.store.create({
+      id: deliveryId,
+      kind: "text",
+      target,
+      ...context,
+      source: "hub_text",
+      contentLength: text.length,
+      queuedAt,
+      expiresAt: new Date(enqueuedAtMs + this.options.queueTtlMs).toISOString(),
+    });
     state.pending += 1;
     if (state.state !== "degraded") {
       state.state = "pending";
@@ -47,46 +72,57 @@ export class DeliveryCoordinator {
 
     const run = state.tail.then(async () => {
       const attemptedAt = new Date().toISOString();
-      state.lastAttemptAt = attemptedAt;
       try {
-        this.assertNotCoolingDown(target, state);
-        await runWithTimeout(
-          (signal) => this.channel.sendText(target, text, mergeSignal(opts, signal)),
-          this.timeoutMs,
-          `Text delivery timed out after ${this.timeoutMs}ms`,
-        );
-        this.markSuccess(state);
-        await this.writeAudit({
-          type: "text.delivery",
-          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
-          target,
-          details: {
+        if (this.options.store.expireQueuedIfDue(deliveryId, attemptedAt)) {
+          const message = "Text delivery expired before its send attempt started";
+          this.markFailure(target, state, new DeliveryExpiredError(message), message);
+          await this.writeTextAudit(target, context, {
+            deliveryId,
+            status: "expired",
+            length: text.length,
+            expiredAt: attemptedAt,
+            queuedMs: Date.now() - enqueuedAtMs,
+            error: message,
+          });
+          return;
+        }
+        if (!this.options.store.markSending(deliveryId, attemptedAt)) {
+          throw new Error(`Delivery ${deliveryId} was not queued when its send attempt started`);
+        }
+        state.lastAttemptAt = attemptedAt;
+        try {
+          this.assertNotCoolingDown(target, state);
+          await runWithTimeout(
+            (signal) => this.channel.sendText(target, text, mergeSignal(opts, signal)),
+            this.options.sendTimeoutMs,
+            `Text delivery timed out after ${this.options.sendTimeoutMs}ms`,
+          );
+          this.requireTerminalTransition(deliveryId, "sent", new Date().toISOString());
+          this.markSuccess(state);
+          await this.writeTextAudit(target, context, {
             deliveryId,
             status: "sent",
             length: text.length,
             attemptedAt,
-            queuedMs: Date.now() - enqueuedAtMs,
-            ...(context.turnId ? { turnId: context.turnId } : {}),
-          },
-        });
-      } catch (error) {
-        const message = formatError(error);
-        this.markFailure(target, state, error, message);
-        await this.writeAudit({
-          type: "text.delivery",
-          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
-          target,
-          details: {
+            queuedMs: Date.parse(attemptedAt) - enqueuedAtMs,
+          });
+        } catch (error) {
+          const message = formatError(error);
+          this.options.store.markTerminal(deliveryId, "failed", new Date().toISOString(), {
+            code: deliveryErrorCode(error),
+            message,
+          });
+          this.markFailure(target, state, error, message);
+          await this.writeTextAudit(target, context, {
             deliveryId,
             status: "failed",
             length: text.length,
             attemptedAt,
-            queuedMs: Date.now() - enqueuedAtMs,
+            queuedMs: Date.parse(attemptedAt) - enqueuedAtMs,
             error: message,
-            ...(context.turnId ? { turnId: context.turnId } : {}),
-          },
-        });
-        process.stderr.write(`[hitch] Send failed: ${message}\n`);
+          });
+          process.stderr.write(`[hitch] Send failed: ${message}\n`);
+        }
       } finally {
         state.pending -= 1;
         if (state.pending > 0 && state.state !== "degraded") {
@@ -99,31 +135,66 @@ export class DeliveryCoordinator {
     return deliveryId;
   }
 
-  async sendArtifact(target: ChatTarget, artifact: OutboundArtifact, opts?: SendOptions): Promise<void> {
+  async sendArtifact(
+    target: ChatTarget,
+    artifact: OutboundArtifact,
+    opts?: SendOptions,
+    context: DeliveryContext = {},
+    metadata: ArtifactDeliveryMetadata = {},
+  ): Promise<string> {
     if (!this.channel.sendArtifact) {
       throw new Error(`Channel does not support artifact delivery: ${target.platform}`);
     }
 
+    const deliveryId = metadata.deliveryId ?? randomUUID();
     const state = this.stateFor(target);
+    const enqueuedAtMs = Date.now();
+    const queuedAt = new Date(enqueuedAtMs).toISOString();
+    this.options.store.create({
+      id: deliveryId,
+      kind: "artifact",
+      target,
+      ...context,
+      ...(metadata.source ? { source: metadata.source } : {}),
+      ...(metadata.contentLength === undefined ? {} : { contentLength: metadata.contentLength }),
+      queuedAt,
+      expiresAt: new Date(enqueuedAtMs + this.options.queueTtlMs).toISOString(),
+    });
     state.pending += 1;
     if (state.state !== "degraded") {
       state.state = "pending";
     }
 
     const run = state.tail.then(async () => {
-      state.lastAttemptAt = new Date().toISOString();
+      const attemptedAt = new Date().toISOString();
       try {
-        this.assertNotCoolingDown(target, state);
-        await runWithTimeout(
-          (signal) => this.channel.sendArtifact!(target, artifact, mergeSignal(opts, signal)),
-          this.timeoutMs,
-          `Media delivery timed out after ${this.timeoutMs}ms`,
-        );
-        this.markSuccess(state);
-      } catch (error) {
-        const message = formatError(error);
-        this.markFailure(target, state, error, message);
-        throw error;
+        if (this.options.store.expireQueuedIfDue(deliveryId, attemptedAt)) {
+          const message = "Media delivery expired before its send attempt started";
+          this.markFailure(target, state, new DeliveryExpiredError(message), message);
+          throw new DeliveryExpiredError(message);
+        }
+        if (!this.options.store.markSending(deliveryId, attemptedAt)) {
+          throw new Error(`Delivery ${deliveryId} was not queued when its send attempt started`);
+        }
+        state.lastAttemptAt = attemptedAt;
+        try {
+          this.assertNotCoolingDown(target, state);
+          await runWithTimeout(
+            (signal) => this.channel.sendArtifact!(target, artifact, mergeSignal(opts, signal)),
+            this.options.sendTimeoutMs,
+            `Media delivery timed out after ${this.options.sendTimeoutMs}ms`,
+          );
+          this.requireTerminalTransition(deliveryId, "sent", new Date().toISOString());
+          this.markSuccess(state);
+        } catch (error) {
+          const message = formatError(error);
+          this.options.store.markTerminal(deliveryId, "failed", new Date().toISOString(), {
+            code: deliveryErrorCode(error),
+            message,
+          });
+          this.markFailure(target, state, error, message);
+          throw error;
+        }
       } finally {
         state.pending -= 1;
         if (state.pending > 0 && state.state !== "degraded") {
@@ -134,6 +205,7 @@ export class DeliveryCoordinator {
 
     state.tail = run.catch(() => undefined);
     await run;
+    return deliveryId;
   }
 
   noteInbound(target: ChatTarget): void {
@@ -146,11 +218,12 @@ export class DeliveryCoordinator {
   health(target: ChatTarget): DeliveryHealth {
     const state = this.states.get(targetKey(target));
     if (!state) {
-      return { state: "healthy", pending: 0 };
+      return { state: "healthy", pending: 0, durable: this.options.store.summary(target) };
     }
     return {
       state: state.state,
       pending: state.pending,
+      durable: this.options.store.summary(target),
       ...(state.lastAttemptAt ? { lastAttemptAt: state.lastAttemptAt } : {}),
       ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
       ...(state.lastFailureAt ? { lastFailureAt: state.lastFailureAt } : {}),
@@ -207,9 +280,35 @@ export class DeliveryCoordinator {
       return;
     }
     state.lastError = message;
-    if (target.platform === "wechat" && this.wechatFailureCooldownMs > 0) {
-      state.cooldownUntil = new Date(Date.now() + this.wechatFailureCooldownMs).toISOString();
+    if (error instanceof DeliveryExpiredError) {
+      return;
     }
+    const cooldownMs = this.options.wechatFailureCooldownMs ?? 0;
+    if (target.platform === "wechat" && cooldownMs > 0) {
+      state.cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
+    }
+  }
+
+  private requireTerminalTransition(deliveryId: string, status: "sent", at: string): void {
+    if (!this.options.store.markTerminal(deliveryId, status, at)) {
+      throw new Error(`Delivery ${deliveryId} could not transition to ${status}`);
+    }
+  }
+
+  private async writeTextAudit(
+    target: ChatTarget,
+    context: DeliveryContext,
+    details: Record<string, unknown>,
+  ): Promise<void> {
+    await this.writeAudit({
+      type: "text.delivery",
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+      target,
+      details: {
+        ...details,
+        ...(context.turnId ? { turnId: context.turnId } : {}),
+      },
+    });
   }
 
   private async writeAudit(event: Parameters<AuditLog["write"]>[0]): Promise<void> {
@@ -225,6 +324,13 @@ class DeliveryCooldownError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DeliveryCooldownError";
+  }
+}
+
+class DeliveryExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryExpiredError";
   }
 }
 
@@ -274,4 +380,17 @@ function formatError(error: unknown): string {
   }
   const cause = (error as { cause?: unknown }).cause;
   return cause instanceof Error ? `${error.message}: ${cause.message}` : error.message;
+}
+
+function deliveryErrorCode(error: unknown): string {
+  if (error instanceof DeliveryCooldownError) {
+    return "cooldown";
+  }
+  if (error instanceof DeliveryExpiredError) {
+    return "queue_expired";
+  }
+  if (error instanceof Error && error.message.includes("timed out")) {
+    return "send_timeout";
+  }
+  return "send_failed";
 }

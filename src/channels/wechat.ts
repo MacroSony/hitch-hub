@@ -706,3 +706,9 @@ function formatError(error: unknown): string {
   const cause = (error as { cause?: unknown }).cause;
   return cause instanceof Error ? `${error.message}: ${cause.message}` : error.message;
 }
+
+// Narrow test seam for deterministic transport tests. Production channel
+// behavior still reaches this helper only through sendArtifact().
+export const wechatReliabilityTestHooks = {
+  postCiphertextToCdn,
+};

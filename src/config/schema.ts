@@ -45,6 +45,13 @@ const deliverySchema = z.object({
   tool_status_mode: z.enum(["all", "failures", "none"]).default("all"),
   tool_status_batch_ms: z.number().int().min(0).default(0),
   send_timeout_ms: z.number().int().positive().default(30_000),
+  queue_ttl_ms: z.number().int().positive().default(5 * 60 * 1000),
+  retention_ms: z.number().int().min(0).default(30 * 24 * 60 * 60 * 1000),
+});
+
+const auditSchema = z.object({
+  max_bytes: z.number().int().positive().default(10 * 1024 * 1024),
+  max_files: z.number().int().min(1).max(100).default(5),
 });
 
 export const configSchema = z.object({
@@ -64,6 +71,12 @@ export const configSchema = z.object({
     tool_status_mode: "all",
     tool_status_batch_ms: 0,
     send_timeout_ms: 30_000,
+    queue_ttl_ms: 5 * 60 * 1000,
+    retention_ms: 30 * 24 * 60 * 60 * 1000,
+  }),
+  audit: auditSchema.default({
+    max_bytes: 10 * 1024 * 1024,
+    max_files: 5,
   }),
   users: z.record(z.string(), userSchema).default({}),
   channels: z

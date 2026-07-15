@@ -72,6 +72,9 @@ Edit `examples/config.example.yaml` for your machine:
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress successful tool chatter, or `none` for no tool-status messages
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
 - `delivery.send_timeout_ms`: maximum time for one outbound text/media send attempt after it reaches the front of its queue
+- `delivery.queue_ttl_ms`: maximum time an accepted delivery may wait for its send attempt to begin
+- `delivery.retention_ms`: how long terminal delivery-ledger rows remain in SQLite; `0` disables pruning
+- `audit.max_bytes` and `audit.max_files`: size and retained-file limits for the rotating JSONL audit log
 - `agent_turn_timeout_ms`: authoritative wall-clock turn limit; interrupted Pi output received during bounded cancellation is returned as a labeled partial result
 - `worker_idle_timeout_ms`: how long an idle agent worker remains loaded before Hitch stops it; `0` disables idle eviction
 - `channels.wechat.send_min_interval_ms`: minimum gap between WeChat API sends; `4000` is the conservative default for mixed text/media bursts
@@ -96,6 +99,7 @@ Then send commands to the configured chat bot:
 !new pi AgentHub
 !new pi C:\path\to\repo
 !status
+!health
 !sessions
 !switch <session-id-or-name>
 !cwd
@@ -153,7 +157,7 @@ Media behavior:
 - MCP-capable agents should load the `hitch.outbound_media` prompt so generated images/files are sent explicitly instead of only mentioned by path
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
-- Outbound artifact delivery attempts are recorded in the audit log
+- Outbound artifact delivery attempts are recorded in the audit log and durable delivery ledger
 
 Tool output behavior:
 
@@ -167,12 +171,15 @@ Runtime health behavior:
 - Agent turns have an authoritative wall-clock deadline; Hitch marks the turn as an error even if Pi never closes its event stream.
 - When Pi returns an explicitly interrupted final during bounded deadline cancellation, Hitch labels and delivers it as a partial result before stopping the worker.
 - Idle workers are stopped after `worker_idle_timeout_ms`; their persisted Pi session remains available and is resumed by a new worker on the next prompt.
-- Outbound text is queued per chat and delivery attempts are bounded by `delivery.send_timeout_ms`, so a slow chat API does not block Pi event consumption.
+- Outbound text is persisted before it is accepted, queued per chat, and bounded by `delivery.send_timeout_ms`, so a slow chat API does not block Pi event consumption.
 - Text and media share one ordered per-chat queue. A queued item receives its full send deadline when its own attempt begins.
+- Accepted text/media deliveries progress through durable `queued`, `sending`, and terminal `sent`/`failed`/`expired` states. Startup expires interrupted nonterminal rows without automatically resending them.
 - After a WeChat send failure, the rest of that broken batch fails quickly instead of consuming one full timeout per item; a new inbound message reopens delivery immediately.
 - `!status` reports active-turn age/deadline, worker liveness, pending/recent delivery health, and channel receive health.
+- `!health` reports process uptime, channel state, last inbound activity, durable delivery counts, active workers/turns, and startup recovery.
 - Text delivery attempts are recorded in the audit log without storing message contents.
 - Delivery audit records include a delivery ID and, when available, session/turn correlation.
+- The SQLite delivery ledger stores lengths and correlation metadata, not text bodies or artifact paths. Terminal rows and audit files have configurable retention limits.
 - Channel health is logged and audited on state transitions, suppressing repeated identical polling errors until recovery.
 
 ## Service Operation
@@ -243,6 +250,13 @@ Run the multi-channel routing smoke test:
 
 ```powershell
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:multi-channel
+```
+
+Run the runtime and deterministic WeChat reliability smoke tests:
+
+```powershell
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:reliability-flow
+& 'C:\Program Files\nodejs\npm.cmd' run smoke:wechat-reliability
 ```
 
 Check Telegram credentials without printing the token:

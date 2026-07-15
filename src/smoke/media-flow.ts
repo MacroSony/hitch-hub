@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
@@ -6,6 +6,7 @@ import type { AgentToolContext } from "../core/tool-bridge.js";
 import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { ChatTarget, HubAttachment, HubSession } from "../core/types.js";
 import { MediaCache } from "../core/media-cache.js";
+import { DeliveryStore } from "../core/delivery-store.js";
 import { RemoteAgentHub } from "../core/hub.js";
 
 const PNG_1X1 = Buffer.from(
@@ -429,6 +430,33 @@ async function runToolBridgeScenario(): Promise<void> {
   if (!resultPath || !existsSync(resultPath)) {
     throw new Error("Expected tool bridge to write a send_media result file.");
   }
+  const toolResult = JSON.parse(readFileSync(resultPath, "utf8")) as { deliveryId?: string; status?: string };
+  if (!toolResult.deliveryId || toolResult.status !== "sent") {
+    throw new Error(`Expected a successful tool result with a delivery ID: ${JSON.stringify(toolResult)}`);
+  }
+  const store = new DeliveryStore(dataDir);
+  const delivery = store.get(toolResult.deliveryId);
+  store.close();
+  if (
+    delivery?.status !== "sent" ||
+    delivery.kind !== "artifact" ||
+    delivery.source !== "agent_tool" ||
+    !delivery.sessionId ||
+    !delivery.turnId
+  ) {
+    throw new Error(`Tool result did not correlate to one durable artifact delivery: ${JSON.stringify(delivery)}`);
+  }
+  const artifactAudit = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line) as { type?: string; details?: { deliveryId?: string } })
+    .find((row) => row.type === "artifact.delivery" && row.details?.deliveryId === toolResult.deliveryId);
+  if (!artifactAudit) {
+    throw new Error("Artifact audit and durable ledger did not share the tool result delivery ID.");
+  }
+  if (readFileSync(path.join(dataDir, "hub.sqlite")).includes(Buffer.from(artifactPath))) {
+    throw new Error("Delivery ledger persisted an artifact path.");
+  }
 }
 
 function findBridgeResultPath(dataDir: string): string | undefined {
@@ -466,7 +494,10 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
       tool_status_mode: "all",
       tool_status_batch_ms: toolStatusBatchMs,
       send_timeout_ms: 5_000,
+      queue_ttl_ms: 5 * 60 * 1000,
+      retention_ms: 30 * 24 * 60 * 60 * 1000,
     },
+    audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd, dataDir],
     outboundRoots: [dataDir],
     users: {

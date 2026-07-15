@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
 import { mapPiEvent } from "../agents/pi-rpc.js";
@@ -8,6 +8,7 @@ import { RemoteAgentHub } from "../core/hub.js";
 import type { ChatTarget, HubSession } from "../core/types.js";
 import { AuditLog } from "../core/audit-log.js";
 import { DeliveryCoordinator } from "../core/delivery-coordinator.js";
+import { DeliveryStore } from "../core/delivery-store.js";
 
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
@@ -60,7 +61,9 @@ class ReliabilityChannel implements ChannelAdapter {
     yield this.event("!new pi");
     yield this.event("hang forever");
     yield this.event("overlap must be rejected");
-    await sleep(120);
+    // Leave deterministic room for the 60ms deadline, abort-event drain, and
+    // worker stop even when the full smoke suite is running concurrently.
+    await sleep(300);
     yield this.event("!status");
     yield this.event("recover after timeout");
   }
@@ -374,6 +377,21 @@ class CooldownChannel implements ChannelAdapter {
   }
 }
 
+class SlowQueueChannel implements ChannelAdapter {
+  readonly texts: string[] = [];
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    return;
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    if (text === "queue blocker") {
+      await sleep(50);
+    }
+    this.texts.push(text);
+  }
+}
+
 async function main(): Promise<void> {
   const interrupted = mapPiEvent({
     type: "agent_end",
@@ -409,7 +427,7 @@ async function main(): Promise<void> {
   await hub.run();
   const elapsedMs = Date.now() - startedAt;
 
-  if (elapsedMs > 1_000) {
+  if (elapsedMs > 1_500) {
     throw new Error(`Hard deadline regression: flow took ${elapsedMs}ms.`);
   }
   if (stalled.sendCount !== 1 || stalled.abortCount !== 1 || completing.sendCount !== 1) {
@@ -457,6 +475,15 @@ async function main(): Promise<void> {
   ) {
     throw new Error("Expected stalled text delivery to be audited with delivery/session/turn correlation.");
   }
+  const failedAudit = auditRows.find(
+    (row) => row.type === "text.delivery" && row.details?.status === "failed" && row.details.deliveryId,
+  );
+  const persisted = new DeliveryStore(dataDir);
+  const failedDelivery = failedAudit?.details?.deliveryId ? persisted.get(failedAudit.details.deliveryId) : undefined;
+  persisted.close();
+  if (failedDelivery?.status !== "failed" || failedDelivery.errorCode !== "send_timeout") {
+    throw new Error(`Failed text audit did not match its durable terminal state: ${JSON.stringify(failedDelivery)}`);
+  }
 
   await runTimeoutPartialScenario();
   await runIdleEvictionScenario();
@@ -464,6 +491,9 @@ async function main(): Promise<void> {
   await runMediaTimeoutScenario();
   await runUnifiedDeliveryScenario();
   await runWechatCooldownScenario();
+  await runDurableDeliveryScenario();
+  await runHealthDiagnosticsScenario();
+  await runAuditRotationScenario();
 
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
 }
@@ -538,7 +568,12 @@ async function runUnifiedDeliveryScenario(): Promise<void> {
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
   const channel = new OrderedMixedChannel();
-  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), 30);
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 30,
+    queueTtlMs: 5_000,
+    store,
+  });
   const target: ChatTarget = { platform: "wechat", chatId: "ordered", userId: "smoke" };
 
   delivery.enqueueText(target, "before media");
@@ -549,6 +584,7 @@ async function runUnifiedDeliveryScenario(): Promise<void> {
   if (order !== "text:start,text:end,media:start,media:end") {
     throw new Error(`Text and media did not share one ordered queue: ${order}`);
   }
+  store.close();
 }
 
 async function runWechatCooldownScenario(): Promise<void> {
@@ -556,7 +592,13 @@ async function runWechatCooldownScenario(): Promise<void> {
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
   const channel = new CooldownChannel();
-  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), 30, 60_000);
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 30,
+    queueTtlMs: 5_000,
+    store,
+    wechatFailureCooldownMs: 60_000,
+  });
   const target: ChatTarget = { platform: "wechat", chatId: "cooldown", userId: "smoke" };
   const artifact: OutboundArtifact = { path: "/tmp/cooldown.png", kind: "image" };
 
@@ -579,6 +621,7 @@ async function runWechatCooldownScenario(): Promise<void> {
   if (Number(channel.attempts) !== 2) {
     throw new Error(`Fresh inbound did not reopen WeChat delivery: ${channel.attempts}`);
   }
+  store.close();
 }
 
 async function runMediaTimeoutScenario(): Promise<void> {
@@ -609,6 +652,105 @@ async function runMediaTimeoutScenario(): Promise<void> {
   }
 }
 
+async function runDurableDeliveryScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-durable-delivery");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new SlowQueueChannel();
+  const target: ChatTarget = { platform: "fake", chatId: "durable", userId: "smoke" };
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 200,
+    queueTtlMs: 20,
+    store,
+  });
+
+  const sentId = delivery.enqueueText(target, "queue blocker", undefined, {
+    sessionId: "session-durable",
+    turnId: "turn-durable",
+  });
+  const expiredSecret = "queue-expiry-secret-that-must-not-enter-sqlite";
+  const expiredId = delivery.enqueueText(target, expiredSecret);
+  if (!sentId || !expiredId) {
+    throw new Error("Expected non-empty text deliveries to receive IDs.");
+  }
+  await delivery.drain();
+
+  const sent = store.get(sentId);
+  const expired = store.get(expiredId);
+  if (
+    sent?.status !== "sent" ||
+    sent.attemptCount !== 1 ||
+    sent.sessionId !== "session-durable" ||
+    sent.turnId !== "turn-durable"
+  ) {
+    throw new Error(`Sent delivery lifecycle was not durable: ${JSON.stringify(sent)}`);
+  }
+  if (expired?.status !== "expired" || expired.attemptCount !== 0 || channel.texts.includes(expiredSecret)) {
+    throw new Error(`Queued delivery did not expire before send: ${JSON.stringify(expired)}`);
+  }
+  if (readFileSync(path.join(dataDir, "hub.sqlite")).includes(Buffer.from(expiredSecret))) {
+    throw new Error("Delivery ledger persisted a text body.");
+  }
+  store.close();
+
+  const recoveryStore = new DeliveryStore(dataDir);
+  const queuedId = crypto.randomUUID();
+  const sendingId = crypto.randomUUID();
+  const queuedAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  recoveryStore.create({ id: queuedId, kind: "text", target, queuedAt, expiresAt, contentLength: 10 });
+  recoveryStore.create({ id: sendingId, kind: "artifact", target, queuedAt, expiresAt, contentLength: 20 });
+  recoveryStore.markSending(sendingId, new Date().toISOString());
+  recoveryStore.close();
+
+  const restartedStore = new DeliveryStore(dataDir);
+  if (restartedStore.recoverInterrupted() !== 2 || restartedStore.recoverInterrupted() !== 0) {
+    throw new Error("Interrupted delivery recovery was not deterministic and idempotent.");
+  }
+  if (
+    restartedStore.get(queuedId)?.errorCode !== "interrupted_restart" ||
+    restartedStore.get(sendingId)?.status !== "expired"
+  ) {
+    throw new Error("Restart recovery did not expire every nonterminal delivery.");
+  }
+  if (restartedStore.markTerminal(sentId, "failed", new Date().toISOString(), { code: "test", message: "test" })) {
+    throw new Error("A terminal delivery accepted a second terminal transition.");
+  }
+  restartedStore.close();
+}
+
+async function runHealthDiagnosticsScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-health");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new ScriptedChannel(["!health"]);
+  const hub = new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => new CompletingBackend());
+  await hub.run();
+  const health = channel.texts.find((text) => text.startsWith("Hitch health"));
+  if (
+    !health?.includes("delivery ledger: queued 0; sending 0") ||
+    !health.includes("last inbound:") ||
+    !health.includes("active session: none") ||
+    !health.includes("startup recovery:")
+  ) {
+    throw new Error(`Expected operator health diagnostics: ${health ?? "missing"}`);
+  }
+}
+
+async function runAuditRotationScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-audit-rotation");
+  rmSync(dataDir, { force: true, recursive: true });
+  const audit = new AuditLog(dataDir, { maxBytes: 180, maxFiles: 2 });
+  for (let index = 0; index < 8; index += 1) {
+    await audit.write({ type: "rotation.test", details: { index, padding: "x".repeat(80) } });
+  }
+  await audit.drain();
+  const activePath = path.join(dataDir, "logs", "audit.jsonl");
+  if (!readFileSync(activePath, "utf8").includes('"index":7') || !existsSync(`${activePath}.1`) || existsSync(`${activePath}.2`)) {
+    throw new Error("Audit rotation did not retain the configured bounded file set.");
+  }
+}
+
 function reliabilityConfig(dataDir: string): HubConfig {
   const cwd = path.resolve(".");
   return {
@@ -630,7 +772,10 @@ function reliabilityConfig(dataDir: string): HubConfig {
       tool_status_mode: "all",
       tool_status_batch_ms: 0,
       send_timeout_ms: 30,
+      queue_ttl_ms: 5 * 60 * 1000,
+      retention_ms: 30 * 24 * 60 * 60 * 1000,
     },
+    audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd],
     outboundRoots: [],
     users: {

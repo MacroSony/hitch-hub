@@ -59,7 +59,7 @@ Checklist:
 - [x] Stop and audit idle workers after a configurable timeout so inactive sessions do not retain Pi processes indefinitely.
 - [x] Split turn/process audit semantics into `turn.*` and `worker.*` events and correlate text delivery with delivery/session/turn IDs.
 
-## Proposed Next Iteration: Operability and Delivery Evidence
+## Completed Iteration: Operability and Delivery Evidence
 
 Goal: turn the now-bounded runtime into a service that can explain, survive, and recover from live channel failures without relying on a tmux scrollback.
 
@@ -68,10 +68,12 @@ Recommended scope:
 - [x] Add graceful `SIGINT`/`SIGTERM` shutdown so channel receive loops stop, active workers are aborted, queued audit writes drain, and restart state is deterministic.
 - [x] Add a sample user-level systemd service with restart-on-failure and a documented health/startup check; keep tmux as a development option.
 - [x] Audit channel-health transitions with de-duplication/rate limiting instead of logging every repeated poll error.
-- [~] Give outbound text deliveries IDs and session/turn correlation; persist their full lifecycle (`queued`, `sending`, `sent`, `failed`, `expired`) so missing replies can be traced after the process exits.
-- [ ] Add a small `!health` or expanded hub-level diagnostic command for channel state, delivery backlog, last successful receive/send, process uptime, and recent failure counts.
-- [ ] Add deterministic WeChat adapter tests for `ret=-2`, expired context tokens, queue expiry, polling recovery, and cancellation during CDN upload.
-- [ ] Add audit/log retention limits before per-message delivery auditing is used continuously.
+- [x] Give outbound text and media deliveries IDs and session/turn correlation; persist their full lifecycle (`queued`, `sending`, `sent`, `failed`, `expired`) so missing replies can be traced after the process exits.
+- [x] Add `!health` diagnostics for channel state, delivery backlog, last inbound/send activity, process uptime, startup recovery, and recent failure counts.
+- [x] Add deterministic WeChat/runtime tests for `ret=-2`, expired context tokens, queue expiry, polling recovery, and cancellation during CDN upload.
+- [x] Add configurable terminal-delivery retention and size-bounded audit-log rotation before per-message delivery auditing is used continuously.
+
+Rollout note (2026-07-15): commit `27ba1a0` is live in the tmux-managed WeChat hub for soak testing. The durable-ledger changes are intentionally being held for the next restart so the live test has one stable code boundary.
 
 Exit criteria:
 
