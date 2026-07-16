@@ -191,6 +191,7 @@ function piUiSelectSmokeConfig(dataDir: string, editorResponsePath: string): Hub
         default_args: ["--input-type=module", "-e", fakePiRpcScript(editorResponsePath), "--", "--no-session"],
         default_policy: "ask",
         config_scope: "hitch",
+        credential_isolation: "disabled",
       },
     },
   };

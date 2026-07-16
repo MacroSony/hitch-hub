@@ -164,6 +164,7 @@ async function verifyPiBackendEnvironment(): Promise<void> {
         command: process.execPath,
         default_args: ["-e", childScript, "--", "--no-session"],
         config_scope: "system",
+        credential_isolation: "disabled",
         env_allowlist: ["PROVIDER_API_KEY"],
       },
     },

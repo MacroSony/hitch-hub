@@ -24,6 +24,7 @@
     "smoke:security-foundation": "node --use-env-proxy --import tsx src/smoke/security-foundation.ts",
     "smoke:sandbox-launcher": "node --use-env-proxy --import tsx src/smoke/sandbox-launcher.ts",
     "smoke:worker-environment": "node --use-env-proxy --import tsx src/smoke/worker-environment.ts",
+    "smoke:credential-guard": "node --use-env-proxy --import tsx src/smoke/credential-guard.ts",
     "smoke:telegram-getme": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",
     "smoke:telegram-updates": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getUpdates",
     "typecheck": "tsc --noEmit",

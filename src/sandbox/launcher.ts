@@ -15,6 +15,10 @@ export type LaunchRequest = {
       hostPath: string;
       mode: "ro" | "rw";
     };
+    credentialGuard?: {
+      hostPath: string;
+      sandboxPath: "/hitch-runtime/credential-guard.mjs";
+    };
   };
 };
 

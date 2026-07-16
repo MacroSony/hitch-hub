@@ -219,6 +219,7 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
         default_args: ["--input-type=module", "-e", fakePiRpcScript(artifactPath, settledMarker), "--", "--no-session"],
         default_policy: "ask",
         config_scope: "hitch",
+        credential_isolation: "disabled",
       },
     },
   };

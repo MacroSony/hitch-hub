@@ -320,6 +320,7 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
         default_args: ["--mode", "rpc"],
         default_policy: "ask",
         config_scope: "hitch",
+        credential_isolation: "disabled",
       },
     },
   };

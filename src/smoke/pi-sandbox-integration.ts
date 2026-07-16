@@ -30,6 +30,10 @@ async function main(): Promise<void> {
     await verifyPolicyArgsAndDescendantCleanup(tempDir, workspace);
     await verifyWritableSystemConfig(tempDir, workspace);
     await verifyRealPiStartsWithWritableSystemConfig(tempDir, workspace);
+    await verifyRealPiStartsWithCredentialGuard(tempDir, workspace);
+    await verifyBrokenCredentialGuardFailsClosed(tempDir, workspace);
+    await verifyCommandBackedCredentialFailsClosed(tempDir, workspace);
+    await verifyLegacyCommandBackedCredentialFailsClosed(tempDir, workspace);
     process.stdout.write("Pi sandbox integration smoke ok\n");
   } finally {
     rmSync(tempDir, { force: true, recursive: true });
@@ -274,6 +278,144 @@ async function verifyRealPiStartsWithWritableSystemConfig(tempDir: string, works
   }
 }
 
+async function verifyRealPiStartsWithCredentialGuard(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "guarded-pi-agent-config");
+  mkdirSync(agentConfig);
+  writeFileSync(path.join(agentConfig, "settings.json"), "{}\n");
+  writeFileSync(path.join(agentConfig, "trust.json"), "{}\n");
+  const dataDir = path.join(tempDir, "guarded-pi-data");
+  const runtime = new SessionRuntimeStore(dataDir);
+  const guardPath = runtime.provisionCredentialGuard(path.resolve("runtime/credential-guard.mjs"));
+  const policy = guardedExecutionPolicy();
+  const session = createSession(runtime, "guarded-real-pi", workspace, policy, {
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
+    credentialGuard: { hostPath: guardPath },
+  });
+  const config = createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy);
+  const backend = new PiRpcBackend(config);
+  try {
+    await backend.start(session);
+    if (!backend.isAlive()) {
+      throw new Error("Real Pi exited while loading Hitch's credential guard in Bubblewrap.");
+    }
+  } finally {
+    await backend.stop();
+  }
+}
+
+async function verifyBrokenCredentialGuardFailsClosed(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "broken-guard-agent-config");
+  mkdirSync(agentConfig);
+  writeFileSync(path.join(agentConfig, "settings.json"), "{}\n");
+  const brokenSource = path.join(tempDir, "broken-credential-guard.mjs");
+  writeFileSync(brokenSource, "this is not valid javascript {{{\n");
+  const dataDir = path.join(tempDir, "broken-guard-data");
+  const runtime = new SessionRuntimeStore(dataDir);
+  const guardPath = runtime.provisionCredentialGuard(brokenSource);
+  const policy = guardedExecutionPolicy();
+  const session = createSession(runtime, "broken-guard", workspace, policy, {
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
+    credentialGuard: { hostPath: guardPath },
+  });
+  const backend = new PiRpcBackend(createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy));
+  await assertRejected(
+    () => backend.start(session),
+    "Pi started after its required credential guard failed to load.",
+  );
+  await backend.stop();
+}
+
+async function verifyCommandBackedCredentialFailsClosed(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "command-credential-agent-config");
+  mkdirSync(agentConfig);
+  const commandArtifact = path.join(workspace, "command-backed-credential-ran");
+  writeFileSync(
+    path.join(agentConfig, "auth.json"),
+    JSON.stringify({ unsafe: { type: "api_key", key: `!touch ${commandArtifact}` } }),
+  );
+  const dataDir = path.join(tempDir, "command-credential-data");
+  const runtime = new SessionRuntimeStore(dataDir);
+  const guardPath = runtime.provisionCredentialGuard(path.resolve("runtime/credential-guard.mjs"));
+  const policy = guardedExecutionPolicy();
+  const session = createSession(runtime, "command-credential", workspace, policy, {
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
+    credentialGuard: { hostPath: guardPath },
+  });
+  const backend = new PiRpcBackend(createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy));
+  await assertRejected(
+    () => backend.start(session),
+    "Pi accepted a command-backed credential in required isolation mode.",
+  );
+  await backend.stop();
+  if (existsSync(commandArtifact)) {
+    throw new Error("A command-backed credential executed before the guard rejected it.");
+  }
+}
+
+async function verifyLegacyCommandBackedCredentialFailsClosed(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "legacy-command-credential-agent-config");
+  mkdirSync(agentConfig);
+  const commandArtifact = path.join(workspace, "legacy-command-backed-credential-ran");
+  writeFileSync(
+    path.join(agentConfig, "settings.json"),
+    JSON.stringify({ apiKeys: { unsafe: `!touch ${commandArtifact}` } }),
+  );
+  const dataDir = path.join(tempDir, "legacy-command-credential-data");
+  const runtime = new SessionRuntimeStore(dataDir);
+  const guardPath = runtime.provisionCredentialGuard(path.resolve("runtime/credential-guard.mjs"));
+  const policy = guardedExecutionPolicy();
+  const session = createSession(runtime, "legacy-command-credential", workspace, policy, {
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
+    credentialGuard: { hostPath: guardPath },
+  });
+  const backend = new PiRpcBackend(createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy));
+  await assertRejected(
+    () => backend.start(session),
+    "Pi accepted a legacy command-backed credential in required isolation mode.",
+  );
+  await backend.stop();
+  if (existsSync(commandArtifact)) {
+    throw new Error("A legacy command-backed credential executed before the guard rejected it.");
+  }
+}
+
+function createGuardedConfig(
+  dataDir: string,
+  workspace: string,
+  agentConfig: string,
+  guardPath: string,
+  policy: ExecutionPolicy,
+): HubConfig {
+  const parsed = configSchema.parse({
+    data_dir: dataDir,
+    default_cwd: workspace,
+    users: { owner: { allowed_roots: [workspace] } },
+    agents: {
+      pi: {
+        command: "pi",
+        default_args: ["--mode", "rpc"],
+        config_scope: "system",
+        credential_isolation: "required",
+        execution_policy: policy,
+      },
+    },
+  });
+  return {
+    ...parsed,
+    dataDir,
+    defaultCwd: workspace,
+    allowedRoots: [workspace],
+    outboundRoots: [],
+    principalRoots: { owner: [workspace] },
+    piSystemConfigRoot: agentConfig,
+    piCredentialGuardPath: guardPath,
+  };
+}
+
+function guardedExecutionPolicy(): ExecutionPolicy {
+  return executionPolicySchema.parse({ tools: ["read", "write", "edit", "ls"], process: false });
+}
+
 function createSession(
   runtime: SessionRuntimeStore,
   id: string,
@@ -311,7 +453,14 @@ function createConfig(
     data_dir: dataDir,
     default_cwd: workspace,
     users: { owner: { allowed_roots: [workspace] } },
-    agents: { pi: { command, default_args: defaultArgs, config_scope: configScope } },
+    agents: {
+      pi: {
+        command,
+        default_args: defaultArgs,
+        config_scope: configScope,
+        credential_isolation: "disabled",
+      },
+    },
   });
   return {
     ...parsed,

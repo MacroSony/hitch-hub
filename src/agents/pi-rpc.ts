@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -25,6 +25,8 @@ type SpawnSpec = {
   command: string;
   args: string[];
 };
+
+const CREDENTIAL_GUARD_STATUS_COMMAND = "hitch-credential-guard-status-v1";
 
 function resolveSpawnSpec(command: string, args: string[]): SpawnSpec {
   if (process.platform !== "win32" || path.extname(command)) {
@@ -113,8 +115,26 @@ export class PiRpcBackend implements AgentBackend {
 
     const piConfig = this.config.agents.pi;
     const launcher = await this.launcherSelector.select(session.executionPolicy);
+    const credentialGuard = credentialGuardForSession(this.config, session, launcher.kind !== "direct");
+    if (credentialGuard) {
+      assertCredentialConfigSafe(secureMountHostPath(session, "/agent-config"));
+    }
     const policyEnforcement = applyPiExecutionPolicy(
-      piArgsForSession(piConfig.default_args, session),
+      piArgsForSession(
+        credentialGuard
+          ? [
+              ...piConfig.default_args,
+              "--no-extensions",
+              "--extension",
+              credentialGuard.sandboxPath,
+              "--no-skills",
+              "--no-prompt-templates",
+              "--no-themes",
+              "--no-approve",
+            ]
+          : piConfig.default_args,
+        session,
+      ),
       session.executionPolicy,
     );
     const spawnSpec = resolveSpawnSpec(piConfig.command, policyEnforcement.args);
@@ -138,11 +158,16 @@ export class PiRpcBackend implements AgentBackend {
       overrides.HOME = "/state/home";
       overrides.PI_CODING_AGENT_DIR = "/agent-config";
       overrides.PI_CODING_AGENT_SESSION_DIR = "/agent-sessions";
+      if (credentialGuard) {
+        overrides.HITCH_WORKSPACE_PATH = session.cwd;
+      }
     } else if (piConfig.config_scope === "hitch") {
       overrides.PI_CODING_AGENT_DIR = piAgentDir;
       overrides.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
     }
-    if (piConfig.config_scope === "hitch") {
+    if (credentialGuard) {
+      overrides.PI_OFFLINE = "1";
+    } else if (piConfig.config_scope === "hitch") {
       overrides.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
     }
     if (toolContext) {
@@ -169,6 +194,7 @@ export class PiRpcBackend implements AgentBackend {
         tools: policyEnforcement.tools,
         processToolEnabled: policyEnforcement.processToolEnabled,
         agentConfig: trustedAgentConfig,
+        ...(credentialGuard ? { credentialGuard } : {}),
       },
     });
 
@@ -229,6 +255,15 @@ export class PiRpcBackend implements AgentBackend {
       this.eventsQueue.close();
     });
 
+    if (credentialGuard) {
+      try {
+        await this.assertCredentialGuardReady();
+        assertCredentialConfigSafe(piAgentDir);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
+    }
     return this.proc.pid;
   }
 
@@ -390,6 +425,22 @@ export class PiRpcBackend implements AgentBackend {
     return responsePromise;
   }
 
+  private async assertCredentialGuardReady(): Promise<void> {
+    const response = await this.request({ type: "get_commands" }, 5_000);
+    const commands = isRecord(response.data) && Array.isArray(response.data.commands)
+      ? response.data.commands
+      : [];
+    const attested = commands.some(
+      (command) =>
+        isRecord(command) &&
+        command.name === CREDENTIAL_GUARD_STATUS_COMMAND &&
+        command.source === "extension",
+    );
+    if (!attested) {
+      throw new Error("Pi started without Hitch's credential guard readiness attestation.");
+    }
+  }
+
   private resolvePendingResponse(value: unknown): boolean {
     if (!isRecord(value) || value.type !== "response" || typeof value.id !== "string") {
       return false;
@@ -436,6 +487,122 @@ function trustedAgentConfigForSession(
     throw new Error("Persisted Pi config mount does not match Hitch's trusted config scope.");
   }
   return { hostPath: expectedHostPath, mode: expectedMode };
+}
+
+function credentialGuardForSession(
+  config: HubConfig,
+  session: HubSession,
+  sandboxed: boolean,
+): { hostPath: string; sandboxPath: "/hitch-runtime/credential-guard.mjs" } | undefined {
+  const required = config.agents.pi.credential_isolation === "required";
+  if (!required) {
+    return undefined;
+  }
+  if (!sandboxed || !config.piCredentialGuardPath) {
+    throw new Error("Credential-isolated Pi requires Bubblewrap and a trusted credential guard runtime.");
+  }
+  const sandboxPath = "/hitch-runtime/credential-guard.mjs" as const;
+  const mount = session.mountPlan.mounts.find((candidate) => candidate.sandboxPath === sandboxPath);
+  if (
+    !mount ||
+    mount.mode !== "ro" ||
+    mount.purpose !== "runtime" ||
+    path.resolve(mount.hostPath) !== path.resolve(config.piCredentialGuardPath)
+  ) {
+    throw new Error("Session mount plan does not contain Hitch's trusted credential guard runtime.");
+  }
+  return { hostPath: config.piCredentialGuardPath, sandboxPath };
+}
+
+function assertCredentialConfigSafe(agentConfigRoot: string): void {
+  const canonicalRoot = realpathSync.native(agentConfigRoot);
+  for (const fileName of ["auth.json", "models.json", "settings.json"]) {
+    const filePath = path.join(canonicalRoot, fileName);
+    if (!existsSync(filePath)) {
+      continue;
+    }
+    const stat = lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`Credential-isolated Pi requires a real ${fileName} file.`);
+    }
+    const canonicalFile = realpathSync.native(filePath);
+    if (path.dirname(canonicalFile) !== canonicalRoot) {
+      throw new Error(`Credential-isolated Pi ${fileName} escaped its trusted config directory.`);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(readFileSync(canonicalFile, "utf8")) as unknown;
+    } catch {
+      throw new Error(`Credential-isolated Pi cannot parse ${fileName}.`);
+    }
+    const unsafePath = fileName === "auth.json"
+      ? findCommandBackedAuthValue(value)
+      : fileName === "models.json"
+        ? findCommandBackedModelValue(value)
+        : findCommandBackedSettingsValue(value);
+    if (unsafePath) {
+      throw new Error(
+        `Credential-isolated Pi rejects command-backed configuration in ${fileName} at ${unsafePath}.`,
+      );
+    }
+  }
+}
+
+function findCommandBackedAuthValue(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  for (const [provider, credential] of Object.entries(value)) {
+    if (
+      isRecord(credential) &&
+      credential.type === "api_key" &&
+      typeof credential.key === "string" &&
+      credential.key.startsWith("!")
+    ) {
+      return `${provider}.key`;
+    }
+  }
+  return undefined;
+}
+
+function findCommandBackedModelValue(value: unknown): string | undefined {
+  const visit = (candidate: unknown, segments: string[], commandContext: boolean): string | undefined => {
+    if (typeof candidate === "string") {
+      return commandContext && candidate.startsWith("!") ? segments.join(".") : undefined;
+    }
+    if (Array.isArray(candidate)) {
+      for (const [index, entry] of candidate.entries()) {
+        const found = visit(entry, [...segments, String(index)], commandContext);
+        if (found) {
+          return found;
+        }
+      }
+      return undefined;
+    }
+    if (!isRecord(candidate)) {
+      return undefined;
+    }
+    for (const [key, entry] of Object.entries(candidate)) {
+      const found = visit(entry, [...segments, key], commandContext || key === "apiKey" || key === "headers");
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  };
+  return visit(value, [], false);
+}
+
+function findCommandBackedSettingsValue(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.apiKeys)) {
+    return undefined;
+  }
+  for (const [provider, key] of Object.entries(value.apiKeys)) {
+    if (typeof key === "string" && key.startsWith("!")) {
+      return `apiKeys.${provider}`;
+    }
+  }
+  return undefined;
 }
 
 type RpcResponse = {

@@ -540,6 +540,7 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
         default_args: ["--mode", "rpc"],
         default_policy: "ask",
         config_scope: "hitch",
+        credential_isolation: "disabled",
       },
     },
   };

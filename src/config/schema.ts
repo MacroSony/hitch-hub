@@ -35,18 +35,25 @@ const wechatChannelSchema = z.object({
   unsafe_allow_all: z.boolean().default(false),
 });
 
-const piAgentSchema = z.object({
-  command: z.string().default("pi"),
-  default_args: z.array(z.string()).default(["--mode", "rpc"]),
-  // Accepted only for configuration compatibility. ExecutionPolicy replaces
-  // this formerly security-looking but unenforced field.
-  default_policy: z.enum(["ask", "deny", "allow"]).optional(),
-  config_scope: z.enum(["hitch", "system"]).default("hitch"),
-  system_config_root: z.string().min(1).optional(),
-  legacy_state_principal: z.string().min(1).optional(),
-  env_allowlist: z.array(z.string()).optional(),
-  execution_policy: executionPolicySchema.optional(),
-});
+const piAgentSchema = z
+  .object({
+    command: z.string().default("pi"),
+    default_args: z.array(z.string()).default(["--mode", "rpc"]),
+    // Accepted only for configuration compatibility. ExecutionPolicy replaces
+    // this formerly security-looking but unenforced field.
+    default_policy: z.enum(["ask", "deny", "allow"]).optional(),
+    config_scope: z.enum(["hitch", "system"]).default("hitch"),
+    credential_isolation: z.enum(["required", "disabled"]).optional(),
+    system_config_root: z.string().min(1).optional(),
+    legacy_state_principal: z.string().min(1).optional(),
+    env_allowlist: z.array(z.string()).optional(),
+    execution_policy: executionPolicySchema.optional(),
+  })
+  .transform((config) => ({
+    ...config,
+    credential_isolation:
+      config.credential_isolation ?? (config.config_scope === "system" ? "required" : "disabled"),
+  }));
 
 const mediaSchema = z.object({
   max_inbound_bytes: z.number().int().positive().default(20 * 1024 * 1024),
@@ -143,6 +150,7 @@ export const configSchema = z.object({
         command: "pi",
         default_args: ["--mode", "rpc"],
         config_scope: "hitch",
+        credential_isolation: "disabled",
       }),
     })
     .default({
@@ -150,6 +158,7 @@ export const configSchema = z.object({
         command: "pi",
         default_args: ["--mode", "rpc"],
         config_scope: "hitch",
+        credential_isolation: "disabled",
       },
     }),
 });
@@ -162,4 +171,5 @@ export type HubConfig = z.output<typeof configSchema> & {
   outboundRoots: string[];
   principalRoots: Record<string, string[]>;
   piSystemConfigRoot?: string;
+  piCredentialGuardPath?: string;
 };

@@ -4,10 +4,13 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { isPathInsideAllowedRoots } from "../core/path-policy.js";
@@ -34,6 +37,9 @@ export type SessionRuntimeOptions = {
     hostPath: string;
     mode: "ro" | "rw";
   };
+  credentialGuard?: {
+    hostPath: string;
+  };
 };
 
 export class SessionRuntimeStore {
@@ -47,6 +53,35 @@ export class SessionRuntimeStore {
     this.dataDir = realpathSync.native(resolvedDataDir);
     chmodSync(this.dataDir, PRIVATE_DIRECTORY_MODE);
     this.stateRoot = ensurePrivateDirectory(path.join(this.dataDir, "session-state"));
+  }
+
+  provisionCredentialGuard(sourcePath: string): string {
+    const source = canonicalRegularFile(sourcePath, "Credential guard source");
+    const runtimeRoot = ensurePrivateDirectory(path.join(this.dataDir, "runtime"));
+    const destination = path.join(runtimeRoot, "credential-guard.mjs");
+    const sourceBytes = readFileSync(source);
+    if (existsSync(destination)) {
+      const existing = lstatSync(destination);
+      if (!existing.isFile() || existing.isSymbolicLink()) {
+        throw new Error(`Credential guard destination is not a real file: ${destination}`);
+      }
+      if (readFileSync(destination).equals(sourceBytes)) {
+        chmodSync(destination, 0o400);
+        return realpathSync.native(destination);
+      }
+    }
+
+    const temporary = path.join(runtimeRoot, `.credential-guard.${process.pid}.${Date.now()}.tmp`);
+    try {
+      writeFileSync(temporary, sourceBytes, { flag: "wx", mode: PRIVATE_FILE_MODE });
+      chmodSync(temporary, 0o400);
+      renameSync(temporary, destination);
+    } finally {
+      if (existsSync(temporary)) {
+        unlinkSync(temporary);
+      }
+    }
+    return canonicalRegularFile(destination, "Provisioned credential guard runtime");
   }
 
   migrateLegacySharedPiState(
@@ -132,6 +167,16 @@ export class SessionRuntimeStore {
     }
     const piAgentMode = options.agentConfig?.mode ?? "rw";
     const piSessionsPath = ensurePrivateDirectory(path.join(sharedPiRoot, "sessions"));
+    const credentialGuardPath = options.credentialGuard
+      ? canonicalRegularFile(options.credentialGuard.hostPath, "Credential guard runtime")
+      : undefined;
+    if (
+      credentialGuardPath &&
+      normalizeForCompare(path.dirname(credentialGuardPath)) !==
+        normalizeForCompare(path.join(this.dataDir, "runtime"))
+    ) {
+      throw new Error("Credential guard runtime must be provisioned inside Hitch's private runtime directory.");
+    }
     const normalizedPolicy = normalizeExecutionPolicy(policy, allowedRoots, canonicalWorkspace, this.dataDir);
     const mounts: PlannedMount[] = [
       {
@@ -165,6 +210,14 @@ export class SessionRuntimeStore {
         purpose: "state",
       },
     ];
+    if (credentialGuardPath) {
+      mounts.push({
+        hostPath: credentialGuardPath,
+        sandboxPath: "/hitch-runtime/credential-guard.mjs",
+        mode: "ro",
+        purpose: "runtime",
+      });
+    }
     if (normalizedPolicy.filesystem !== "none") {
       const workspaceMode = normalizedPolicy.filesystem === "read-only" ? "ro" : "rw";
       mounts.push({
@@ -325,6 +378,14 @@ function hostPathsOverlap(left: string, right: string): boolean {
   return isPathInsideAllowedRoots(left, [right]) || isPathInsideAllowedRoots(right, [left]);
 }
 
+function canonicalRegularFile(candidate: string, label: string): string {
+  const canonical = canonicalExistingPath(candidate, label);
+  if (!statSync(canonical).isFile()) {
+    throw new Error(`${label} is not a regular file: ${candidate}`);
+  }
+  return canonical;
+}
+
 function pathsOverlap(left: string, right: string): boolean {
   const leftFromRight = path.posix.relative(right, left);
   const rightFromLeft = path.posix.relative(left, right);
@@ -336,7 +397,7 @@ function pathsOverlap(left: string, right: string): boolean {
 }
 
 function isReservedSandboxPath(candidate: string): boolean {
-  return ["/agent-config", "/agent-sessions", "/hitch", "/state", "/workspace"].some(
+  return ["/agent-config", "/agent-sessions", "/hitch", "/hitch-runtime", "/state", "/workspace"].some(
     (reserved) => candidate === reserved || candidate.startsWith(`${reserved}/`),
   );
 }

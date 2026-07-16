@@ -177,6 +177,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
       pi: {
         command: "pi",
         config_scope: "hitch",
+        credential_isolation: "disabled",
         default_args: ["--mode", "rpc", "--no-session", "--no-extensions", "--extension", extensionPath],
         default_policy: "ask",
       },

@@ -219,6 +219,9 @@ function assertBubblewrapPolicy(request: LaunchRequest): void {
     ["/agent-config", request.agentPolicyEnforcement?.agentConfig.mode ?? "rw"],
     ["/agent-sessions", "rw"],
   ]);
+  if (request.agentPolicyEnforcement?.credentialGuard) {
+    requiredMounts.set(request.agentPolicyEnforcement.credentialGuard.sandboxPath, "ro");
+  }
   const seen = new Set<string>();
   for (const mount of request.mountPlan.mounts) {
     if (seen.has(mount.sandboxPath)) {
@@ -417,6 +420,14 @@ function assertMountPlanMatchesPolicy(request: LaunchRequest): void {
       { hostPath: path.join(principalRoot, "shared", "pi", "sessions"), mode: "rw", purpose: "state" },
     ],
   ]);
+  const credentialGuard = request.agentPolicyEnforcement?.credentialGuard;
+  if (credentialGuard) {
+    expected.set(credentialGuard.sandboxPath, {
+      hostPath: credentialGuard.hostPath,
+      mode: "ro",
+      purpose: "runtime",
+    });
+  }
   if (request.executionPolicy.filesystem !== "none") {
     const workspaceMount: {
       hostPath: string;

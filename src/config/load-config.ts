@@ -1,6 +1,7 @@
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { assertNoPiToolPolicyArguments } from "../agents/pi-policy.js";
 import {
@@ -8,6 +9,8 @@ import {
   canonicalizeExistingDirectory,
   isPathInsideAllowedRoots,
 } from "../core/path-policy.js";
+import { DEFAULT_REMOTE_EXECUTION_POLICY, type ExecutionPolicy } from "../security/policy.js";
+import { SessionRuntimeStore } from "../security/session-runtime.js";
 import {
   assertWorkerEnvironmentAllowlist,
   assertWorkerEnvironmentCredentialNames,
@@ -41,6 +44,7 @@ export function loadConfig(configPath: string): HubConfig {
   const config = configSchema.parse(parsed);
   assertLiveChannelAuthorization(config);
   assertPiConfigurationIsolation(config);
+  assertPiCredentialIsolation(config);
   assertNoPiToolPolicyArguments(config.agents.pi.default_args);
   const channelCredentialNames = [config.channels.telegram.bot_token_env];
   assertWorkerEnvironmentCredentialNames(channelCredentialNames);
@@ -57,6 +61,9 @@ export function loadConfig(configPath: string): HubConfig {
           resolvePath(config.agents.pi.system_config_root ?? path.join(os.homedir(), ".pi", "agent"), configDir),
         )
       : undefined;
+  const piCredentialGuardSourcePath = isPiCredentialIsolationRequired(config)
+    ? canonicalizeCredentialGuardPath(fileURLToPath(new URL("../../runtime/credential-guard.mjs", import.meta.url)))
+    : undefined;
 
   const principalRoots = Object.fromEntries(
     Object.entries(config.users).map(([principalId, user]) => [
@@ -82,6 +89,9 @@ export function loadConfig(configPath: string): HubConfig {
   const defaultCwd = config.default_cwd
     ? canonicalizeExistingDirectory(resolvePath(config.default_cwd, configDir), "Default cwd")
     : allowedRoots[0];
+  const piCredentialGuardPath = piCredentialGuardSourcePath
+    ? new SessionRuntimeStore(dataDir).provisionCredentialGuard(piCredentialGuardSourcePath)
+    : undefined;
 
   return {
     ...config,
@@ -91,7 +101,77 @@ export function loadConfig(configPath: string): HubConfig {
     outboundRoots,
     principalRoots,
     ...(piSystemConfigRoot ? { piSystemConfigRoot } : {}),
+    ...(piCredentialGuardPath ? { piCredentialGuardPath } : {}),
   };
+}
+
+function isPiCredentialIsolationRequired(config: ReturnType<typeof configSchema.parse>): boolean {
+  return config.agents.pi.credential_isolation === "required";
+}
+
+function canonicalizeCredentialGuardPath(candidate: string): string {
+  if (!existsSync(candidate)) {
+    throw new Error(`Credential guard runtime is missing: ${candidate}`);
+  }
+  const canonical = realpathSync.native(candidate);
+  if (!statSync(canonical).isFile()) {
+    throw new Error(`Credential guard runtime is not a regular file: ${canonical}`);
+  }
+  return canonical;
+}
+
+const GUARDED_PI_TOOLS = new Set(["read", "write", "edit", "ls"]);
+const GUARDED_PI_FORBIDDEN_ARGUMENTS = new Set([
+  "--extension",
+  "-e",
+  "--skill",
+  "--prompt-template",
+  "--theme",
+  "--api-key",
+  "--system-prompt",
+  "--append-system-prompt",
+  "--approve",
+  "-a",
+]);
+
+function assertPiCredentialIsolation(config: ReturnType<typeof configSchema.parse>): void {
+  if (!isPiCredentialIsolationRequired(config)) {
+    return;
+  }
+  const policies: Array<readonly [string, ExecutionPolicy]> = [
+    ["agents.pi", config.agents.pi.execution_policy ?? DEFAULT_REMOTE_EXECUTION_POLICY],
+  ];
+  for (const [principalId, principal] of Object.entries(config.users)) {
+    if (principal.execution_policy) {
+      policies.push([principalId, principal.execution_policy]);
+    }
+  }
+  for (const [principalId, policy] of policies) {
+    if (policy.sandbox !== "required") {
+      throw new Error(`Credential-isolated Pi requires execution_policy.sandbox=required for ${principalId}.`);
+    }
+    if (policy.filesystem !== "workspace-write" && policy.filesystem !== "read-only") {
+      throw new Error(`Credential-isolated Pi requires a workspace-only filesystem policy for ${principalId}.`);
+    }
+    if (policy.process || policy.tools.some((tool) => !GUARDED_PI_TOOLS.has(tool))) {
+      throw new Error(
+        `Credential-isolated Pi allows only read, write, edit, and ls tools with process=false for ${principalId}.`,
+      );
+    }
+  }
+  const forbiddenArgument = config.agents.pi.default_args.find(
+    (argument) =>
+      GUARDED_PI_FORBIDDEN_ARGUMENTS.has(argument) ||
+      [...GUARDED_PI_FORBIDDEN_ARGUMENTS].some(
+        (flag) => flag.startsWith("--") && argument.startsWith(`${flag}=`),
+      ) ||
+      argument.startsWith("@"),
+  );
+  if (forbiddenArgument) {
+    throw new Error(
+      `Credential-isolated Pi cannot load caller-supplied resources or secrets from default_args: ${forbiddenArgument}`,
+    );
+  }
 }
 
 function canonicalizePiSystemConfigRoot(candidate: string): string {

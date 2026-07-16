@@ -1659,9 +1659,14 @@ export class RemoteAgentHub {
 }
 
 function sessionRuntimeOptions(config: HubConfig): SessionRuntimeOptions {
-  return config.agents.pi.config_scope === "system" && config.piSystemConfigRoot
-    ? { agentConfig: { hostPath: config.piSystemConfigRoot, mode: "rw" } }
-    : {};
+  return {
+    ...(config.agents.pi.config_scope === "system" && config.piSystemConfigRoot
+      ? { agentConfig: { hostPath: config.piSystemConfigRoot, mode: "rw" as const } }
+      : {}),
+    ...(config.agents.pi.credential_isolation === "required" && config.piCredentialGuardPath
+      ? { credentialGuard: { hostPath: config.piCredentialGuardPath } }
+      : {}),
+  };
 }
 
 class ToolStatusBatcher {

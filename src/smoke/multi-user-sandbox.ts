@@ -90,7 +90,9 @@ function verifySystemScopeRejectsMultiplePrincipals(
         alice: { allowed_roots: [aliceWorkspace] },
         bob: { allowed_roots: [bobWorkspace] },
       },
-      agents: { pi: { config_scope: "system", system_config_root: systemConfig } },
+      agents: {
+        pi: { config_scope: "system", system_config_root: systemConfig, credential_isolation: "disabled" },
+      },
     }),
   );
   assertConfigRejected(
@@ -107,7 +109,9 @@ function verifySystemScopeRejectsMultiplePrincipals(
       channels: {
         telegram: { enabled: true, unsafe_allow_all: true },
       },
-      agents: { pi: { config_scope: "system", system_config_root: systemConfig } },
+      agents: {
+        pi: { config_scope: "system", system_config_root: systemConfig, credential_isolation: "disabled" },
+      },
     }),
   );
   assertConfigRejected(
@@ -124,7 +128,9 @@ function verifySystemScopeRejectsMultiplePrincipals(
         JSON.stringify({
           data_dir: path.join(tempDir, "invalid-read-only-config-data"),
           users: { alice: { allowed_roots: [aliceWorkspace] } },
-          agents: { pi: { config_scope: "system", system_config_root: systemConfig } },
+          agents: {
+            pi: { config_scope: "system", system_config_root: systemConfig, credential_isolation: "disabled" },
+          },
         }),
       );
       assertConfigRejected(
