@@ -1,8 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ChatTarget } from "./types.js";
-import { type HubToolService, type SendMediaInput, type SendMediaResult } from "./hub-tools.js";
+import {
+  type HubToolDeliveryContext,
+  type HubToolService,
+  type SendMediaInput,
+  type SendMediaResult,
+} from "./hub-tools.js";
 
 export type AgentToolContext = {
   sessionId: string;
@@ -22,7 +27,7 @@ type ToolRequest = {
 
 export class AgentToolBridge {
   private readonly contexts = new Map<string, AgentToolContext>();
-  private readonly processed = new Map<string, Set<string>>();
+  private readonly cursors = new Map<string, { offset: number }>();
 
   constructor(private readonly dataDir: string) {}
 
@@ -45,14 +50,17 @@ export class AgentToolBridge {
     return context;
   }
 
-  async processPending(context: AgentToolContext, target: ChatTarget, tools: HubToolService): Promise<void> {
+  async processPending(
+    context: AgentToolContext,
+    target: ChatTarget,
+    tools: HubToolService,
+    deliveryContext: HubToolDeliveryContext = { sessionId: context.sessionId },
+  ): Promise<void> {
     if (!existsSync(context.outboxPath)) {
       return;
     }
 
-    const processed = this.processedFor(context.sessionId);
-    const lines = readFileSync(context.outboxPath, "utf8").split(/\r?\n/);
-    for (const line of lines) {
+    for (const line of this.readPendingLines(context)) {
       if (!line.trim()) {
         continue;
       }
@@ -65,12 +73,11 @@ export class AgentToolBridge {
       }
 
       const id = typeof request.id === "string" ? request.id : undefined;
-      if (!id || processed.has(id)) {
+      if (!id || existsSync(this.resultPath(context, id))) {
         continue;
       }
-      processed.add(id);
 
-      const result = await this.handleRequest(context, target, tools, request, id);
+      const result = await this.handleRequest(context, target, tools, request, id, deliveryContext);
       this.writeResult(context, id, result);
     }
   }
@@ -81,6 +88,7 @@ export class AgentToolBridge {
     tools: HubToolService,
     request: ToolRequest,
     id: string,
+    deliveryContext: HubToolDeliveryContext,
   ): Promise<SendMediaResult> {
     if (request.token !== context.token) {
       return failedToolResult(id, target, String(request.path ?? ""), "Invalid Hitch tool token.");
@@ -97,22 +105,54 @@ export class AgentToolBridge {
       ...(typeof request.caption === "string" && request.caption.length > 0 ? { caption: request.caption } : {}),
       ...(request.kind === "image" || request.kind === "file" ? { kind: request.kind } : {}),
     };
-    return tools.sendMedia(target, input, { source: "agent_tool", notifyOnFailure: true });
+    return tools.sendMedia(target, input, { source: "agent_tool", notifyOnFailure: true, deliveryContext });
   }
 
   private writeResult(context: AgentToolContext, id: string, result: SendMediaResult): void {
     mkdirSync(context.resultDir, { recursive: true });
-    writeFileSync(path.join(context.resultDir, `${safeResultId(id)}.json`), `${JSON.stringify(result)}\n`, "utf8");
+    writeFileSync(this.resultPath(context, id), `${JSON.stringify(result)}\n`, "utf8");
   }
 
-  private processedFor(sessionId: string): Set<string> {
-    const existing = this.processed.get(sessionId);
-    if (existing) {
-      return existing;
+  private resultPath(context: AgentToolContext, id: string): string {
+    return path.join(context.resultDir, `${safeResultId(id)}.json`);
+  }
+
+  private readPendingLines(context: AgentToolContext): string[] {
+    const cursor = this.cursors.get(context.sessionId) ?? { offset: 0 };
+    const size = statSync(context.outboxPath).size;
+    if (size < cursor.offset) {
+      cursor.offset = 0;
     }
-    const created = new Set<string>();
-    this.processed.set(sessionId, created);
-    return created;
+    if (size === cursor.offset) {
+      this.cursors.set(context.sessionId, cursor);
+      return [];
+    }
+
+    const length = size - cursor.offset;
+    const buffer = Buffer.alloc(length);
+    const descriptor = openSync(context.outboxPath, "r");
+    try {
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const count = readSync(descriptor, buffer, bytesRead, length - bytesRead, cursor.offset + bytesRead);
+        if (count === 0) {
+          break;
+        }
+        bytesRead += count;
+      }
+      const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (lastNewline < 0) {
+        this.cursors.set(context.sessionId, cursor);
+        return [];
+      }
+      cursor.offset += lastNewline + 1;
+      const parts = buffer.subarray(0, lastNewline + 1).toString("utf8").split(/\r?\n/);
+      parts.pop();
+      this.cursors.set(context.sessionId, cursor);
+      return parts;
+    } finally {
+      closeSync(descriptor);
+    }
   }
 }
 

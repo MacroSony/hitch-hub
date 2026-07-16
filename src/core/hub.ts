@@ -7,7 +7,7 @@ import { PiRpcBackend } from "../agents/pi-rpc.js";
 import type { AgentBackend, AgentCommandResult, AgentEvent } from "../agents/types.js";
 import { AuditLog } from "./audit-log.js";
 import { HubToolService } from "./hub-tools.js";
-import { AgentToolBridge } from "./tool-bridge.js";
+import { AgentToolBridge, type AgentToolContext } from "./tool-bridge.js";
 import {
   DeliveryCoordinator,
   type DeliveryContext,
@@ -30,6 +30,17 @@ type ActiveTurn = {
   phase: "running" | "waiting_approval" | "waiting_input" | "timed_out";
 };
 
+type SessionToolPump = {
+  backend: AgentBackend;
+  context: AgentToolContext;
+  target: ChatTarget;
+  timer?: ReturnType<typeof setInterval>;
+  draining: boolean;
+  requested: boolean;
+  tail: Promise<void>;
+  drain: () => void;
+};
+
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly audit: AuditLog;
@@ -41,6 +52,7 @@ export class RemoteAgentHub {
   private readonly inFlight = new Set<Promise<void>>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
+  private readonly toolPumps = new Map<string, SessionToolPump>();
   private readonly workerLastUsedAt = new Map<string, number>();
   private readonly lastInboundAt = new Map<string, string>();
   private readonly inboundCounts = new Map<string, number>();
@@ -99,12 +111,19 @@ export class RemoteAgentHub {
       config,
       channel,
       this.audit,
-      async (target, text) => {
-        this.delivery.enqueueText(target, text, undefined, this.deliveryContextFor(target));
+      async (target, text, deliveryContext) => {
+        this.delivery.enqueueText(target, text, undefined, deliveryContext ?? this.deliveryContextFor(target));
       },
       async (target, artifact, request) => {
-        await this.delivery.sendArtifact(target, artifact, undefined, this.deliveryContextFor(target), request);
+        await this.delivery.sendArtifact(
+          target,
+          artifact,
+          undefined,
+          request.deliveryContext ?? this.deliveryContextFor(target),
+          request,
+        );
       },
+      (target) => this.deliveryContextFor(target),
     );
     this.toolBridge = new AgentToolBridge(config.dataDir);
   }
@@ -139,9 +158,9 @@ export class RemoteAgentHub {
     } finally {
       this.stopWorkerSweep();
       await Promise.allSettled(this.inFlight);
+      await this.stopWorkers("hub_exit");
       await Promise.allSettled(this.backgroundTasks);
       await this.delivery.drain();
-      await this.stopWorkers("hub_exit");
       await this.audit.drain();
       this.deliveryStore.close();
       this.sessions.close();
@@ -472,7 +491,10 @@ export class RemoteAgentHub {
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
         this.workerLastUsedAt.delete(session.id);
-        this.sessions.setBackendProcess(session.id, undefined);
+        await this.stopToolPump(session.id, backend);
+        if (!this.workers.has(session.id)) {
+          this.sessions.setBackendProcess(session.id, undefined);
+        }
       }
     }
   }
@@ -519,7 +541,10 @@ export class RemoteAgentHub {
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
         this.workerLastUsedAt.delete(session.id);
-        this.sessions.setBackendProcess(session.id, undefined);
+        await this.stopToolPump(session.id, backend);
+        if (!this.workers.has(session.id)) {
+          this.sessions.setBackendProcess(session.id, undefined);
+        }
       }
     }
   }
@@ -645,6 +670,7 @@ export class RemoteAgentHub {
 
     try {
       const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
+      await this.ensureToolPump(session, backend);
       this.sessions.setBackendProcess(session.id, processId);
       if (this.sessions.getById(session.id)?.status === "waiting_input") {
         this.updateStatusUnlessStopped(session.id, "running");
@@ -662,7 +688,10 @@ export class RemoteAgentHub {
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
         this.workerLastUsedAt.delete(session.id);
-        this.sessions.setBackendProcess(session.id, undefined);
+        await this.stopToolPump(session.id, backend);
+        if (!this.workers.has(session.id)) {
+          this.sessions.setBackendProcess(session.id, undefined);
+        }
       } else {
         this.workerLastUsedAt.set(session.id, Date.now());
       }
@@ -753,22 +782,32 @@ export class RemoteAgentHub {
       options: PendingInteractionOption[];
       sessionId?: string;
       pageSize?: number;
+      deliveryContext?: DeliveryContext;
     },
   ): Promise<void> {
     if (input.options.length === 0) {
-      await this.sendChunkedText(target, "No options available.");
+      await this.sendChunkedText(target, "No options available.", input.deliveryContext);
       return;
     }
 
     const interaction = this.sessions.createPendingInteraction(target, {
-      ...input,
+      owner: input.owner,
+      kind: input.kind,
+      title: input.title,
+      options: input.options,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.pageSize ? { pageSize: input.pageSize } : {}),
       expiresAt: new Date(Date.now() + INTERACTION_TTL_MS).toISOString(),
     });
-    await this.sendInteractionMenu(target, interaction);
+    await this.sendInteractionMenu(target, interaction, input.deliveryContext);
   }
 
-  private async sendInteractionMenu(target: ChatTarget, interaction: PendingInteraction): Promise<void> {
-    await this.sendChunkedText(target, renderInteractionMenu(interaction));
+  private async sendInteractionMenu(
+    target: ChatTarget,
+    interaction: PendingInteraction,
+    deliveryContext?: DeliveryContext,
+  ): Promise<void> {
+    await this.sendChunkedText(target, renderInteractionMenu(interaction), deliveryContext);
   }
 
   private async sendBlockedTurn(event: InboundChatEvent, session: HubSession, inputKind: string): Promise<void> {
@@ -825,6 +864,7 @@ export class RemoteAgentHub {
   ): Promise<number | undefined> {
     const wasAlive = backend.isAlive();
     const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
+    await this.ensureToolPump(session, backend);
     this.sessions.setBackendProcess(session.id, processId);
     if (!wasAlive) {
       await this.audit.write({
@@ -857,6 +897,7 @@ export class RemoteAgentHub {
       stopError = formatError(error);
       process.stderr.write(`[hitch] Worker stop failed for ${sessionId.slice(0, 8)}: ${stopError}\n`);
     } finally {
+      await this.stopToolPump(sessionId, worker);
       if (!this.workers.has(sessionId)) {
         this.sessions.setBackendProcess(sessionId, undefined);
       }
@@ -878,6 +919,77 @@ export class RemoteAgentHub {
         await this.stopWorker(sessionId, worker, reason);
       }),
     );
+    await Promise.allSettled([...this.toolPumps.keys()].map((sessionId) => this.stopToolPump(sessionId)));
+  }
+
+  private async ensureToolPump(session: HubSession, backend: AgentBackend): Promise<void> {
+    const existing = this.toolPumps.get(session.id);
+    if (existing?.backend === backend) {
+      return;
+    }
+    if (existing) {
+      await this.stopToolPump(session.id, existing.backend);
+    }
+
+    const pump: SessionToolPump = {
+      backend,
+      context: this.toolBridge.contextFor(session.id),
+      target: targetForSession(session),
+      draining: false,
+      requested: false,
+      tail: Promise.resolve(),
+      drain: () => {},
+    };
+    pump.drain = () => {
+      if (pump.draining) {
+        pump.requested = true;
+        return;
+      }
+      pump.draining = true;
+      pump.tail = (async () => {
+        do {
+          pump.requested = false;
+          const turn = this.activeTurns.get(session.id);
+          await this.toolBridge.processPending(pump.context, pump.target, this.tools, {
+            sessionId: session.id,
+            ...(turn ? { turnId: turn.id } : {}),
+          });
+        } while (pump.requested);
+      })()
+        .catch((error: unknown) => {
+          process.stderr.write(`[hitch] Agent tool bridge failed: ${formatError(error)}\n`);
+        })
+        .finally(() => {
+          pump.draining = false;
+        });
+    };
+    this.toolPumps.set(session.id, pump);
+    pump.drain();
+    pump.timer = setInterval(pump.drain, 250);
+    pump.timer.unref();
+  }
+
+  private async stopToolPump(sessionId: string, expectedBackend?: AgentBackend): Promise<void> {
+    const pump = this.toolPumps.get(sessionId);
+    if (!pump || (expectedBackend && pump.backend !== expectedBackend)) {
+      return;
+    }
+    this.toolPumps.delete(sessionId);
+    if (pump.timer) {
+      clearInterval(pump.timer);
+      delete pump.timer;
+    }
+    pump.drain();
+    await pump.tail;
+  }
+
+  private async drainToolPump(sessionId: string): Promise<void> {
+    const pump = this.toolPumps.get(sessionId);
+    if (!pump) {
+      return;
+    }
+    pump.drain();
+    await pump.tail;
   }
 
   private startWorkerSweep(): void {
@@ -919,20 +1031,10 @@ export class RemoteAgentHub {
     let streamedText = "";
     const deliveredArtifactPaths = new Set<string>();
     const target = targetForSession(session);
+    const deliveryContext: DeliveryContext = { sessionId: session.id, turnId: turn.id };
     const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, (text) =>
-      this.sendChunkedText(target, text),
+      this.sendChunkedText(target, text, deliveryContext),
     );
-    const toolContext = this.toolBridge.contextFor(session.id);
-    let toolDrain = Promise.resolve();
-    const drainToolRequests = () => {
-      toolDrain = toolDrain
-        .then(() => this.toolBridge.processPending(toolContext, target, this.tools))
-        .catch((error: unknown) => {
-          process.stderr.write(`[hitch] Agent tool bridge failed: ${formatError(error)}\n`);
-        });
-    };
-    drainToolRequests();
-    const toolDrainInterval = setInterval(drainToolRequests, 250);
     const deadline = turnDeadline(turn);
     const iterator = backend.events()[Symbol.asyncIterator]();
 
@@ -968,9 +1070,15 @@ export class RemoteAgentHub {
         }
         this.touchTurn(turn);
         const handled = await Promise.race([
-          this.handleAgentEvent(session, turn, agentEvent, streamedText, deliveredArtifactPaths, toolMessages).then(
-            (finished) => ({ type: "handled" as const, finished }),
-          ),
+          this.handleAgentEvent(
+            session,
+            turn,
+            agentEvent,
+            streamedText,
+            deliveredArtifactPaths,
+            toolMessages,
+            deliveryContext,
+          ).then((finished) => ({ type: "handled" as const, finished })),
           deadline.promise,
         ]);
         if (handled.type === "timeout") {
@@ -992,10 +1100,8 @@ export class RemoteAgentHub {
       }
     } finally {
       deadline.cancel();
-      clearInterval(toolDrainInterval);
       toolMessages.cancelTimer();
-      drainToolRequests();
-      this.trackBackground(toolDrain);
+      await this.drainToolPump(session.id);
     }
 
     if (this.sessions.getById(session.id)?.status === "stopped") {
@@ -1015,6 +1121,7 @@ export class RemoteAgentHub {
     await this.sendChunkedText(
       target,
       streamedText.length > 0 ? streamedText : "Pi worker exited before reporting a final response; session is idle.",
+      deliveryContext,
     );
   }
 
@@ -1025,6 +1132,7 @@ export class RemoteAgentHub {
     streamedText: string,
     deliveredArtifactPaths: Set<string>,
     toolMessages: ToolStatusBatcher,
+    deliveryContext: DeliveryContext,
   ): Promise<boolean> {
     if (this.shuttingDown || !this.isTurnCurrent(turn) || this.sessions.getById(session.id)?.status === "stopped") {
       return true;
@@ -1036,21 +1144,27 @@ export class RemoteAgentHub {
       case "text_delta":
         return false;
       case "final": {
-        const finalText = streamedText.length > 0 && event.text === "Pi completed." ? streamedText : event.text;
+        const finalText = streamedText.length > 0 && isEmptyFinalFallback(event.text) ? streamedText : event.text;
         await toolMessages.flush();
-        await this.sendChunkedText(target, finalText);
-        await this.sendArtifactsMentionedInText(target, finalText, deliveredArtifactPaths);
+        if (finalText.length > 0) {
+          await this.sendChunkedText(target, finalText, deliveryContext);
+          await this.sendArtifactsMentionedInText(target, finalText, deliveredArtifactPaths, deliveryContext);
+        }
         return true;
       }
       case "tool_call":
-        if (this.config.delivery.tool_status_mode === "all") {
+        if (
+          this.config.delivery.tool_status_mode === "all" ||
+          (this.config.delivery.tool_status_mode === "failures" && this.isHitchMediaToolCall(event))
+        ) {
           await toolMessages.add(this.formatToolStart(event));
         }
         return false;
       case "tool_result":
         if (
           this.config.delivery.tool_status_mode === "all" ||
-          (this.config.delivery.tool_status_mode === "failures" && event.succeeded === false)
+          (this.config.delivery.tool_status_mode === "failures" &&
+            (event.succeeded === false || this.isHitchMediaToolResult(event)))
         ) {
           await toolMessages.add(this.formatToolResult(event));
         }
@@ -1060,7 +1174,7 @@ export class RemoteAgentHub {
           this.updateStatusForTurn(turn, "idle");
         }
         await toolMessages.flush();
-        await this.sendChunkedText(target, this.formatNotification(event));
+        await this.sendChunkedText(target, this.formatNotification(event), deliveryContext);
         return event.completesTurn === true;
       case "approval_request": {
         await toolMessages.flush();
@@ -1088,6 +1202,7 @@ export class RemoteAgentHub {
               { label: "Deny", text: `!deny ${approvalId}` },
             ],
           },
+          deliveryContext,
         );
         return false;
       }
@@ -1102,6 +1217,7 @@ export class RemoteAgentHub {
           title: event.interaction.title,
           options: event.interaction.options,
           ...(event.interaction.pageSize ? { pageSize: event.interaction.pageSize } : {}),
+          deliveryContext,
         });
         return false;
       case "status":
@@ -1115,15 +1231,19 @@ export class RemoteAgentHub {
     }
   }
 
-  private async sendChunkedText(target: InboundChatEvent["target"], text: string): Promise<void> {
+  private async sendChunkedText(
+    target: InboundChatEvent["target"],
+    text: string,
+    deliveryContext?: DeliveryContext,
+  ): Promise<void> {
     const maxLength = 3900;
     if (text.length <= maxLength) {
-      await this.safeSendText(target, text);
+      await this.safeSendText(target, text, undefined, deliveryContext);
       return;
     }
 
     for (let start = 0; start < text.length; start += maxLength) {
-      await this.safeSendText(target, text.slice(start, start + maxLength));
+      await this.safeSendText(target, text.slice(start, start + maxLength), undefined, deliveryContext);
     }
   }
 
@@ -1216,6 +1336,7 @@ export class RemoteAgentHub {
     await this.sendChunkedText(
       target,
       partialText ? `${notice}\n\nPartial result from the cancelled turn:\n${partialText}` : notice,
+      { sessionId: session.id, turnId: turn.id },
     );
   }
 
@@ -1227,24 +1348,42 @@ export class RemoteAgentHub {
   }
 
   private formatToolResult(event: Extract<AgentEvent, { type: "tool_result" }>): string {
+    const mediaFailure = this.isHitchMediaToolFailure(event);
     const status =
-      event.succeeded === true
-        ? "succeeded"
-        : event.succeeded === false
-          ? "failed"
+      mediaFailure || event.succeeded === false
+        ? "failed"
+        : event.succeeded === true
+          ? "succeeded"
           : "completed";
-    const summary = `Tool finished: ${event.name} (${status})`;
+    const name = this.isHitchMediaToolResult(event) ? "hitch.send_media" : event.name;
+    const summary = `Tool finished: ${name} (${status})`;
     // Always surface tool output for failures so the user (and the chat) sees the
     // real error; only gate successful/noisy output behind full_tool_output.
-    if (event.text && (event.succeeded === false || this.config.delivery.full_tool_output)) {
+    if (event.text && (mediaFailure || event.succeeded === false || this.config.delivery.full_tool_output)) {
       return `${summary}\n${event.text}`;
     }
     return summary;
   }
 
   private formatToolStart(event: Extract<AgentEvent, { type: "tool_call" }>): string {
-    const summary = `Tool started: ${event.name}`;
+    const name = this.isHitchMediaToolCall(event) ? "hitch.send_media" : event.name;
+    const summary = `Tool started: ${name}`;
     return this.config.delivery.full_tool_output && event.preview ? `${summary}\n${event.preview}` : summary;
+  }
+
+  private isHitchMediaToolCall(event: Extract<AgentEvent, { type: "tool_call" }>): boolean {
+    return event.name === "mcp" && /(?:hitch_hitch\.)?send_media/.test(event.preview ?? "");
+  }
+
+  private isHitchMediaToolResult(event: Extract<AgentEvent, { type: "tool_result" }>): boolean {
+    return (
+      event.name === "mcp" &&
+      /(?:Media sent to|Media delivery failed|hitch(?:_hitch)?\.send_media|send_media)/i.test(event.text ?? "")
+    );
+  }
+
+  private isHitchMediaToolFailure(event: Extract<AgentEvent, { type: "tool_result" }>): boolean {
+    return event.name === "mcp" && /Media delivery failed/i.test(event.text ?? "");
   }
 
   private formatNotification(event: Extract<AgentEvent, { type: "notification" }>): string {
@@ -1255,8 +1394,9 @@ export class RemoteAgentHub {
     target: InboundChatEvent["target"],
     text: string,
     opts?: Parameters<ChannelAdapter["sendText"]>[2],
+    deliveryContext?: DeliveryContext,
   ): Promise<void> {
-    this.delivery.enqueueText(target, text, opts, this.deliveryContextFor(target));
+    this.delivery.enqueueText(target, text, opts, deliveryContext ?? this.deliveryContextFor(target));
   }
 
   private deliveryContextFor(target: ChatTarget): DeliveryContext {
@@ -1275,6 +1415,7 @@ export class RemoteAgentHub {
     target: InboundChatEvent["target"],
     text: string,
     deliveredArtifactPaths: Set<string>,
+    deliveryContext?: DeliveryContext,
   ): Promise<void> {
     if (!this.config.media.auto_discovery || !this.channel.sendArtifact) {
       return;
@@ -1289,6 +1430,7 @@ export class RemoteAgentHub {
         source: "auto_discovery",
         notifyOnFailure: true,
         extraAllowedRoots: [this.config.dataDir, ...this.config.allowedRoots],
+        ...(deliveryContext ? { deliveryContext } : {}),
       });
       if (result.status === "failed") {
         process.stderr.write(`[hitch] Artifact send failed for ${artifact.path}: ${result.message ?? "unknown error"}\n`);
@@ -1417,11 +1559,18 @@ async function interruptedFinalAfterTimeout(
       if (!event.interrupted) {
         return undefined;
       }
-      return event.text === "Pi completed." && accumulatedText.length > 0 ? accumulatedText : event.text;
+      if (isEmptyFinalFallback(event.text)) {
+        return accumulatedText.length > 0 ? accumulatedText : undefined;
+      }
+      return event.text.length > 0 ? event.text : undefined;
     }
     next = iterator.next();
   }
   return undefined;
+}
+
+function isEmptyFinalFallback(text: string): boolean {
+  return text.length === 0 || text === "Pi completed." || text === "Pi finished without a final response.";
 }
 
 async function settleIteratorBefore<T>(

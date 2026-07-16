@@ -85,6 +85,28 @@ async function main(): Promise<void> {
     if (structured?.status !== "sent" || structured.platform !== "fake") {
       throw new Error(`Unexpected MCP tool result: ${JSON.stringify(result)}`);
     }
+
+    const failedCall = client.callTool({
+      name: "hitch.send_media",
+      arguments: { path: mediaPath, kind: "image" },
+    });
+    const failedRequest = await waitForOutboxRequest(outboxPath, request.id);
+    writeFileSync(
+      path.join(resultDir, `${failedRequest.id}.json`),
+      `${JSON.stringify({
+        deliveryId: failedRequest.id,
+        status: "failed",
+        platform: "fake",
+        path: mediaPath,
+        message: "rejected by hub",
+      })}\n`,
+      "utf8",
+    );
+    const failedResult = await failedCall;
+    const failedStructured = failedResult.structuredContent as { status?: unknown; message?: unknown } | undefined;
+    if (!failedResult.isError || failedStructured?.status !== "failed" || failedStructured.message !== "rejected by hub") {
+      throw new Error(`Failed media delivery was not returned as an MCP error: ${JSON.stringify(failedResult)}`);
+    }
   } finally {
     await client.close();
   }
@@ -92,13 +114,18 @@ async function main(): Promise<void> {
   process.stdout.write("MCP session smoke ok\n");
 }
 
-async function waitForOutboxRequest(outboxPath: string): Promise<Record<string, string>> {
+async function waitForOutboxRequest(outboxPath: string, excludeId?: string): Promise<Record<string, string>> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (existsSync(outboxPath)) {
-      const line = readFileSync(outboxPath, "utf8").trim().split(/\r?\n/).find(Boolean);
-      if (line) {
-        return JSON.parse(line) as Record<string, string>;
+      const requests = readFileSync(outboxPath, "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, string>);
+      const request = requests.find((candidate) => !excludeId || candidate.id !== excludeId);
+      if (request) {
+        return request;
       }
     }
     await sleep(100);

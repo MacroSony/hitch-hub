@@ -237,7 +237,7 @@ HITCH_TOOL_RESULT_DIR=<data-dir>/tools/<session-id>/results
 HITCH_TOOL_TIMEOUT_MS=<agent-turn-timeout-ms>
 ```
 
-The hub drains that outbox only while it is consuming an active agent turn, validates requests, sends media through the active chat target, and writes one JSON result file per request.
+The hub starts a session-scoped outbox pump with each active worker, validates requests, sends media through the worker's fixed chat target, and writes one JSON result file per request. The pump remains active until worker shutdown so a retry or delayed tool request cannot become stranded between Hitch turn consumers.
 
 For MCP-capable agents, `npm run mcp:session` starts a stdio MCP server that exposes `hitch.send_media` and uses the same outbox/result protocol. The agent must launch it with the `HITCH_TOOL_*` environment variables inherited from the hub-started worker.
 

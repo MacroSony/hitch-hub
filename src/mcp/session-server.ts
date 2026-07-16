@@ -63,6 +63,7 @@ server.registerTool(
       ...(kind ? { kind } : {}),
     });
     return {
+      isError: result.status === "failed",
       content: [
         {
           type: "text",

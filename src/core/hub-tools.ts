@@ -28,12 +28,19 @@ type SendMediaOptions = {
   source?: "hub_command" | "auto_discovery" | "agent_tool";
   notifyOnFailure?: boolean;
   extraAllowedRoots?: string[];
+  deliveryContext?: HubToolDeliveryContext;
 };
 
 export type ArtifactDeliveryRequest = {
   deliveryId: string;
   source: NonNullable<SendMediaOptions["source"]>;
   contentLength: number;
+  deliveryContext?: HubToolDeliveryContext;
+};
+
+export type HubToolDeliveryContext = {
+  sessionId?: string;
+  turnId?: string;
 };
 
 export class HubToolService {
@@ -41,7 +48,11 @@ export class HubToolService {
     private readonly config: HubConfig,
     private readonly channel: ChannelAdapter,
     private readonly audit: AuditLog,
-    private readonly sendText: (target: ChatTarget, text: string) => Promise<void> = (target, text) =>
+    private readonly sendText: (
+      target: ChatTarget,
+      text: string,
+      deliveryContext?: HubToolDeliveryContext,
+    ) => Promise<void> = (target, text) =>
       channel.sendText(target, text),
     private readonly sendArtifact: (
       target: ChatTarget,
@@ -53,16 +64,23 @@ export class HubToolService {
       }
       return channel.sendArtifact(target, artifact);
     },
+    private readonly deliveryContextFor: (target: ChatTarget) => HubToolDeliveryContext = () => ({}),
   ) {}
 
   async sendMedia(target: ChatTarget, input: SendMediaInput, options: SendMediaOptions = {}): Promise<SendMediaResult> {
     const deliveryId = randomUUID();
     const source = options.source ?? "agent_tool";
+    const context = options.deliveryContext ?? this.deliveryContextFor(target);
 
     try {
       const artifact = this.validateMediaInput(input, options.extraAllowedRoots ?? []);
       const size = statSync(artifact.path).size;
-      await this.sendArtifact(target, artifact, { deliveryId, source, contentLength: size });
+      await this.sendArtifact(target, artifact, {
+        deliveryId,
+        source,
+        contentLength: size,
+        ...(context.sessionId || context.turnId ? { deliveryContext: context } : {}),
+      });
       const result: SendMediaResult = {
         deliveryId,
         status: "sent",
@@ -73,6 +91,7 @@ export class HubToolService {
       };
       await this.audit.write({
         type: "artifact.delivery",
+        ...(context.sessionId ? { sessionId: context.sessionId } : {}),
         target,
         details: {
           deliveryId,
@@ -81,6 +100,7 @@ export class HubToolService {
           kind: result.kind,
           status: result.status,
           size: result.size,
+          ...(context.turnId ? { turnId: context.turnId } : {}),
         },
       });
       return result;
@@ -96,6 +116,7 @@ export class HubToolService {
       };
       await this.audit.write({
         type: "artifact.delivery",
+        ...(context.sessionId ? { sessionId: context.sessionId } : {}),
         target,
         details: {
           deliveryId,
@@ -104,10 +125,11 @@ export class HubToolService {
           ...(input.kind ? { kind: input.kind } : {}),
           status: auditStatus,
           error: message,
+          ...(context.turnId ? { turnId: context.turnId } : {}),
         },
       });
       if (options.notifyOnFailure) {
-        await this.notifyFailure(target, input.path, message);
+        await this.notifyFailure(target, input.path, message, context);
       }
       return result;
     }
@@ -143,9 +165,18 @@ export class HubToolService {
     };
   }
 
-  private async notifyFailure(target: ChatTarget, mediaPath: string, message: string): Promise<void> {
+  private async notifyFailure(
+    target: ChatTarget,
+    mediaPath: string,
+    message: string,
+    deliveryContext: HubToolDeliveryContext,
+  ): Promise<void> {
     try {
-      await this.sendText(target, `Media delivery failed for ${path.basename(mediaPath)}: ${message}`);
+      await this.sendText(
+        target,
+        `Media delivery failed for ${path.basename(mediaPath)}: ${message}`,
+        deliveryContext,
+      );
     } catch (error) {
       process.stderr.write(`[hitch] Media delivery failure notification failed: ${formatError(error)}\n`);
     }

@@ -92,6 +92,7 @@ export class PiRpcBackend implements AgentBackend {
   private proc: ChildProcessWithoutNullStreams | undefined;
   private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
   private readonly responseWaiters = new Map<string, (response: RpcResponse) => void>();
+  private pendingSettledFinal: Extract<AgentEvent, { type: "final" }> | undefined;
   private stderrTail = "";
 
   constructor(private readonly config: HubConfig) {}
@@ -134,6 +135,26 @@ export class PiRpcBackend implements AgentBackend {
         if (this.resolvePendingResponse(value)) {
           return;
         }
+
+        if (isRecord(value) && value.type === "agent_end" && typeof value.willRetry === "boolean") {
+          const final = finalEventFromPiAgentEnd(value);
+          this.pendingSettledFinal = final;
+          if (value.willRetry) {
+            this.eventsQueue.push({ type: "status", state: "running" });
+          }
+          return;
+        }
+
+        if (isRecord(value) && value.type === "agent_settled") {
+          const final = this.pendingSettledFinal;
+          this.pendingSettledFinal = undefined;
+          if (final) {
+            this.eventsQueue.push({ type: "status", state: "idle" });
+            this.eventsQueue.push(final);
+          }
+          return;
+        }
+
         for (const event of mapPiEvent(value)) {
           this.eventsQueue.push(event);
         }
@@ -169,6 +190,7 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   async send(input: AgentInput): Promise<void> {
+    this.pendingSettledFinal = undefined;
     this.writeCommand(promptCommandWithAttachments(input));
   }
 
@@ -200,6 +222,7 @@ export class PiRpcBackend implements AgentBackend {
       }
       default:
         const promptInput = input.attachments ? { text: input.raw, attachments: input.attachments } : { text: input.raw };
+        this.pendingSettledFinal = undefined;
         this.writeCommand(promptCommandWithAttachments(promptInput));
         return { consumesEvents: true };
     }
@@ -462,11 +485,17 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "agent_end") {
-    const interrupted = finalMessageWasInterrupted(record);
+    if (record.willRetry === true) {
+      return [{ type: "status", state: "running" }];
+    }
     return [
       { type: "status", state: "idle" },
-      { type: "final", text: extractFinalText(record), ...(interrupted ? { interrupted: true } : {}) },
+      finalEventFromPiAgentEnd(record),
     ];
+  }
+
+  if (type === "agent_settled") {
+    return [];
   }
 
   if (type === "message_update") {
@@ -721,7 +750,7 @@ function isFireAndForgetExtensionUi(record: Record<string, unknown>): boolean {
 function extractFinalText(record: Record<string, unknown>): string {
   const messages = record.messages;
   if (!Array.isArray(messages)) {
-    return "Pi completed.";
+    return "Pi finished without a final response.";
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -731,10 +760,26 @@ function extractFinalText(record: Record<string, unknown>): string {
       if (text.length > 0) {
         return text;
       }
+      if (isRecord(message) && message.stopReason === "aborted") {
+        return "";
+      }
+      if (isRecord(message) && message.stopReason === "error") {
+        const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "unknown error";
+        return `Pi failed: ${errorMessage}`;
+      }
     }
   }
 
-  return "Pi completed.";
+  return "Pi finished without a final response.";
+}
+
+function finalEventFromPiAgentEnd(record: Record<string, unknown>): Extract<AgentEvent, { type: "final" }> {
+  const interrupted = finalMessageWasInterrupted(record);
+  return {
+    type: "final",
+    text: extractFinalText(record),
+    ...(interrupted ? { interrupted: true } : {}),
+  };
 }
 
 function finalMessageWasInterrupted(record: Record<string, unknown>): boolean {

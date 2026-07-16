@@ -58,6 +58,11 @@ Checklist:
 - [x] Preserve explicitly interrupted Pi output as a labeled partial result when it arrives during bounded deadline cancellation.
 - [x] Stop and audit idle workers after a configurable timeout so inactive sessions do not retain Pi processes indefinitely.
 - [x] Split turn/process audit semantics into `turn.*` and `worker.*` events and correlate text delivery with delivery/session/turn IDs.
+- [x] Honor Pi's retry-aware RPC lifecycle: keep `agent_end` candidates private while `willRetry` is true and publish the final response only after `agent_settled`.
+- [x] Replace the ambiguous `Pi completed.` fallback with explicit terminal errors or no partial body for an empty aborted turn.
+- [x] Keep the agent media outbox pump alive for the worker lifetime so retry continuations and delayed MCP calls cannot be stranded between turn consumers.
+- [x] Surface explicit `hitch.send_media` start/result status in failure-only mode and correlate artifact audit rows with their session/turn.
+- [x] Add a retry/media regression using `error -> willRetry -> send_media -> successful agent_end -> agent_settled`.
 
 ## Completed Iteration: Operability and Delivery Evidence
 
@@ -121,7 +126,7 @@ Checklist:
 - [ ] Add Pi-native MCP server list wiring when Pi exposes a stable MCP client configuration surface, or add a small Pi extension adapter if needed.
 - [x] Gate current final-text path scanner behind `media.auto_discovery`.
 - [x] Default auto-discovery to off.
-- [~] Add smoke tests for:
+- [x] Add smoke tests for:
   - explicit media send success
   - path outside export root rejected
   - oversized media skipped with user-visible failure
@@ -134,7 +139,7 @@ Checklist:
 
 - [!] MCP process shape: one hub MCP server with short-lived session tokens, or one per-session MCP server/process.
 - [x] Transport for first bridge: session-scoped JSONL outbox and result file.
-- [x] Agent-initiated `send_media` is processed only while the hub is consuming an active agent turn.
+- [x] Agent-initiated `send_media` is processed by a session-scoped pump for the lifetime of the active worker.
 - [!] Whether Pi will consume MCP prompts automatically from a native MCP server list, or whether Hitch needs a Pi extension adapter to fetch/apply the prompt.
 - [!] Whether non-image file sends should be supported by the first `send_media` tool or require a stronger opt-in than images.
 

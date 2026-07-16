@@ -69,7 +69,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
-- `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress successful tool chatter, or `none` for no tool-status messages
+- `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress ordinary successful tool chatter while still showing explicit `hitch.send_media` progress, or `none` for no tool-status messages
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
 - `delivery.send_timeout_ms`: maximum time for one outbound text/media send attempt after it reaches the front of its queue
 - `delivery.queue_ttl_ms`: maximum time an accepted delivery may wait for its send attempt to begin
@@ -152,12 +152,12 @@ Media behavior:
 - Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
 - Inbound and outbound media byte limits are configured under `media`
 - Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
-- Agent tool bridge: active Pi workers receive `HITCH_TOOL_*` environment variables for a session-scoped media-send bridge
+- Agent tool bridge: active Pi workers receive `HITCH_TOOL_*` environment variables for a session-scoped media-send bridge; its outbox pump stays active for the worker lifetime
 - MCP bridge: `npm run mcp:session` exposes `hitch.send_media` and the `hitch.outbound_media` prompt over stdio for agents that can launch a session-scoped MCP server
 - MCP-capable agents should load the `hitch.outbound_media` prompt so generated images/files are sent explicitly instead of only mentioned by path
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
-- Outbound artifact delivery attempts are recorded in the audit log and durable delivery ledger
+- Outbound artifact delivery attempts are recorded in the audit log and durable delivery ledger with session/turn correlation when initiated by an active turn
 
 Tool output behavior:
 
