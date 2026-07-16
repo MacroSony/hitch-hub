@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     await verifyWritableSystemConfig(tempDir, workspace);
     await verifyRealPiStartsWithWritableSystemConfig(tempDir, workspace);
     await verifyRealPiStartsWithCredentialGuard(tempDir, workspace);
+    await verifyRealPiStartsWithGuardedMediaTool(tempDir, workspace);
     await verifyBrokenCredentialGuardFailsClosed(tempDir, workspace);
     await verifyCommandBackedCredentialFailsClosed(tempDir, workspace);
     await verifyLegacyCommandBackedCredentialFailsClosed(tempDir, workspace);
@@ -294,9 +295,39 @@ async function verifyRealPiStartsWithCredentialGuard(tempDir: string, workspace:
   const config = createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy);
   const backend = new PiRpcBackend(config);
   try {
-    await backend.start(session);
+    await backend.start(session, new AgentToolBridge().contextFor(session));
     if (!backend.isAlive()) {
       throw new Error("Real Pi exited while loading Hitch's credential guard in Bubblewrap.");
+    }
+  } finally {
+    await backend.stop();
+  }
+}
+
+async function verifyRealPiStartsWithGuardedMediaTool(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "guarded-media-pi-agent-config");
+  mkdirSync(agentConfig);
+  writeFileSync(path.join(agentConfig, "settings.json"), "{}\n");
+  writeFileSync(path.join(agentConfig, "trust.json"), "{}\n");
+  const dataDir = path.join(tempDir, "guarded-media-pi-data");
+  const runtime = new SessionRuntimeStore(dataDir);
+  const guardPath = runtime.provisionCredentialGuard(path.resolve("runtime/credential-guard.mjs"));
+  const policy = guardedExecutionPolicy(true);
+  const session = createSession(runtime, "guarded-media-real-pi", workspace, policy, {
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
+    credentialGuard: { hostPath: guardPath },
+  });
+  const config = createGuardedConfig(dataDir, workspace, agentConfig, guardPath, policy);
+  const missingContextBackend = new PiRpcBackend(config);
+  await assertRejected(
+    () => missingContextBackend.start(session),
+    "Credential-isolated media tool started without an authenticated session bridge.",
+  );
+  const backend = new PiRpcBackend(config);
+  try {
+    await backend.start(session, new AgentToolBridge().contextFor(session));
+    if (!backend.isAlive()) {
+      throw new Error("Real Pi exited while loading Hitch's guarded media tool in Bubblewrap.");
     }
   } finally {
     await backend.stop();
@@ -412,8 +443,11 @@ function createGuardedConfig(
   };
 }
 
-function guardedExecutionPolicy(): ExecutionPolicy {
-  return executionPolicySchema.parse({ tools: ["read", "write", "edit", "ls"], process: false });
+function guardedExecutionPolicy(media = false): ExecutionPolicy {
+  return executionPolicySchema.parse({
+    tools: ["read", "write", "edit", "ls", ...(media ? ["hitch_send_media"] : [])],
+    process: false,
+  });
 }
 
 function createSession(

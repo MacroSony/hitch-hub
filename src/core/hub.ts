@@ -1585,18 +1585,25 @@ export class RemoteAgentHub {
   }
 
   private isHitchMediaToolCall(event: Extract<AgentEvent, { type: "tool_call" }>): boolean {
-    return event.name === "mcp" && /(?:hitch_hitch\.)?send_media/.test(event.preview ?? "");
+    return (
+      event.name === "hitch_send_media" ||
+      (event.name === "mcp" && /(?:hitch_hitch\.)?send_media/.test(event.preview ?? ""))
+    );
   }
 
   private isHitchMediaToolResult(event: Extract<AgentEvent, { type: "tool_result" }>): boolean {
     return (
-      event.name === "mcp" &&
-      /(?:Media sent to|Media delivery failed|hitch(?:_hitch)?\.send_media|send_media)/i.test(event.text ?? "")
+      event.name === "hitch_send_media" ||
+      (event.name === "mcp" &&
+        /(?:Media sent to|Media delivery failed|hitch(?:_hitch)?\.send_media|send_media)/i.test(event.text ?? ""))
     );
   }
 
   private isHitchMediaToolFailure(event: Extract<AgentEvent, { type: "tool_result" }>): boolean {
-    return event.name === "mcp" && /Media delivery failed/i.test(event.text ?? "");
+    return (
+      (event.name === "hitch_send_media" && event.succeeded === false) ||
+      (event.name === "mcp" && /Media delivery failed/i.test(event.text ?? ""))
+    );
   }
 
   private formatNotification(event: Extract<AgentEvent, { type: "notification" }>): string {

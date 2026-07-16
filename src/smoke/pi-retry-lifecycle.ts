@@ -31,6 +31,7 @@ function deferred<T>(): Deferred<T> {
 class RetryLifecycleChannel implements ChannelAdapter {
   readonly texts: string[] = [];
   readonly artifacts: OutboundArtifact[] = [];
+  readonly artifactBytes: Buffer[] = [];
   private readonly target: ChatTarget = { platform: "fake", chatId: "pi-retry", userId: "pi-retry-user" };
   private readonly sessionReady = deferred<void>();
   private readonly artifactSeen = deferred<void>();
@@ -82,6 +83,7 @@ class RetryLifecycleChannel implements ChannelAdapter {
 
   async sendArtifact(_target: ChatTarget, artifact: OutboundArtifact): Promise<void> {
     this.artifacts.push(artifact);
+    this.artifactBytes.push(readFileSync(artifact.path));
     this.artifactSeen.resolve();
   }
 
@@ -110,7 +112,12 @@ async function main(): Promise<void> {
   const hub = new RemoteAgentHub(retryConfig(dataDir, artifactPath, settledMarker), channel);
   await hub.run();
 
-  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath) {
+  if (
+    channel.artifacts.length !== 1 ||
+    channel.artifactBytes.length !== 1 ||
+    !channel.artifactBytes[0]?.equals(PNG_1X1) ||
+    channel.artifacts[0]?.path === artifactPath
+  ) {
     throw new Error(`Retry smoke media delivery mismatch: ${JSON.stringify(channel.artifacts)}`);
   }
   if (channel.texts.filter((text) => text === "retry recovered").length !== 1) {
@@ -162,6 +169,7 @@ async function main(): Promise<void> {
 
 function retryConfig(dataDir: string, artifactPath: string, settledMarker: string): HubConfig {
   const cwd = path.resolve(".");
+  const artifactRequestPath = path.relative(cwd, artifactPath).split(path.sep).join(path.posix.sep);
   return {
     data_dir: dataDir,
     dataDir,
@@ -216,7 +224,13 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
     agents: {
       pi: {
         command: process.execPath,
-        default_args: ["--input-type=module", "-e", fakePiRpcScript(artifactPath, settledMarker), "--", "--no-session"],
+        default_args: [
+          "--input-type=module",
+          "-e",
+          fakePiRpcScript(artifactRequestPath, settledMarker),
+          "--",
+          "--no-session",
+        ],
         default_policy: "ask",
         config_scope: "hitch",
         credential_isolation: "disabled",
@@ -225,13 +239,13 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
   };
 }
 
-function fakePiRpcScript(artifactPath: string, settledMarker: string): string {
+function fakePiRpcScript(artifactRequestPath: string, settledMarker: string): string {
   return `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
-const artifactPath = ${JSON.stringify(artifactPath)};
+const artifactRequestPath = ${JSON.stringify(artifactRequestPath)};
 const settledMarker = ${JSON.stringify(settledMarker)};
 const rl = readline.createInterface({ input: process.stdin });
 let promptCount = 0;
@@ -262,8 +276,8 @@ rl.on("line", (line) => {
     send({ type: "agent_start" });
     send({
       type: "tool_execution_end",
-      toolName: "mcp",
-      isError: false,
+      toolName: "hitch_send_media",
+      isError: true,
       result: { content: [{ type: "text", text: "Media delivery failed: rejected by hub" }] }
     });
     send({
@@ -285,8 +299,8 @@ rl.on("line", (line) => {
   setTimeout(() => {
     send({ type: "agent_start" });
     const requestId = "retry-media";
-    const args = { path: artifactPath, caption: "retry bridge", kind: "image" };
-    send({ type: "tool_execution_start", toolName: "mcp", args: { tool: "hitch_hitch.send_media", args } });
+    const args = { path: artifactRequestPath, caption: "retry bridge", kind: "image" };
+    send({ type: "tool_execution_start", toolName: "hitch_send_media", args });
     appendFileSync(process.env.HITCH_TOOL_OUTBOX, JSON.stringify({
       id: requestId,
       type: "send_media",
@@ -303,7 +317,7 @@ rl.on("line", (line) => {
       const result = JSON.parse(readFileSync(resultPath, "utf8"));
       send({
         type: "tool_execution_end",
-        toolName: "mcp",
+        toolName: "hitch_send_media",
         isError: result.status !== "sent",
         result: { content: [{ type: "text", text: "Media sent to fake: retry.png" }] }
       });

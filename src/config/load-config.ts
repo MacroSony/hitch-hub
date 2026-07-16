@@ -120,7 +120,7 @@ function canonicalizeCredentialGuardPath(candidate: string): string {
   return canonical;
 }
 
-const GUARDED_PI_TOOLS = new Set(["read", "write", "edit", "ls"]);
+const GUARDED_PI_TOOLS = new Set(["read", "write", "edit", "ls", "hitch_send_media"]);
 const GUARDED_PI_FORBIDDEN_ARGUMENTS = new Set([
   "--extension",
   "-e",
@@ -155,7 +155,7 @@ function assertPiCredentialIsolation(config: ReturnType<typeof configSchema.pars
     }
     if (policy.process || policy.tools.some((tool) => !GUARDED_PI_TOOLS.has(tool))) {
       throw new Error(
-        `Credential-isolated Pi allows only read, write, edit, and ls tools with process=false for ${principalId}.`,
+        `Credential-isolated Pi allows only read, write, edit, ls, and hitch_send_media tools with process=false for ${principalId}.`,
       );
     }
   }

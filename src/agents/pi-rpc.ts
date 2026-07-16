@@ -27,6 +27,8 @@ type SpawnSpec = {
 };
 
 const CREDENTIAL_GUARD_STATUS_COMMAND = "hitch-credential-guard-status-v1";
+const MEDIA_TOOL = "hitch_send_media";
+const MEDIA_TOOL_STATUS_COMMAND = "hitch-media-tool-status-v1";
 
 function resolveSpawnSpec(command: string, args: string[]): SpawnSpec {
   if (process.platform !== "win32" || path.extname(command)) {
@@ -116,6 +118,10 @@ export class PiRpcBackend implements AgentBackend {
     const piConfig = this.config.agents.pi;
     const launcher = await this.launcherSelector.select(session.executionPolicy);
     const credentialGuard = credentialGuardForSession(this.config, session, launcher.kind !== "direct");
+    const guardedMediaTool = credentialGuard && session.executionPolicy.tools.includes(MEDIA_TOOL);
+    if (guardedMediaTool && !toolContext) {
+      throw new Error("Credential-isolated hitch_send_media requires an authenticated session tool bridge.");
+    }
     if (credentialGuard) {
       assertCredentialConfigSafe(secureMountHostPath(session, "/agent-config"));
     }
@@ -167,10 +173,13 @@ export class PiRpcBackend implements AgentBackend {
     }
     if (credentialGuard) {
       overrides.PI_OFFLINE = "1";
+      if (guardedMediaTool) {
+        overrides.HITCH_MEDIA_TOOL_REQUIRED = "1";
+      }
     } else if (piConfig.config_scope === "hitch") {
       overrides.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
     }
-    if (toolContext) {
+    if (toolContext && (!credentialGuard || guardedMediaTool)) {
       overrides.HITCH_SESSION_ID = toolContext.sessionId;
       overrides.HITCH_TOOL_TOKEN = toolContext.token;
       overrides.HITCH_TOOL_OUTBOX = sandboxed ? "/hitch/outbox.jsonl" : toolContext.outboxPath;
@@ -257,7 +266,7 @@ export class PiRpcBackend implements AgentBackend {
 
     if (credentialGuard) {
       try {
-        await this.assertCredentialGuardReady();
+        await this.assertCredentialGuardReady(Boolean(guardedMediaTool));
         assertCredentialConfigSafe(piAgentDir);
       } catch (error) {
         await this.stop();
@@ -425,7 +434,7 @@ export class PiRpcBackend implements AgentBackend {
     return responsePromise;
   }
 
-  private async assertCredentialGuardReady(): Promise<void> {
+  private async assertCredentialGuardReady(mediaToolRequired: boolean): Promise<void> {
     const response = await this.request({ type: "get_commands" }, 5_000);
     const commands = isRecord(response.data) && Array.isArray(response.data.commands)
       ? response.data.commands
@@ -438,6 +447,17 @@ export class PiRpcBackend implements AgentBackend {
     );
     if (!attested) {
       throw new Error("Pi started without Hitch's credential guard readiness attestation.");
+    }
+    if (
+      mediaToolRequired &&
+      !commands.some(
+        (command) =>
+          isRecord(command) &&
+          command.name === MEDIA_TOOL_STATUS_COMMAND &&
+          command.source === "extension",
+      )
+    ) {
+      throw new Error("Pi started without Hitch's guarded media tool readiness attestation.");
     }
   }
 
