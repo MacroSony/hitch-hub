@@ -77,7 +77,7 @@ This file archives completed implementation checkpoints so
 - Canonical cwd/root enforcement with fail-closed legacy ownership and security-metadata reconciliation.
 - Principal-private Pi config/session storage plus private per-session worker/tool state.
 - Explicit unsafe direct execution and required Linux Bubblewrap sandbox selection without fallback.
-- Pi tool/process policy translation, sandboxed read-only single-principal system config, private sandbox home, and cleared worker environment.
+- Pi tool/process policy translation, sandboxed writable single-principal system config, private sandbox home, and cleared worker environment.
 - Persisted workspace aliases and hub-data masks that keep absolute MCP cwd compatibility without exposing Hitch state.
 - Sandboxed `hitch.send_media` bridge paths, explicit writable media exports, and deterministic sandbox descendant cleanup.
 - Adversarial two-principal Telegram route and mount isolation coverage.
@@ -107,6 +107,7 @@ Latest local verification from the review pass:
 - `npm run smoke:wechat-reliability`: passed.
 - `npm run smoke:mcp-session`: passed.
 - `npm audit --omit=dev`: passed with zero reported vulnerabilities.
+- Controlled live Bubblewrap acceptance with the installed Pi configuration/extensions: returned `BUBBLEWRAP_OK`; 22 trusted system-config plans migrated from read-only to read/write with zero quarantines.
 
 ## Lessons Carried Forward
 

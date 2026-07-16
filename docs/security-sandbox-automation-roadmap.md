@@ -27,7 +27,7 @@ The implemented boundary is now:
 - workers receive an allowlisted environment without channel credentials, SSH/Docker control sockets, or loader-injection variables
 - `/workspace`, `/state`, `/agent-config`, `/agent-sessions`, and `/hitch` are reconstructed from persisted, revalidated metadata
 - Hitch data nested beneath a workspace is hidden with exact persisted tmpfs masks
-- under Bubblewrap, system Pi config is read-only and single-principal; multi-user profiles use principal-private Hitch config
+- under Bubblewrap, system Pi config is an explicit writable single-principal mount; multi-user profiles use principal-private Hitch config
 - Pi extension code remains trusted code inside the namespace; `process: false` removes the model-facing `bash` tool but cannot prevent a trusted extension from launching its own helper
 
 The remaining large gaps are resource quotas, provider-only network isolation, state retention policy, and unattended dispatch/trigger semantics.
@@ -113,7 +113,7 @@ The completed foundation contains the minimum pieces needed to operate sandboxed
 - a restart-on-failure user service example
 - durable outbound delivery IDs and terminal delivery state
 
-Implementation note (updated 2026-07-16): Phase 0 and the subsequent security commits are complete. They include live delivery validation, graceful shutdown, deterministic worker cleanup, idle-worker eviction, channel-health transition auditing, a user-service example, a durable outbound lifecycle with restart expiry and retention, bounded audit rotation, `!health`, and deterministic WeChat transport tests. The live WeChat process remains intentionally unchanged until the next controlled restart and sandbox soak.
+Implementation note (updated 2026-07-16): Phase 0 and the subsequent security commits are complete. They include live delivery validation, graceful shutdown, deterministic worker cleanup, idle-worker eviction, channel-health transition auditing, a user-service example, a durable outbound lifecycle with restart expiry and retention, bounded audit rotation, `!health`, and deterministic WeChat transport tests. The live WeChat-backed Hitch deployment now enforces required Bubblewrap for Pi workers; a controlled installed-Pi prompt passed after the exact trusted system-config mounts were migrated from read-only to read/write.
 
 Additional channel-health diagnostics and state-retention policy can continue in parallel, but proactive scheduling should not ship before the sandbox soak and unattended safety gate are complete.
 
@@ -313,9 +313,9 @@ Shell/process and agent-controlled network remain separate privileges. The old w
 
 ### 3. Agent config ownership: resolved for the isolation MVP
 
-Under Bubblewrap, `config_scope: system` mounts one explicitly resolved Pi config root read-only and keeps Pi sessions in principal-private Hitch state. It is rejected with multiple principals or `unsafe_allow_all`. `config_scope: hitch` gives every principal isolated writable Pi config/session directories and is the required multi-user mode. Neither sandboxed mode mounts the full home directory; explicit unsafe direct execution does not enforce these mount restrictions.
+Under Bubblewrap, `config_scope: system` mounts one explicitly resolved, host-writable Pi config root read/write and keeps new Pi sessions in principal-private Hitch state. It is rejected with multiple principals or `unsafe_allow_all`. Pi needs write access for settings/trust lock directories and may also persistently modify credentials, settings, trust decisions, packages, extensions, and legacy sessions inside that root. `config_scope: hitch` gives every principal isolated writable Pi config/session directories and is the required multi-user mode. Neither sandboxed mode mounts the full home directory; explicit unsafe direct execution does not enforce these mount restrictions.
 
-Provider auth is currently supplied by the system config (mounted read-only under Bubblewrap) or explicit environment allowlist. Scoped/revocable provider credentials remain follow-up hardening rather than an unacknowledged sandbox claim.
+Provider auth is currently supplied by the explicitly mounted writable system config or explicit environment allowlist. Scoped/revocable provider credentials remain follow-up hardening rather than an unacknowledged sandbox claim.
 
 ### 4. `default_policy`: compatibility field replaced
 
@@ -346,7 +346,7 @@ Until a provider broker or constrained proxy exists, network claims must disting
 ## Remaining Decisions
 
 1. Group sessions remain private-owner only in the implemented slice; shared visibility needs an explicit product/authorization design before it is enabled.
-2. Provider credentials currently come from the single-principal read-only system config or explicit environment allowlist; scoped/revocable credentials remain future hardening.
+2. Provider credentials currently come from the single-principal writable system config or explicit environment allowlist; scoped/revocable credentials remain future hardening.
 3. Bubblewrap v1 either shares the host network (`allow`) or denies all network including provider transport (`deny`). A provider-only proxy remains unresolved.
 4. State retention, temporary storage, output, memory, CPU, and PID quota defaults remain unresolved.
 5. Trigger busy/missed-run defaults should be decided after unified dispatch exposes the existing chat semantics as one service.

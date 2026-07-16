@@ -48,12 +48,12 @@ Goal: make principal ownership and filesystem boundaries enforceable before expa
 - [x] Replace worker environment inheritance with a small allowlist and block channel credentials/host-control variables.
 - [x] Add Direct and Bubblewrap launchers with fail-closed selection and exact mount reconstruction.
 - [x] Translate execution-policy tools into Hitch-owned Pi flags and keep `bash` consistent with the process capability.
-- [x] Under Bubblewrap, support a read-only system Pi config for exactly one principal; require Hitch-scoped config for multiple principals.
+- [x] Under Bubblewrap, support a writable system Pi config for exactly one principal; require Hitch-scoped config for multiple principals.
 - [x] Hide Hitch data beneath a workspace with persisted tmpfs masks through both workspace aliases.
 - [x] Preserve the sandboxed `hitch.send_media` bridge and explicit writable media export mounts.
 - [x] Verify installed Pi extensions, descendant cleanup, unsafe-policy tightening, and two-principal route/mount isolation.
 
-Rollout note (2026-07-16): the implementation is committed but the live WeChat process was intentionally not restarted. Existing sessions with old direct or unmasked mount metadata will be quarantined and should be recreated on the first sandboxed restart.
+Rollout note (updated 2026-07-16): the live WeChat-backed Hitch deployment now enforces required Bubblewrap for Pi workers. The writable-system-config rollout migrated 22 exact trusted `/agent-config` plans from read-only to read/write without quarantining any session, and a controlled prompt through the installed Pi configuration/extensions returned `BUBBLEWRAP_OK`. Continue the media/final-message soak through normal chat use.
 
 ## Completed Iteration: Runtime Reliability
 
@@ -173,7 +173,7 @@ Default ownership:
 
 Config scope policy:
 
-- Under sandboxed execution, `config_scope: system` mounts one explicitly resolved Pi config read-only while storing sessions privately under Hitch. It is appropriate for the current single-principal personal deployment and is rejected with multiple principals or `unsafe_allow_all`; unsafe direct execution does not enforce that read-only mount boundary.
+- Under sandboxed execution, `config_scope: system` mounts one explicitly resolved, host-writable Pi config read/write while storing new sessions privately under Hitch. It is appropriate for a single-principal personal deployment and is rejected with multiple principals or `unsafe_allow_all`. Pi may persistently modify credentials, settings, trust, packages, extensions, and legacy session content inside that explicit mount; unsafe direct execution is unrestricted beyond it.
 - `config_scope: hitch` gives every principal separate writable Pi config/session directories. It is the required mode for multi-user operation, smoke tests, isolated bot profiles, and future controlled automation.
 - Under sandboxed execution, neither mode exposes the full home directory. Provider environment variables remain opt-in through `env_allowlist`.
 

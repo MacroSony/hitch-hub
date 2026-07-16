@@ -70,7 +70,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
 - `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or `hitch.send_media`; roots are canonicalized at startup
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
-- `agents.pi.config_scope`: under sandboxed execution, `system` mounts one normal Pi config read-only for a single principal, while `hitch` gives every principal isolated Pi config/state under `data_dir`
+- `agents.pi.config_scope`: under sandboxed execution, `system` mounts one normal Pi config read/write for a single principal, while `hitch` gives every principal isolated writable Pi config/state under `data_dir`
 - `agents.pi.system_config_root`: optional system-scope Pi config directory; defaults to `~/.pi/agent` and may not be the home directory itself
 - `agents.pi.execution_policy`: filesystem mounts, Pi tool allowlist, `bash`/process capability, network namespace mode, and required sandbox mode; the remote default is workspace write with non-shell built-ins only
 - `agents.pi.env_allowlist`: optional environment variable names Pi needs for provider authentication; channel credentials, host-control sockets, loader injection variables, and `HITCH_*` names are rejected
@@ -293,7 +293,8 @@ Pi config behavior:
 
 - Workers receive a small runtime/proxy environment allowlist. Provider API-key variables must be named explicitly under `agents.pi.env_allowlist`; Telegram credentials and host-control sockets are never inherited.
 - Sandboxed Pi workers use Bubblewrap on Linux and fail closed when it is unavailable. Restricted `sandbox: preferred` policies do not fall back to direct execution because direct mode cannot enforce them.
-- Under sandboxed execution, `config_scope: system` mounts only the configured Pi directory at `/agent-config` read-only, uses private principal-owned session storage, and is rejected unless exactly one principal is configured without `unsafe_allow_all`. Explicit unsafe direct execution does not enforce that read-only mount boundary.
+- Under sandboxed execution, `config_scope: system` mounts only the configured Pi directory at `/agent-config` read/write, uses separate principal-owned session storage at `/agent-sessions`, and is rejected unless exactly one principal is configured without `unsafe_allow_all`. The directory must be host-writable because Pi creates settings/trust lock directories during normal RPC startup.
+- Writable system scope deliberately lets Pi persist changes to that mounted identity, including credentials, settings, trust decisions, packages, extensions, and any legacy sessions stored beneath the configured root. Those changes can affect later Pi runs, but unmounted home directories and projects remain hidden by Bubblewrap. Explicit unsafe direct execution has unrestricted host access and does not enforce mount boundaries.
 - `config_scope: hitch` stores Pi config/session state in principal-private directories under `data_dir` and defaults `PI_OFFLINE=1` unless already set.
 - Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. `/hitch/results` is overlaid read-only to the worker and the sandbox receives an empty private home plus ephemeral `/tmp`.
 - The workspace is mounted at `/workspace` and at its canonical host path so trusted Pi/MCP configuration containing an absolute project cwd continues to work; both aliases have the same policy-selected read/write mode.

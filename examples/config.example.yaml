@@ -53,8 +53,9 @@ agents:
   pi:
     command: pi
     config_scope: system
-    # system reuses one read-only Pi config identity and therefore supports one
-    # configured principal only. Use hitch when adding more users.
+    # system reuses one writable Pi config identity and therefore supports one
+    # configured principal only. Pi may persistently change settings, trust,
+    # credentials, packages, and extensions there. Use hitch for multiple users.
     # system_config_root: ~/.pi/agent
     # Set once, after backup, when assigning legacy shared config_scope:hitch state.
     # legacy_state_principal: alice
