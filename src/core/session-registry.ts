@@ -1,6 +1,11 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  executionPolicySchema,
+  mountPlanSchema,
+  type SessionSecurityMetadata,
+} from "../security/policy.js";
 import type {
   AgentName,
   ChatTarget,
@@ -22,6 +27,9 @@ type SessionRow = {
   user_id: string | null;
   agent: AgentName;
   cwd: string;
+  state_path: string | null;
+  execution_policy_json: string | null;
+  mount_plan_json: string | null;
   backend_session_id: string | null;
   process_id: number | null;
   status: SessionStatus;
@@ -103,7 +111,11 @@ export type PendingInteraction = {
 };
 
 function rowToSession(row: SessionRow): HubSession | undefined {
-  if (!row.owner_principal_id || row.authorization_state === "quarantined") {
+  if (!row.owner_principal_id || row.authorization_state !== "active") {
+    return undefined;
+  }
+  const security = securityMetadataFromRow(row);
+  if (!security) {
     return undefined;
   }
   return {
@@ -117,6 +129,9 @@ function rowToSession(row: SessionRow): HubSession | undefined {
     ...(row.user_id ? { userId: row.user_id } : {}),
     agent: row.agent,
     cwd: row.cwd,
+    statePath: security.statePath,
+    executionPolicy: security.executionPolicy,
+    mountPlan: security.mountPlan,
     ...(row.backend_session_id ? { backendSessionId: row.backend_session_id } : {}),
     ...(row.process_id ? { processId: row.process_id } : {}),
     status: row.status,
@@ -183,16 +198,27 @@ export class SessionRegistry {
     ownerPrincipalId: string,
     agent: AgentName,
     cwd: string,
+    initializeSecurity: (sessionId: string) => SessionSecurityMetadata,
     name?: string,
   ): HubSession {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
+    const security = initializeSecurity(id);
+    if (
+      security.mountPlan.sessionId !== id ||
+      security.mountPlan.principalId !== ownerPrincipalId ||
+      security.mountPlan.workspacePath !== cwd ||
+      security.mountPlan.statePath !== security.statePath
+    ) {
+      throw new Error(`Session security metadata does not match the new session: ${id}`);
+    }
     this.db
       .prepare(
         `INSERT INTO hub_sessions (
           id, owner_principal_id, visibility, name, platform, chat_id, thread_id, user_id, agent, cwd,
-          backend_session_id, status, created_at, updated_at, selected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          state_path, execution_policy_json, mount_plan_json, backend_session_id, status,
+          created_at, updated_at, selected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -205,6 +231,9 @@ export class SessionRegistry {
         target.userId ?? null,
         agent,
         cwd,
+        security.statePath,
+        JSON.stringify(security.executionPolicy),
+        JSON.stringify(security.mountPlan),
         id,
         "idle",
         now,
@@ -234,7 +263,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
-           AND COALESCE(authorization_state, 'active') = 'active'
+           AND authorization_state = 'active'
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC
          LIMIT 1`,
@@ -252,7 +281,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
-           AND COALESCE(authorization_state, 'active') = 'active'
+           AND authorization_state = 'active'
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC`,
       )
@@ -277,7 +306,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
-           AND COALESCE(authorization_state, 'active') = 'active'
+           AND authorization_state = 'active'
            AND status != 'stopped'
            AND (id = ? OR id LIKE ? OR name = ?)
          ORDER BY updated_at DESC
@@ -307,7 +336,7 @@ export class SessionRegistry {
          SET selected_at = ?, updated_at = ?
          WHERE id = ?
            AND owner_principal_id = ?
-           AND COALESCE(authorization_state, 'active') = 'active'`,
+           AND authorization_state = 'active'`,
       )
       .run(new Date().toISOString(), new Date().toISOString(), id, ownerPrincipalId);
     return result.changes === 1;
@@ -321,7 +350,7 @@ export class SessionRegistry {
   ): number {
     const rows = this.db
       .prepare(
-        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NULL AND COALESCE(authorization_state, 'active') = 'active'",
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NULL AND authorization_state = 'active'",
       )
       .all() as SessionRow[];
     let assigned = 0;
@@ -355,7 +384,7 @@ export class SessionRegistry {
   ): { canonicalized: number; madeInaccessible: number } {
     const rows = this.db
       .prepare(
-        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NOT NULL AND COALESCE(authorization_state, 'active') = 'active'",
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NOT NULL AND authorization_state = 'active'",
       )
       .all() as SessionRow[];
     const updateCwd = this.db.prepare(
@@ -365,7 +394,7 @@ export class SessionRegistry {
       `UPDATE hub_sessions
        SET authorization_state = 'quarantined', status = 'stopped', process_id = NULL,
            visibility = 'private', updated_at = ?
-       WHERE id = ? AND owner_principal_id = ? AND COALESCE(authorization_state, 'active') = 'active'`,
+       WHERE id = ? AND owner_principal_id = ? AND authorization_state = 'active'`,
     );
     let canonicalized = 0;
     let madeInaccessible = 0;
@@ -386,6 +415,77 @@ export class SessionRegistry {
       }
     }
     return { canonicalized, madeInaccessible };
+  }
+
+  reconcileSessionSecurityMetadata(
+    resolveMetadata: (
+      sessionId: string,
+      ownerPrincipalId: string,
+      cwd: string,
+      existing: SessionSecurityMetadata | undefined,
+    ) => SessionSecurityMetadata | undefined,
+  ): { initialized: number; quarantined: number } {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NOT NULL AND authorization_state = 'active'",
+      )
+      .all() as SessionRow[];
+    const initialize = this.db.prepare(
+      `UPDATE hub_sessions
+       SET state_path = ?, execution_policy_json = ?, mount_plan_json = ?, updated_at = ?
+       WHERE id = ?
+         AND owner_principal_id = ?
+         AND state_path IS NULL
+         AND execution_policy_json IS NULL
+         AND mount_plan_json IS NULL
+         AND authorization_state = 'active'`,
+    );
+    const quarantine = this.db.prepare(
+      `UPDATE hub_sessions
+       SET authorization_state = 'quarantined', status = 'stopped', process_id = NULL,
+           visibility = 'private', updated_at = ?
+       WHERE id = ? AND owner_principal_id = ? AND authorization_state = 'active'`,
+    );
+    let initialized = 0;
+    let quarantined = 0;
+    for (const row of rows) {
+      const ownerPrincipalId = row.owner_principal_id;
+      if (!ownerPrincipalId) {
+        continue;
+      }
+      const existing = securityMetadataFromRow(row);
+      const hasNoMetadata =
+        row.state_path === null && row.execution_policy_json === null && row.mount_plan_json === null;
+      let expected: SessionSecurityMetadata | undefined;
+      try {
+        expected = resolveMetadata(row.id, ownerPrincipalId, row.cwd, existing);
+      } catch {
+        expected = undefined;
+      }
+      if (!expected) {
+        quarantined += Number(quarantine.run(new Date().toISOString(), row.id, ownerPrincipalId).changes);
+        continue;
+      }
+      if (hasNoMetadata) {
+        initialized += Number(
+          initialize
+            .run(
+              expected.statePath,
+              JSON.stringify(expected.executionPolicy),
+              JSON.stringify(expected.mountPlan),
+              new Date().toISOString(),
+              row.id,
+              ownerPrincipalId,
+            )
+            .changes,
+        );
+        continue;
+      }
+      if (!existing || !sameSecurityMetadata(existing, expected)) {
+        quarantined += Number(quarantine.run(new Date().toISOString(), row.id, ownerPrincipalId).changes);
+      }
+    }
+    return { initialized, quarantined };
   }
 
   updateStatus(id: string, status: SessionStatus): void {
@@ -614,7 +714,7 @@ export class SessionRegistry {
       CREATE TABLE IF NOT EXISTS hub_sessions (
         id TEXT PRIMARY KEY,
         owner_principal_id TEXT,
-        authorization_state TEXT NOT NULL DEFAULT 'active',
+        authorization_state TEXT NOT NULL DEFAULT 'active' CHECK (authorization_state IN ('active', 'quarantined')),
         visibility TEXT NOT NULL DEFAULT 'private',
         name TEXT,
         platform TEXT NOT NULL,
@@ -623,6 +723,9 @@ export class SessionRegistry {
         user_id TEXT,
         agent TEXT NOT NULL,
         cwd TEXT NOT NULL,
+        state_path TEXT,
+        execution_policy_json TEXT,
+        mount_plan_json TEXT,
         backend_session_id TEXT,
         process_id INTEGER,
         status TEXT NOT NULL,
@@ -678,7 +781,18 @@ export class SessionRegistry {
     this.addColumnIfMissing("hub_sessions", "owner_principal_id", "TEXT");
     this.addColumnIfMissing("hub_sessions", "authorization_state", "TEXT NOT NULL DEFAULT 'active'");
     this.addColumnIfMissing("hub_sessions", "visibility", "TEXT NOT NULL DEFAULT 'private'");
+    this.addColumnIfMissing("hub_sessions", "state_path", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "execution_policy_json", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "mount_plan_json", "TEXT");
     this.addColumnIfMissing("pending_interactions", "owner_principal_id", "TEXT");
+    this.db
+      .prepare(
+        `UPDATE hub_sessions
+         SET authorization_state = 'quarantined', status = 'stopped', process_id = NULL,
+             visibility = 'private', updated_at = ?
+         WHERE authorization_state IS NULL OR authorization_state NOT IN ('active', 'quarantined')`,
+      )
+      .run(new Date().toISOString());
     // Menus are short-lived and may contain session metadata. Old rows cannot
     // be attributed safely after an identity mapping change, so fail closed.
     this.db.prepare("DELETE FROM pending_interactions WHERE owner_principal_id IS NULL").run();
@@ -696,4 +810,33 @@ export class SessionRegistry {
       this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
     }
   }
+}
+
+function securityMetadataFromRow(row: SessionRow): SessionSecurityMetadata | undefined {
+  if (!row.state_path || !row.execution_policy_json || !row.mount_plan_json) {
+    return undefined;
+  }
+  try {
+    const executionPolicy = executionPolicySchema.parse(JSON.parse(row.execution_policy_json) as unknown);
+    const mountPlan = mountPlanSchema.parse(JSON.parse(row.mount_plan_json) as unknown);
+    if (
+      mountPlan.sessionId !== row.id ||
+      mountPlan.principalId !== row.owner_principal_id ||
+      mountPlan.workspacePath !== row.cwd ||
+      mountPlan.statePath !== row.state_path
+    ) {
+      return undefined;
+    }
+    return { statePath: row.state_path, executionPolicy, mountPlan };
+  } catch {
+    return undefined;
+  }
+}
+
+function sameSecurityMetadata(left: SessionSecurityMetadata, right: SessionSecurityMetadata): boolean {
+  return (
+    left.statePath === right.statePath &&
+    JSON.stringify(left.executionPolicy) === JSON.stringify(right.executionPolicy) &&
+    JSON.stringify(left.mountPlan) === JSON.stringify(right.mountPlan)
+  );
 }

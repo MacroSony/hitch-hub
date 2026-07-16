@@ -63,6 +63,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.allowed_roots`: existing directories Hitch may launch workers in; roots are canonicalized at startup
 - `users.*.allowed_chat_ids`: optional per-principal chat restriction applied in addition to the channel allowlist
 - `users.*.capabilities`: optional hub capabilities; `operator` reveals hub-global recovery/transition diagnostics in `!health`
+- `users.*.execution_policy`: optional per-principal override of `agents.pi.execution_policy`; the normalized policy is snapshotted when a session is created, so later policy changes apply to new sessions while existing snapshots continue only if their roots and mounts remain valid
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
@@ -290,7 +291,10 @@ Pi config behavior:
 
 - Workers receive a small runtime/proxy environment allowlist. Provider API-key variables must be named explicitly under `agents.pi.env_allowlist`; Telegram credentials and host-control sockets are never inherited.
 - `config_scope: system` uses Pi's normal config beneath the inherited home directory. Pi-specific environment overrides are not inherited unless explicitly allowlisted.
-- `config_scope: hitch` stores Pi config/session state under `data_dir/pi/...` and defaults `PI_OFFLINE=1` unless already set.
+- `config_scope: hitch` stores Pi config/session state inside that session's private state directory and defaults `PI_OFFLINE=1` unless already set.
+- Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. The tool-result subtree is planned as read-only to the worker.
+- Execution policy and mount plans are persisted with the session; missing legacy metadata is initialized, while partial, modified, escaped, or no-longer-authorized metadata is quarantined instead of silently regenerated.
+- On the first `config_scope: hitch` upgrade, old shared `data_dir/pi` state stops startup until it is backed up and explicitly assigned with `agents.pi.legacy_state_principal`. Old `data_dir/tools/<session-id>` state is moved into the matching private session state.
 - Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
 - Hitch starts Pi with a stable `--session-id` based on the Hitch session unless `agents.pi.default_args` already includes an explicit Pi session mode such as `--no-session`, `--session`, `--session-id`, `--continue`, `--resume`, or `--fork`.
 

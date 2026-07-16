@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -6,6 +6,7 @@ import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import type { AgentToolContext } from "../core/tool-bridge.js";
 import { buildWorkerEnvironment } from "../security/worker-environment.js";
+import { secureMountHostPath } from "../security/session-runtime.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
 import type {
   AgentBackend,
@@ -108,10 +109,8 @@ export class PiRpcBackend implements AgentBackend {
     const overrides: Record<string, string> = {};
 
     if (piConfig.config_scope === "hitch") {
-      const piAgentDir = path.join(this.config.dataDir, "pi", "agent");
-      const piSessionDir = path.join(this.config.dataDir, "pi", "sessions");
-      mkdirSync(piAgentDir, { recursive: true });
-      mkdirSync(piSessionDir, { recursive: true });
+      const piAgentDir = secureMountHostPath(session, "/agent-config");
+      const piSessionDir = secureMountHostPath(session, "/agent-sessions");
       overrides.PI_CODING_AGENT_DIR = piAgentDir;
       overrides.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
       overrides.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";

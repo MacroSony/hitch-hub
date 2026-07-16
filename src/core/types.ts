@@ -1,3 +1,5 @@
+import type { ExecutionPolicy, MountPlan } from "../security/policy.js";
+
 export type Platform = "fake" | "telegram" | "discord" | "wechat" | "qq" | "feishu";
 export type AgentName = "pi" | "claude" | "codex" | "opencode" | "gemini" | "pty";
 export type SessionStatus = "idle" | "running" | "waiting_approval" | "waiting_input" | "error" | "stopped";
@@ -33,6 +35,9 @@ export type HubSession = {
   userId?: string;
   agent: AgentName;
   cwd: string;
+  statePath: string;
+  executionPolicy: ExecutionPolicy;
+  mountPlan: MountPlan;
   backendSessionId?: string;
   processId?: number;
   status: SessionStatus;

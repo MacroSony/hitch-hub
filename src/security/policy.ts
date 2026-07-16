@@ -95,19 +95,35 @@ export type SandboxCapability =
   | "network_namespace"
   | "resource_limits";
 
-export type PlannedMount = {
-  hostPath: string;
-  sandboxPath: string;
-  mode: "ro" | "rw";
-  purpose: "runtime" | "workspace" | "state" | "agent-config" | "policy";
-};
+export const plannedMountSchema = z.object({
+  hostPath: z.string().min(1).refine(path.isAbsolute, "Planned mount hostPath must be absolute."),
+  sandboxPath: z
+    .string()
+    .startsWith("/")
+    .refine(
+      (value) => value !== "/" && path.posix.normalize(value) === value,
+      "Planned mount sandboxPath must be a normalized absolute path below /.",
+    ),
+  mode: z.enum(mountModeValues),
+  purpose: z.enum(["runtime", "workspace", "state", "agent-config", "policy"]),
+});
 
-export type MountPlan = {
-  principalId: string;
-  sessionId: string;
-  workspacePath: string;
+export const mountPlanSchema = z.object({
+  version: z.literal(1),
+  principalId: z.string().min(1),
+  sessionId: z.string().min(1),
+  workspacePath: z.string().min(1).refine(path.isAbsolute, "Mount plan workspacePath must be absolute."),
+  statePath: z.string().min(1).refine(path.isAbsolute, "Mount plan statePath must be absolute."),
+  mounts: z.array(plannedMountSchema),
+});
+
+export type PlannedMount = z.output<typeof plannedMountSchema>;
+export type MountPlan = z.output<typeof mountPlanSchema>;
+
+export type SessionSecurityMetadata = {
   statePath: string;
-  mounts: PlannedMount[];
+  executionPolicy: ExecutionPolicy;
+  mountPlan: MountPlan;
 };
 
 export const DEFAULT_REMOTE_EXECUTION_POLICY: ExecutionPolicy = executionPolicySchema.parse({});

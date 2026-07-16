@@ -79,6 +79,16 @@ export class PrincipalResolver {
     return principalId.startsWith("__hitch_unsafe__:") ? [...this.unsafeRootSnapshot] : undefined;
   }
 
+  executionPolicyFor(principalId: string) {
+    const principal = this.config.users[principalId];
+    if (principal) {
+      return principal.execution_policy ?? this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY;
+    }
+    return principalId.startsWith("__hitch_unsafe__:")
+      ? this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY
+      : undefined;
+  }
+
   private resolveFake(target: ChatTarget): AuthorizationContext | undefined {
     const configuredId = target.userId && this.config.users[target.userId] ? target.userId : undefined;
     const entries = Object.entries(this.config.users);
@@ -117,7 +127,7 @@ export class PrincipalResolver {
       principal,
       target,
       allowedRoots: principal.allowedRoots,
-      executionPolicy: this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY,
+      executionPolicy: this.executionPolicyFor(principalId) ?? UNSAFE_DIRECT_EXECUTION_POLICY,
       authorizationMode: unsafeAllowAll ? "unsafe_allow_all" : "configured",
     };
   }
@@ -135,7 +145,7 @@ export class PrincipalResolver {
       principal,
       target,
       allowedRoots: principal.allowedRoots,
-      executionPolicy: this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY,
+      executionPolicy: this.executionPolicyFor(principalId) ?? UNSAFE_DIRECT_EXECUTION_POLICY,
       authorizationMode: "unsafe_allow_all",
     };
   }

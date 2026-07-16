@@ -23,6 +23,7 @@ import { SessionRegistry, type PendingInteraction, type PendingInteractionOption
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
 import { PrincipalResolver } from "../security/authorization.js";
 import type { AuthorizationContext } from "../security/policy.js";
+import { SessionRuntimeStore } from "../security/session-runtime.js";
 
 const INTERACTION_TTL_MS = 5 * 60 * 1000;
 const TIMEOUT_PARTIAL_GRACE_MS = 2_000;
@@ -50,6 +51,7 @@ type SessionToolPump = {
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
   private readonly principals: PrincipalResolver;
+  private readonly runtimeStore: SessionRuntimeStore;
   private readonly audit: AuditLog;
   private readonly deliveryStore: DeliveryStore;
   private readonly tools: HubToolService;
@@ -70,6 +72,10 @@ export class RemoteAgentHub {
   private readonly claimedLegacySessionCount: number;
   private readonly canonicalizedSessionCwdCount: number;
   private readonly inaccessibleSessionCount: number;
+  private readonly initializedSessionSecurityCount: number;
+  private readonly quarantinedSessionSecurityCount: number;
+  private readonly migratedLegacyPiStateCount: number;
+  private readonly migratedLegacyToolStateCount: number;
   private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -96,6 +102,24 @@ export class RemoteAgentHub {
     });
     this.canonicalizedSessionCwdCount = reconciledSessions.canonicalized;
     this.inaccessibleSessionCount = reconciledSessions.madeInaccessible;
+    this.runtimeStore = new SessionRuntimeStore(config.dataDir);
+    this.migratedLegacyPiStateCount = this.runtimeStore.migrateLegacySharedPiState(
+      Object.keys(config.users),
+      config.agents.pi.config_scope,
+      config.agents.pi.legacy_state_principal,
+    );
+    const reconciledSecurity = this.sessions.reconcileSessionSecurityMetadata(
+      (sessionId, ownerPrincipalId, cwd, existing) => {
+        const allowedRoots = this.principals.allowedRootsFor(ownerPrincipalId);
+        const executionPolicy = existing?.executionPolicy ?? this.principals.executionPolicyFor(ownerPrincipalId);
+        return allowedRoots && executionPolicy
+          ? this.runtimeStore.materialize(ownerPrincipalId, sessionId, cwd, executionPolicy, allowedRoots)
+          : undefined;
+      },
+    );
+    this.initializedSessionSecurityCount = reconciledSecurity.initialized;
+    this.quarantinedSessionSecurityCount = reconciledSecurity.quarantined;
+    this.migratedLegacyToolStateCount = this.runtimeStore.migratedLegacyToolStates();
     this.sessions.recoverInterruptedSessions();
     this.deliveryStore = new DeliveryStore(config.dataDir);
     this.recoveredDeliveryCount = this.deliveryStore.recoverInterrupted();
@@ -151,7 +175,7 @@ export class RemoteAgentHub {
       },
       (target) => this.deliveryContextFor(target),
     );
-    this.toolBridge = new AgentToolBridge(config.dataDir);
+    this.toolBridge = new AgentToolBridge();
   }
 
   async run(): Promise<void> {
@@ -163,6 +187,10 @@ export class RemoteAgentHub {
         claimedLegacySessions: this.claimedLegacySessionCount,
         canonicalizedSessionCwds: this.canonicalizedSessionCwdCount,
         inaccessibleSessions: this.inaccessibleSessionCount,
+        initializedSessionSecurity: this.initializedSessionSecurityCount,
+        quarantinedSessionSecurity: this.quarantinedSessionSecurityCount,
+        migratedLegacyPiState: this.migratedLegacyPiStateCount,
+        migratedLegacyToolState: this.migratedLegacyToolStateCount,
       },
     });
     this.startWorkerSweep();
@@ -337,7 +365,21 @@ export class RemoteAgentHub {
       return;
     }
 
-    const session = this.sessions.createSession(event.target, authorization.principal.id, agent, cwd, name);
+    const session = this.sessions.createSession(
+      event.target,
+      authorization.principal.id,
+      agent,
+      cwd,
+      (sessionId) =>
+        this.runtimeStore.materialize(
+          authorization.principal.id,
+          sessionId,
+          cwd,
+          authorization.executionPolicy,
+          authorization.allowedRoots,
+        ),
+      name,
+    );
     await this.audit.write({
       type: "session.created",
       sessionId: session.id,
@@ -412,7 +454,7 @@ export class RemoteAgentHub {
         : "active session: none",
       ...(operator
         ? [
-            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}; canonicalized session cwds ${this.canonicalizedSessionCwdCount}; inaccessible sessions ${this.inaccessibleSessionCount}`,
+            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}; canonicalized session cwds ${this.canonicalizedSessionCwdCount}; inaccessible sessions ${this.inaccessibleSessionCount}; initialized session security ${this.initializedSessionSecurityCount}; quarantined session security ${this.quarantinedSessionSecurityCount}; migrated legacy Pi state ${this.migratedLegacyPiStateCount}; migrated legacy tool state ${this.migratedLegacyToolStateCount}`,
           ]
         : []),
     ];
@@ -777,7 +819,7 @@ export class RemoteAgentHub {
 
     try {
       this.assertSessionCwdAuthorized(session);
-      const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
+      const processId = await backend.start(session, this.toolBridge.contextFor(session));
       await this.ensureToolPump(session, backend);
       this.sessions.setBackendProcess(session.id, processId);
       if (this.sessions.getById(session.id)?.status === "waiting_input") {
@@ -981,8 +1023,22 @@ export class RemoteAgentHub {
   private assertSessionCwdAuthorized(session: HubSession): void {
     const allowedRoots = this.principals.allowedRootsFor(session.ownerPrincipalId);
     const currentCwd = allowedRoots ? realDirectoryInsideAllowedRoots(session.cwd, allowedRoots) : undefined;
-    if (!currentCwd || currentCwd !== session.cwd) {
+    if (!allowedRoots || !currentCwd || currentCwd !== session.cwd) {
       throw new Error(`Session cwd is no longer an authorized canonical directory: ${session.cwd}`);
+    }
+    const expected = this.runtimeStore.materialize(
+      session.ownerPrincipalId,
+      session.id,
+      session.cwd,
+      session.executionPolicy,
+      allowedRoots,
+    );
+    if (
+      expected.statePath !== session.statePath ||
+      JSON.stringify(expected.executionPolicy) !== JSON.stringify(session.executionPolicy) ||
+      JSON.stringify(expected.mountPlan) !== JSON.stringify(session.mountPlan)
+    ) {
+      throw new Error(`Session security metadata no longer matches its authorized snapshot: ${session.id}`);
     }
   }
 
@@ -994,7 +1050,7 @@ export class RemoteAgentHub {
   ): Promise<number | undefined> {
     this.assertSessionCwdAuthorized(session);
     const wasAlive = backend.isAlive();
-    const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
+    const processId = await backend.start(session, this.toolBridge.contextFor(session));
     await this.ensureToolPump(session, backend);
     this.sessions.setBackendProcess(session.id, processId);
     if (!wasAlive) {
@@ -1064,7 +1120,7 @@ export class RemoteAgentHub {
 
     const pump: SessionToolPump = {
       backend,
-      context: this.toolBridge.contextFor(session.id),
+      context: this.toolBridge.contextFor(session),
       target: targetForSession(session),
       draining: false,
       requested: false,

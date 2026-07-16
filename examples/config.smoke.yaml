@@ -49,6 +49,7 @@ agents:
   pi:
     command: pi
     config_scope: hitch
+    legacy_state_principal: smoke
     default_args:
       - --mode
       - rpc

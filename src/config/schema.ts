@@ -12,6 +12,7 @@ const userSchema = z.object({
     })
     .optional(),
   capabilities: z.array(z.string().min(1)).optional(),
+  execution_policy: executionPolicySchema.optional(),
 });
 
 const fakeChannelSchema = z.object({
@@ -41,6 +42,7 @@ const piAgentSchema = z.object({
   // this formerly security-looking but unenforced field.
   default_policy: z.enum(["ask", "deny", "allow"]).optional(),
   config_scope: z.enum(["hitch", "system"]).default("hitch"),
+  legacy_state_principal: z.string().min(1).optional(),
   env_allowlist: z.array(z.string()).optional(),
   execution_policy: executionPolicySchema.optional(),
 });

@@ -1,7 +1,19 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
-import type { ChatTarget } from "./types.js";
+import { secureSessionBridgePaths } from "../security/session-runtime.js";
+import { isPathInsideAllowedRoots } from "./path-policy.js";
+import type { ChatTarget, HubSession } from "./types.js";
 import {
   type HubToolDeliveryContext,
   type HubToolService,
@@ -12,6 +24,7 @@ import {
 export type AgentToolContext = {
   sessionId: string;
   token: string;
+  statePath: string;
   outboxPath: string;
   resultDir: string;
 };
@@ -29,24 +42,28 @@ export class AgentToolBridge {
   private readonly contexts = new Map<string, AgentToolContext>();
   private readonly cursors = new Map<string, { offset: number }>();
 
-  constructor(private readonly dataDir: string) {}
-
-  contextFor(sessionId: string): AgentToolContext {
-    const existing = this.contexts.get(sessionId);
+  contextFor(session: Pick<HubSession, "id" | "statePath">): AgentToolContext {
+    const bridge = secureSessionBridgePaths(session.statePath);
+    const existing = this.contexts.get(session.id);
     if (existing) {
+      if (
+        existing.statePath !== session.statePath ||
+        existing.outboxPath !== bridge.outboxPath ||
+        existing.resultDir !== bridge.resultDir
+      ) {
+        throw new Error(`Session tool bridge paths changed unexpectedly: ${session.id}`);
+      }
       return existing;
     }
 
-    const toolDir = path.join(this.dataDir, "tools", sessionId);
-    const resultDir = path.join(toolDir, "results");
-    mkdirSync(resultDir, { recursive: true });
     const context: AgentToolContext = {
-      sessionId,
+      sessionId: session.id,
       token: randomBytes(32).toString("hex"),
-      outboxPath: path.join(toolDir, "outbox.jsonl"),
-      resultDir,
+      statePath: session.statePath,
+      outboxPath: bridge.outboxPath,
+      resultDir: bridge.resultDir,
     };
-    this.contexts.set(sessionId, context);
+    this.contexts.set(session.id, context);
     return context;
   }
 
@@ -56,9 +73,11 @@ export class AgentToolBridge {
     tools: HubToolService,
     deliveryContext: HubToolDeliveryContext = { sessionId: context.sessionId },
   ): Promise<void> {
+    this.assertContextPaths(context);
     if (!existsSync(context.outboxPath)) {
       return;
     }
+    assertRegularFileInside(context.outboxPath, path.dirname(context.outboxPath), "Tool outbox");
 
     for (const line of this.readPendingLines(context)) {
       if (!line.trim()) {
@@ -73,7 +92,7 @@ export class AgentToolBridge {
       }
 
       const id = typeof request.id === "string" ? request.id : undefined;
-      if (!id || existsSync(this.resultPath(context, id))) {
+      if (!id || this.resultExists(context, id)) {
         continue;
       }
 
@@ -109,8 +128,21 @@ export class AgentToolBridge {
   }
 
   private writeResult(context: AgentToolContext, id: string, result: SendMediaResult): void {
-    mkdirSync(context.resultDir, { recursive: true });
-    writeFileSync(this.resultPath(context, id), `${JSON.stringify(result)}\n`, "utf8");
+    this.assertContextPaths(context);
+    const resultPath = this.resultPath(context, id);
+    if (existsSync(resultPath)) {
+      assertRegularFileInside(resultPath, context.resultDir, "Tool result");
+    }
+    const descriptor = openSync(
+      resultPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | noFollowFlag(),
+      0o600,
+    );
+    try {
+      writeSync(descriptor, `${JSON.stringify(result)}\n`, undefined, "utf8");
+    } finally {
+      closeSync(descriptor);
+    }
   }
 
   private resultPath(context: AgentToolContext, id: string): string {
@@ -119,18 +151,19 @@ export class AgentToolBridge {
 
   private readPendingLines(context: AgentToolContext): string[] {
     const cursor = this.cursors.get(context.sessionId) ?? { offset: 0 };
-    const size = statSync(context.outboxPath).size;
+    const descriptor = openSync(context.outboxPath, constants.O_RDONLY | noFollowFlag());
+    const size = fstatSync(descriptor).size;
     if (size < cursor.offset) {
       cursor.offset = 0;
     }
     if (size === cursor.offset) {
       this.cursors.set(context.sessionId, cursor);
+      closeSync(descriptor);
       return [];
     }
 
     const length = size - cursor.offset;
     const buffer = Buffer.alloc(length);
-    const descriptor = openSync(context.outboxPath, "r");
     try {
       let bytesRead = 0;
       while (bytesRead < length) {
@@ -154,6 +187,22 @@ export class AgentToolBridge {
       closeSync(descriptor);
     }
   }
+
+  private resultExists(context: AgentToolContext, id: string): boolean {
+    const resultPath = this.resultPath(context, id);
+    if (!existsSync(resultPath)) {
+      return false;
+    }
+    assertRegularFileInside(resultPath, context.resultDir, "Tool result");
+    return true;
+  }
+
+  private assertContextPaths(context: AgentToolContext): void {
+    const bridge = secureSessionBridgePaths(context.statePath);
+    if (bridge.outboxPath !== context.outboxPath || bridge.resultDir !== context.resultDir) {
+      throw new Error(`Session tool bridge escaped its private state: ${context.sessionId}`);
+    }
+  }
 }
 
 function failedToolResult(id: string, target: ChatTarget, mediaPath: string, message: string): SendMediaResult {
@@ -168,4 +217,19 @@ function failedToolResult(id: string, target: ChatTarget, mediaPath: string, mes
 
 function safeResultId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+}
+
+function assertRegularFileInside(filePath: string, allowedRoot: string, label: string): void {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`${label} is not a regular non-symlink file: ${filePath}`);
+  }
+  const canonical = realpathSync.native(filePath);
+  if (!isPathInsideAllowedRoots(canonical, [allowedRoot])) {
+    throw new Error(`${label} escaped its private state directory: ${filePath}`);
+  }
+}
+
+function noFollowFlag(): number {
+  return "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
 }

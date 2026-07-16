@@ -6,6 +6,8 @@ import { PiRpcBackend } from "../agents/pi-rpc.js";
 import { loadConfig } from "../config/load-config.js";
 import { configSchema, type HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
+import { UNSAFE_DIRECT_EXECUTION_POLICY } from "../security/policy.js";
+import { SessionRuntimeStore } from "../security/session-runtime.js";
 import {
   assertWorkerEnvironmentAllowlist,
   buildWorkerEnvironment,
@@ -174,6 +176,13 @@ async function verifyPiBackendEnvironment(): Promise<void> {
     outboundRoots: [],
     principalRoots: { owner: [tempDir] },
   };
+  const sessionSecurity = new SessionRuntimeStore(tempDir).materialize(
+    "owner",
+    "backend-environment",
+    tempDir,
+    UNSAFE_DIRECT_EXECUTION_POLICY,
+    [tempDir],
+  );
   const session: HubSession = {
     id: "backend-environment",
     ownerPrincipalId: "owner",
@@ -183,6 +192,7 @@ async function verifyPiBackendEnvironment(): Promise<void> {
     userId: "owner",
     agent: "pi",
     cwd: tempDir,
+    ...sessionSecurity,
     status: "idle",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

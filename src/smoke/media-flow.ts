@@ -460,14 +460,23 @@ async function runToolBridgeScenario(): Promise<void> {
 }
 
 function findBridgeResultPath(dataDir: string): string | undefined {
-  const toolsDir = path.join(dataDir, "tools");
-  if (!existsSync(toolsDir)) {
+  const stateRoot = path.join(dataDir, "session-state");
+  if (!existsSync(stateRoot)) {
     return undefined;
   }
-  for (const sessionDir of readdirSync(toolsDir)) {
-    const resultPath = path.join(toolsDir, sessionDir, "results", "bridge-send-media.json");
-    if (existsSync(resultPath)) {
-      return resultPath;
+  const pending = [stateRoot];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) {
+      continue;
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.name === "bridge-send-media.json" && path.basename(path.dirname(entryPath)) === "results") {
+        return entryPath;
+      }
     }
   }
   return undefined;

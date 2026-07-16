@@ -6,7 +6,7 @@ function normalizeForCompare(value: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-export function isPathInsideAllowedRoots(candidate: string, allowedRoots: string[]): boolean {
+export function isPathInsideAllowedRoots(candidate: string, allowedRoots: readonly string[]): boolean {
   const normalizedCandidate = normalizeForCompare(candidate);
 
   return allowedRoots.some((root) => {

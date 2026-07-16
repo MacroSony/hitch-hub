@@ -1,16 +1,27 @@
-import { mkdirSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { HubConfig } from "../config/schema.js";
 import { configSchema } from "../config/schema.js";
 import { SessionRegistry } from "../core/session-registry.js";
+import { AgentToolBridge } from "../core/tool-bridge.js";
 import {
   canonicalizeAllowedRoots,
   canonicalizeExistingDirectory,
   realDirectoryInsideAllowedRoots,
 } from "../core/path-policy.js";
 import { PrincipalResolver } from "../security/authorization.js";
-import { executionPolicySchema } from "../security/policy.js";
+import { executionPolicySchema, UNSAFE_DIRECT_EXECUTION_POLICY } from "../security/policy.js";
+import { SessionRuntimeStore } from "../security/session-runtime.js";
 
 function main(): void {
   const cwd = path.resolve(".");
@@ -20,6 +31,7 @@ function main(): void {
         telegram_ids: ["alice-user"],
         allowed_roots: [cwd],
         allowed_chat_ids: { telegram: ["shared-chat"] },
+        execution_policy: { filesystem: "read-only", sandbox: "required" },
       },
       bob: {
         telegram_ids: ["bob-user"],
@@ -56,6 +68,9 @@ function main(): void {
   });
   if (alice?.principal.id !== "alice" || alice.allowedRoots[0] !== cwd) {
     throw new Error(`Alice principal resolution failed: ${JSON.stringify(alice)}`);
+  }
+  if (alice.executionPolicy.filesystem !== "read-only" || alice.executionPolicy.sandbox !== "required") {
+    throw new Error("Alice's per-principal execution policy was not resolved.");
   }
   if (bob?.principal.id !== "bob" || bob.allowedRoots[0] !== path.dirname(cwd)) {
     throw new Error(`Bob principal resolution failed: ${JSON.stringify(bob)}`);
@@ -150,6 +165,7 @@ function main(): void {
   verifySessionOwnership(cwd);
   verifyLegacySessionClaim(cwd);
   verifyCanonicalRoots(cwd);
+  verifyLegacyStateMigration(cwd);
 
   process.stdout.write("Security foundation smoke ok\n");
 }
@@ -157,11 +173,38 @@ function main(): void {
 function verifySessionOwnership(cwd: string): void {
   const dataDir = path.join(cwd, "examples/.remote-agent-hub-smoke", `security-ownership-${process.pid}`);
   rmSync(dataDir, { force: true, recursive: true });
-  const registry = new SessionRegistry(dataDir);
+  let registry = new SessionRegistry(dataDir);
+  const runtime = new SessionRuntimeStore(dataDir);
   const aliceTarget = { platform: "telegram" as const, chatId: "shared-chat", userId: "alice-user" };
   const bobTarget = { platform: "telegram" as const, chatId: "shared-chat", userId: "bob-user" };
-  const alice = registry.createSession(aliceTarget, "alice", "pi", cwd, "alice-session");
-  const bob = registry.createSession(bobTarget, "bob", "pi", cwd, "bob-session");
+  const alice = registry.createSession(
+    aliceTarget,
+    "alice",
+    "pi",
+    cwd,
+    (sessionId) => runtime.materialize("alice", sessionId, cwd, UNSAFE_DIRECT_EXECUTION_POLICY, [cwd]),
+    "alice-session",
+  );
+  const bob = registry.createSession(
+    bobTarget,
+    "bob",
+    "pi",
+    cwd,
+    (sessionId) => runtime.materialize("bob", sessionId, cwd, UNSAFE_DIRECT_EXECUTION_POLICY, [cwd]),
+    "bob-session",
+  );
+
+  if (
+    alice.statePath === bob.statePath ||
+    alice.mountPlan.principalId !== "alice" ||
+    alice.mountPlan.workspacePath !== cwd ||
+    !alice.mountPlan.mounts
+      .find((mount) => mount.sandboxPath === "/state")
+      ?.hostPath.startsWith(`${alice.statePath}${path.sep}`) ||
+    (statSync(alice.statePath).mode & 0o777) !== 0o700
+  ) {
+    throw new Error("Per-principal session state or persisted mount metadata was not isolated.");
+  }
 
   if (registry.getActiveForTarget(aliceTarget, "alice")?.id !== alice.id) {
     throw new Error("Alice could not access her own private session.");
@@ -198,6 +241,86 @@ function verifySessionOwnership(cwd: string): void {
     throw new Error("Bob deleted Alice's pending interaction.");
   }
   registry.close();
+
+  const tamper = new DatabaseSync(path.join(dataDir, "hub.sqlite"));
+  tamper.prepare("UPDATE hub_sessions SET mount_plan_json = ? WHERE id = ?").run("{}", bob.id);
+  tamper.close();
+  registry = new SessionRegistry(dataDir);
+  const replacementPolicy = executionPolicySchema.parse({ filesystem: "read-only", sandbox: "required" });
+  const reconciled = registry.reconcileSessionSecurityMetadata(
+    (sessionId, ownerPrincipalId, sessionCwd, existing) =>
+      runtime.materialize(
+        ownerPrincipalId,
+        sessionId,
+        sessionCwd,
+        existing?.executionPolicy ?? replacementPolicy,
+        [cwd],
+      ),
+  );
+  if (
+    reconciled.quarantined !== 1 ||
+    registry.getById(bob.id) !== undefined ||
+    registry.getById(alice.id)?.executionPolicy.filesystem !== "host-unrestricted"
+  ) {
+    throw new Error("Tampered immutable session mount metadata was not quarantined.");
+  }
+  registry.close();
+  const verifyQuarantine = new DatabaseSync(path.join(dataDir, "hub.sqlite"));
+  const quarantined = verifyQuarantine
+    .prepare("SELECT owner_principal_id, authorization_state FROM hub_sessions WHERE id = ?")
+    .get(bob.id) as { owner_principal_id: string | null; authorization_state: string } | undefined;
+  verifyQuarantine.close();
+  if (quarantined?.owner_principal_id !== "bob" || quarantined.authorization_state !== "quarantined") {
+    throw new Error("Tampered session metadata quarantine did not preserve ownership.");
+  }
+
+  const bridge = new AgentToolBridge();
+  bridge.contextFor(alice);
+  const resultMount = alice.mountPlan.mounts.find((mount) => mount.sandboxPath === "/hitch/results");
+  if (!resultMount) {
+    throw new Error("Session mount plan omitted the read-only tool-result mount.");
+  }
+  const symlinkEscape = path.join(dataDir, "tool-result-escape");
+  mkdirSync(symlinkEscape);
+  rmSync(resultMount.hostPath, { recursive: true });
+  try {
+    symlinkSync(symlinkEscape, resultMount.hostPath, "dir");
+    assertRejected(
+      () => bridge.contextFor(alice),
+      "The host tool bridge followed an agent-controlled result-directory symlink.",
+    );
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EPERM")) {
+      throw error;
+    }
+  }
+
+  assertRejected(
+    () =>
+      runtime.materialize(
+        "alice",
+        "outside-policy-mount",
+        cwd,
+        executionPolicySchema.parse({
+          mounts: [{ host_path: path.dirname(cwd), sandbox_path: "/extra", mode: "ro" }],
+        }),
+        [cwd],
+      ),
+    "A session policy mount outside the principal's roots was materialized.",
+  );
+  assertRejected(
+    () =>
+      runtime.materialize(
+        "alice",
+        "reserved-policy-mount",
+        cwd,
+        executionPolicySchema.parse({
+          mounts: [{ host_path: cwd, sandbox_path: "/state/override", mode: "rw" }],
+        }),
+        [cwd],
+      ),
+    "A policy mount over Hitch's private state path was materialized.",
+  );
   rmSync(dataDir, { force: true, recursive: true });
 }
 
@@ -262,13 +385,21 @@ function verifyLegacySessionClaim(cwd: string): void {
   legacy.close();
 
   const registry = new SessionRegistry(dataDir);
+  const runtime = new SessionRuntimeStore(dataDir);
   const assigned = registry.assignLegacySessionOwners((target, sessionCwd) => {
     const canonicalCwd = realDirectoryInsideAllowedRoots(sessionCwd, [cwd]);
     return target.platform === "telegram" && target.userId === "alice-user" && canonicalCwd
       ? { principalId: "alice", canonicalCwd }
       : undefined;
   });
-  if (assigned !== 1 || registry.getById("legacy-owned")?.ownerPrincipalId !== "alice") {
+  const security = registry.reconcileSessionSecurityMetadata((sessionId, ownerPrincipalId, sessionCwd) =>
+    runtime.materialize(ownerPrincipalId, sessionId, sessionCwd, UNSAFE_DIRECT_EXECUTION_POLICY, [cwd]),
+  );
+  if (
+    assigned !== 1 ||
+    security.initialized !== 1 ||
+    registry.getById("legacy-owned")?.ownerPrincipalId !== "alice"
+  ) {
     throw new Error("Resolvable legacy session was not privately claimed by its principal.");
   }
   if (registry.getById("legacy-unknown") !== undefined) {
@@ -286,6 +417,25 @@ function verifyLegacySessionClaim(cwd: string): void {
   verify.close();
   if (unresolved?.owner_principal_id !== null) {
     throw new Error("Unresolvable legacy session was assigned instead of remaining inaccessible.");
+  }
+
+  const corruptState = new DatabaseSync(databasePath);
+  corruptState
+    .prepare("UPDATE hub_sessions SET authorization_state = 'unexpected' WHERE id = 'legacy-owned'")
+    .run();
+  corruptState.close();
+  const failClosed = new SessionRegistry(dataDir);
+  if (failClosed.getById("legacy-owned") !== undefined) {
+    throw new Error("An unknown persisted authorization state was treated as active.");
+  }
+  failClosed.close();
+  const verifyAuthorization = new DatabaseSync(databasePath);
+  const authorization = verifyAuthorization
+    .prepare("SELECT owner_principal_id, authorization_state FROM hub_sessions WHERE id = 'legacy-owned'")
+    .get() as { owner_principal_id: string | null; authorization_state: string } | undefined;
+  verifyAuthorization.close();
+  if (authorization?.owner_principal_id !== "alice" || authorization.authorization_state !== "quarantined") {
+    throw new Error("Invalid authorization state was not quarantined with ownership preserved.");
   }
   rmSync(dataDir, { force: true, recursive: true });
 }
@@ -317,16 +467,50 @@ function verifyCanonicalRoots(cwd: string): void {
   if (realDirectoryInsideAllowedRoots(escape, canonicalRoots) !== undefined) {
     throw new Error("A cwd symlink escaped its principal's canonical allowed root.");
   }
-  const registry = new SessionRegistry(path.join(dataDir, "registry"));
+  const registryDataDir = path.join(dataDir, "registry");
+  let registry = new SessionRegistry(registryDataDir);
+  const runtime = new SessionRuntimeStore(registryDataDir);
   const target = { platform: "fake" as const, chatId: "canonical", userId: "owner" };
-  const aliased = registry.createSession(target, "owner", "pi", linkedRoot, "aliased");
-  const outside = registry.createSession(target, "owner", "pi", outsideRoot, "outside");
+  const aliased = registry.createSession(
+    target,
+    "owner",
+    "pi",
+    linkedRoot,
+    (sessionId) => legacyTestMetadata(runtime, "owner", sessionId, linkedRoot, allowedRoot),
+    "aliased",
+  );
+  const outside = registry.createSession(
+    target,
+    "owner",
+    "pi",
+    outsideRoot,
+    (sessionId) => legacyTestMetadata(runtime, "owner", sessionId, outsideRoot, outsideRoot),
+    "outside",
+  );
+  registry.close();
+  const legacyMetadata = new DatabaseSync(path.join(registryDataDir, "hub.sqlite"));
+  legacyMetadata
+    .prepare("UPDATE hub_sessions SET state_path = NULL, execution_policy_json = NULL, mount_plan_json = NULL")
+    .run();
+  legacyMetadata.close();
+  registry = new SessionRegistry(registryDataDir);
   const reconciled = registry.reconcileOwnedSessionCwds((_ownerPrincipalId, sessionCwd) =>
     realDirectoryInsideAllowedRoots(sessionCwd, canonicalRoots),
+  );
+  const reconciledSecurity = registry.reconcileSessionSecurityMetadata(
+    (sessionId, ownerPrincipalId, sessionCwd) =>
+      runtime.materialize(
+        ownerPrincipalId,
+        sessionId,
+        sessionCwd,
+        UNSAFE_DIRECT_EXECUTION_POLICY,
+        canonicalRoots,
+      ),
   );
   if (
     reconciled.canonicalized !== 1 ||
     reconciled.madeInaccessible !== 1 ||
+    reconciledSecurity.initialized !== 1 ||
     registry.getById(aliased.id)?.cwd !== allowedRoot ||
     registry.getById(outside.id) !== undefined
   ) {
@@ -375,6 +559,80 @@ function verifyCanonicalRoots(cwd: string): void {
     throw new Error("A replaced allowed-root path silently retargeted the principal's immutable root snapshot.");
   }
   rmSync(dataDir, { force: true, recursive: true });
+}
+
+function legacyTestMetadata(
+  runtime: SessionRuntimeStore,
+  principalId: string,
+  sessionId: string,
+  persistedWorkspacePath: string,
+  materializedWorkspacePath: string,
+) {
+  const metadata = runtime.materialize(
+    principalId,
+    sessionId,
+    materializedWorkspacePath,
+    UNSAFE_DIRECT_EXECUTION_POLICY,
+    [materializedWorkspacePath],
+  );
+  return {
+    ...metadata,
+    mountPlan: { ...metadata.mountPlan, workspacePath: persistedWorkspacePath },
+  };
+}
+
+function verifyLegacyStateMigration(cwd: string): void {
+  const dataDir = path.join(cwd, "examples/.remote-agent-hub-smoke", `security-state-migration-${process.pid}`);
+  rmSync(dataDir, { force: true, recursive: true });
+  const legacyAgent = path.join(dataDir, "pi", "agent");
+  const legacySessions = path.join(dataDir, "pi", "sessions");
+  const legacyTools = path.join(dataDir, "tools", "legacy-session");
+  mkdirSync(path.join(legacyTools, "results"), { recursive: true });
+  mkdirSync(legacyAgent, { recursive: true });
+  mkdirSync(legacySessions, { recursive: true });
+  writeFileSync(path.join(legacyAgent, "auth.json"), "legacy-auth");
+  writeFileSync(path.join(legacySessions, "session.jsonl"), "legacy-session");
+  writeFileSync(path.join(legacyTools, "outbox.jsonl"), "");
+  writeFileSync(path.join(legacyTools, "results", "old.json"), "{}\n");
+
+  const runtime = new SessionRuntimeStore(dataDir);
+  if (runtime.migrateLegacySharedPiState(["owner"], "hitch", "owner") !== 2) {
+    throw new Error("Unambiguous legacy Hitch Pi state was not migrated to its principal.");
+  }
+  const metadata = runtime.materialize(
+    "owner",
+    "legacy-session",
+    cwd,
+    UNSAFE_DIRECT_EXECUTION_POLICY,
+    [cwd],
+  );
+  const agentConfig = metadata.mountPlan.mounts.find((mount) => mount.sandboxPath === "/agent-config");
+  const bridgeResults = metadata.mountPlan.mounts.find((mount) => mount.sandboxPath === "/hitch/results");
+  if (
+    runtime.migratedLegacyToolStates() !== 1 ||
+    !agentConfig ||
+    readFileSync(path.join(agentConfig.hostPath, "auth.json"), "utf8") !== "legacy-auth" ||
+    !bridgeResults ||
+    !existsSync(path.join(bridgeResults.hostPath, "old.json"))
+  ) {
+    throw new Error("Legacy Pi/tool continuity was lost during private-state migration.");
+  }
+  rmSync(dataDir, { force: true, recursive: true });
+
+  const ambiguousDataDir = path.join(
+    cwd,
+    "examples/.remote-agent-hub-smoke",
+    `security-state-ambiguous-${process.pid}`,
+  );
+  rmSync(ambiguousDataDir, { force: true, recursive: true });
+  mkdirSync(path.join(ambiguousDataDir, "pi", "agent"), { recursive: true });
+  writeFileSync(path.join(ambiguousDataDir, "pi", "agent", "auth.json"), "legacy-auth");
+  const ambiguousRuntime = new SessionRuntimeStore(ambiguousDataDir);
+  assertRejected(
+    () => ambiguousRuntime.migrateLegacySharedPiState(["alice", "bob"], "hitch"),
+    "Ambiguous legacy shared Pi credentials were assigned to multiple principals.",
+  );
+  rmSync(ambiguousDataDir, { force: true, recursive: true });
 }
 
 function assertRejected(action: () => unknown, message: string): void {

@@ -38,6 +38,10 @@ export function loadConfig(configPath: string): HubConfig {
   const channelCredentialNames = [config.channels.telegram.bot_token_env];
   assertWorkerEnvironmentCredentialNames(channelCredentialNames);
   assertWorkerEnvironmentAllowlist(config.agents.pi.env_allowlist ?? [], channelCredentialNames);
+  const legacyStatePrincipal = config.agents.pi.legacy_state_principal;
+  if (legacyStatePrincipal && !config.users[legacyStatePrincipal]) {
+    throw new Error(`agents.pi.legacy_state_principal is not a configured principal: ${legacyStatePrincipal}`);
+  }
   const configDir = path.dirname(resolvedConfigPath);
   const dataDir = resolvePath(config.data_dir, configDir);
 
