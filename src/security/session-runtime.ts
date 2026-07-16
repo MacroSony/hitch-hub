@@ -284,9 +284,14 @@ export function secureMountHostPath(
   if (!mount) {
     throw new Error(`Session mount plan is missing ${sandboxPath}.`);
   }
-  return mount.purpose === "agent-config" && mount.mode === "ro"
-    ? canonicalDirectory(mount.hostPath, `Session mount ${sandboxPath}`)
-    : assertPrivateDirectory(mount.hostPath, `Session mount ${sandboxPath}`);
+  if (mount.purpose === "agent-config") {
+    const principalRoot = path.dirname(path.dirname(metadata.mountPlan.statePath));
+    const privateAgentConfig = path.join(principalRoot, "shared", "pi", "agent");
+    return normalizeForCompare(mount.hostPath) === normalizeForCompare(privateAgentConfig)
+      ? assertPrivateDirectory(mount.hostPath, `Session mount ${sandboxPath}`)
+      : canonicalDirectory(mount.hostPath, `Session mount ${sandboxPath}`);
+  }
+  return assertPrivateDirectory(mount.hostPath, `Session mount ${sandboxPath}`);
 }
 
 function normalizeExecutionPolicy(

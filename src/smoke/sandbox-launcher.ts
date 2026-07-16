@@ -191,7 +191,7 @@ async function main(): Promise<void> {
       command: "/usr/bin/node",
       args: [
         "-e",
-        `const fs=require("node:fs");let workspaceWritable=true,canonicalWritable=true;try{fs.writeFileSync("/workspace/.hitch-private/probe","bad")}catch{workspaceWritable=false}try{fs.writeFileSync(${JSON.stringify(path.join(nestedDataDir, "probe"))},"bad")}catch{canonicalWritable=false}process.stdout.write(JSON.stringify({workspace:fs.existsSync("/workspace/.hitch-private/secret.txt"),canonical:fs.existsSync(${JSON.stringify(nestedSecret)}),workspaceWritable,canonicalWritable}))`,
+        `const fs=require("node:fs");let workspaceWritable=true,canonicalWritable=true,ordinaryWorkspaceWritable=true,ordinaryCanonicalWritable=true;try{fs.writeFileSync("/workspace/.hitch-private/probe","bad")}catch{workspaceWritable=false}try{fs.writeFileSync(${JSON.stringify(path.join(nestedDataDir, "probe"))},"bad")}catch{canonicalWritable=false}try{fs.writeFileSync("/workspace/readonly-probe","bad")}catch{ordinaryWorkspaceWritable=false}try{fs.writeFileSync(${JSON.stringify(path.join(workspace, "readonly-probe"))},"bad")}catch{ordinaryCanonicalWritable=false}process.stdout.write(JSON.stringify({workspace:fs.existsSync("/workspace/.hitch-private/secret.txt"),canonical:fs.existsSync(${JSON.stringify(nestedSecret)}),workspaceWritable,canonicalWritable,ordinaryWorkspaceWritable,ordinaryCanonicalWritable}))`,
       ],
       cwd: workspace,
       env: { PATH: "/usr/bin:/bin" },
@@ -208,7 +208,9 @@ async function main(): Promise<void> {
       nestedOutput.workspace !== false ||
       nestedOutput.canonical !== false ||
       nestedOutput.workspaceWritable !== false ||
-      nestedOutput.canonicalWritable !== false
+      nestedOutput.canonicalWritable !== false ||
+      nestedOutput.ordinaryWorkspaceWritable !== false ||
+      nestedOutput.ordinaryCanonicalWritable !== false
     ) {
       throw new Error(`Sandbox workspace exposed Hitch private data: ${JSON.stringify(nestedOutput)}`);
     }

@@ -488,6 +488,55 @@ export class SessionRegistry {
     return { initialized, quarantined };
   }
 
+  migrateSystemAgentConfigMounts(agentConfigRoot: string): number {
+    const canonicalAgentConfigRoot = path.resolve(agentConfigRoot);
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NOT NULL AND authorization_state = 'active'",
+      )
+      .all() as SessionRow[];
+    const update = this.db.prepare(
+      `UPDATE hub_sessions
+       SET mount_plan_json = ?, updated_at = ?
+       WHERE id = ? AND owner_principal_id = ? AND mount_plan_json = ? AND authorization_state = 'active'`,
+    );
+    let migrated = 0;
+    for (const row of rows) {
+      const metadata = securityMetadataFromRow(row);
+      if (!metadata || !row.owner_principal_id || !row.mount_plan_json) {
+        continue;
+      }
+      const agentConfigMounts = metadata.mountPlan.mounts.filter(
+        (mount) => mount.purpose === "agent-config" && mount.sandboxPath === "/agent-config",
+      );
+      const [agentConfigMount] = agentConfigMounts;
+      if (
+        agentConfigMounts.length !== 1 ||
+        !agentConfigMount ||
+        agentConfigMount.mode !== "ro" ||
+        path.resolve(agentConfigMount.hostPath) !== canonicalAgentConfigRoot
+      ) {
+        continue;
+      }
+      const mountPlan = mountPlanSchema.parse({
+        ...metadata.mountPlan,
+        mounts: metadata.mountPlan.mounts.map((mount) =>
+          mount === agentConfigMount ? { ...mount, mode: "rw" as const } : mount,
+        ),
+      });
+      migrated += Number(
+        update.run(
+          JSON.stringify(mountPlan),
+          new Date().toISOString(),
+          row.id,
+          row.owner_principal_id,
+          row.mount_plan_json,
+        ).changes,
+      );
+    }
+    return migrated;
+  }
+
   updateStatus(id: string, status: SessionStatus): void {
     this.db
       .prepare("UPDATE hub_sessions SET status = ?, updated_at = ? WHERE id = ?")

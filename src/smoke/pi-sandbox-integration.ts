@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
@@ -26,13 +26,50 @@ async function main(): Promise<void> {
   try {
     await verifyFailClosedSelection(tempDir);
     await verifyUnsafeSessionTightening(tempDir, workspace);
+    await verifySystemAgentConfigMigration(tempDir, workspace);
     await verifyPolicyArgsAndDescendantCleanup(tempDir, workspace);
-    await verifyReadOnlySystemConfig(tempDir, workspace);
-    await verifyRealPiStartsWithReadOnlySystemConfig(tempDir, workspace);
-    await verifyInstalledPiExtensionsStartInSandbox(tempDir, workspace);
+    await verifyWritableSystemConfig(tempDir, workspace);
+    await verifyRealPiStartsWithWritableSystemConfig(tempDir, workspace);
     process.stdout.write("Pi sandbox integration smoke ok\n");
   } finally {
     rmSync(tempDir, { force: true, recursive: true });
+  }
+}
+
+async function verifySystemAgentConfigMigration(tempDir: string, workspace: string): Promise<void> {
+  const dataDir = path.join(tempDir, "system-config-migration-data");
+  const agentConfig = path.join(tempDir, "system-config-migration-agent");
+  const otherConfig = path.join(tempDir, "system-config-migration-other");
+  mkdirSync(agentConfig);
+  mkdirSync(otherConfig);
+  const runtime = new SessionRuntimeStore(dataDir);
+  const registry = new SessionRegistry(dataDir);
+  const target = { platform: "fake" as const, chatId: "migration", userId: "owner" };
+  const createLegacySession = (configRoot: string) =>
+    registry.createSession(target, "owner", "pi", workspace, (sessionId) =>
+      runtime.materialize("owner", sessionId, workspace, DEFAULT_REMOTE_EXECUTION_POLICY, [workspace], {
+        agentConfig: { hostPath: configRoot, mode: "ro" },
+      }),
+    );
+  const migratedSession = createLegacySession(agentConfig);
+  const unrelatedSession = createLegacySession(otherConfig);
+  registry.close();
+
+  const channel: ChannelAdapter = {
+    async *receive() {},
+    async sendText() {},
+  };
+  const hub = new RemoteAgentHub(createConfig(dataDir, workspace, "pi", "system", [], agentConfig), channel);
+  await hub.run();
+
+  const reopened = new SessionRegistry(dataDir);
+  const migratedMount = reopened
+    .getById(migratedSession.id)
+    ?.mountPlan.mounts.find((mount) => mount.sandboxPath === "/agent-config");
+  const unrelated = reopened.getById(unrelatedSession.id);
+  reopened.close();
+  if (migratedMount?.mode !== "rw" || unrelated) {
+    throw new Error(`Hub did not narrowly migrate the trusted system config mount: ${JSON.stringify({ migratedMount, unrelated })}`);
   }
 }
 
@@ -140,68 +177,89 @@ while :; do sleep 60; done
   );
 }
 
-async function verifyReadOnlySystemConfig(tempDir: string, workspace: string): Promise<void> {
+async function verifyWritableSystemConfig(tempDir: string, workspace: string): Promise<void> {
   const scriptPath = path.join(workspace, "fake-pi-system.sh");
+  const unmountedSecret = path.join(tempDir, "system-config-unmounted-secret.txt");
+  writeFileSync(unmountedSecret, "must-not-be-visible");
   writeFileSync(
     scriptPath,
     `#!/bin/sh
 value=$(cat /agent-config/token.txt)
 writable=false
 if printf 'tampered' > /agent-config/token.txt 2>/dev/null; then writable=true; fi
-printf '{"value":"%s","writable":%s,"home":"%s"}' "$value" "$writable" "$HOME" > /state/system-result.json
+mkdir /agent-config/settings.json.lock
+mkdir /agent-config/trust.json.lock
+unmounted_visible=false
+if test -e '${unmountedSecret}'; then unmounted_visible=true; fi
+printf '{"value":"%s","writable":%s,"home":"%s","unmountedVisible":%s}' "$value" "$writable" "$HOME" "$unmounted_visible" > /state/system-result.json
+IFS= read -r command
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","willRetry":false,"messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"RW_CONFIG_OK"}]}]}'
+printf '%s\n' '{"type":"agent_settled"}'
 `,
     { mode: 0o700 },
   );
   const agentConfig = path.join(tempDir, "system-agent-config");
   mkdirSync(agentConfig);
+  chmodSync(agentConfig, 0o755);
   writeFileSync(path.join(agentConfig, "token.txt"), "system-config-readable");
   const dataDir = path.join(tempDir, "system-data");
   const runtime = new SessionRuntimeStore(dataDir);
   const policy = executionPolicySchema.parse({ tools: [], process: false });
-  const options: SessionRuntimeOptions = { agentConfig: { hostPath: agentConfig, mode: "ro" } };
+  const options: SessionRuntimeOptions = { agentConfig: { hostPath: agentConfig, mode: "rw" } };
   const session = createSession(runtime, "system", workspace, policy, options);
   const backend = new PiRpcBackend(createConfig(dataDir, workspace, scriptPath, "system", [], agentConfig));
   try {
     await backend.start(session);
     const resultPath = path.join(session.statePath, "worker", "system-result.json");
     await waitFor(() => existsSync(resultPath), 5_000, "System config mount smoke did not finish.");
+    await backend.send({ text: "exercise writable system config" });
+    const finalText = await waitForFinal(backend, 5_000);
     const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
       value?: string;
       writable?: boolean;
       home?: string;
+      unmountedVisible?: boolean;
     };
-    if (result.value !== "system-config-readable" || result.writable !== false || result.home !== "/state/home") {
-      throw new Error(`System Pi config was not mounted read-only with a private HOME: ${JSON.stringify(result)}`);
+    if (
+      result.value !== "system-config-readable" ||
+      result.writable !== true ||
+      result.home !== "/state/home" ||
+      result.unmountedVisible !== false
+    ) {
+      throw new Error(`System Pi config was not mounted read/write with a private HOME: ${JSON.stringify(result)}`);
     }
-    if (readFileSync(path.join(agentConfig, "token.txt"), "utf8") !== "system-config-readable") {
-      throw new Error("Sandboxed Pi modified the host system config.");
+    if (
+      readFileSync(path.join(agentConfig, "token.txt"), "utf8") !== "tampered" ||
+      !existsSync(path.join(agentConfig, "settings.json.lock")) ||
+      !existsSync(path.join(agentConfig, "trust.json.lock")) ||
+      (statSync(agentConfig).mode & 0o777) !== 0o755 ||
+      finalText !== "RW_CONFIG_OK"
+    ) {
+      throw new Error(`Sandboxed Pi could not complete a prompt with writable system config: ${finalText}`);
     }
   } finally {
     await backend.stop();
   }
 }
 
-async function verifyRealPiStartsWithReadOnlySystemConfig(tempDir: string, workspace: string): Promise<void> {
-  const installedAgentConfig = path.join(os.homedir(), ".pi", "agent");
-  const agentConfig = existsSync(installedAgentConfig)
-    ? installedAgentConfig
-    : path.join(tempDir, "real-pi-agent-config");
-  if (!existsSync(agentConfig)) {
-    mkdirSync(agentConfig);
-    writeFileSync(path.join(agentConfig, "settings.json"), "{}\n");
-  }
+async function verifyRealPiStartsWithWritableSystemConfig(tempDir: string, workspace: string): Promise<void> {
+  const agentConfig = path.join(tempDir, "real-pi-agent-config");
+  mkdirSync(agentConfig);
+  writeFileSync(path.join(agentConfig, "settings.json"), "{}\n");
+  writeFileSync(path.join(agentConfig, "trust.json"), "{}\n");
   const dataDir = path.join(tempDir, "real-pi-data");
   const runtime = new SessionRuntimeStore(dataDir);
   const policy = executionPolicySchema.parse({ tools: [], process: false });
   const session = createSession(runtime, "real-pi", workspace, policy, {
-    agentConfig: { hostPath: agentConfig, mode: "ro" },
+    agentConfig: { hostPath: agentConfig, mode: "rw" },
   });
   const config = createConfig(
     dataDir,
     workspace,
     "pi",
     "system",
-    ["--mode", "rpc", "--no-session", "--no-extensions"],
+    ["--mode", "rpc", "--no-extensions"],
     agentConfig,
   );
   const backend = new PiRpcBackend(config);
@@ -209,38 +267,7 @@ async function verifyRealPiStartsWithReadOnlySystemConfig(tempDir: string, works
     await backend.start(session);
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (!backend.isAlive()) {
-      throw new Error("Real Pi exited while starting with a read-only system config mount.");
-    }
-  } finally {
-    await backend.stop();
-  }
-}
-
-async function verifyInstalledPiExtensionsStartInSandbox(tempDir: string, workspace: string): Promise<void> {
-  const agentConfig = path.join(os.homedir(), ".pi", "agent");
-  if (!existsSync(agentConfig)) {
-    return;
-  }
-  const dataDir = path.join(workspace, ".installed-pi-data");
-  const runtime = new SessionRuntimeStore(dataDir);
-  const policy = executionPolicySchema.parse({ tools: ["*"], process: true });
-  const session = createSession(runtime, "installed-pi", workspace, policy, {
-    agentConfig: { hostPath: agentConfig, mode: "ro" },
-  });
-  const config = createConfig(
-    dataDir,
-    workspace,
-    "pi",
-    "system",
-    ["--mode", "rpc", "--no-session"],
-    agentConfig,
-  );
-  const backend = new PiRpcBackend(config);
-  try {
-    await backend.start(session);
-    await new Promise((resolve) => setTimeout(resolve, 750));
-    if (!backend.isAlive()) {
-      throw new Error("Installed Pi extensions exited during sandbox startup.");
+      throw new Error("Real Pi exited while creating lock files in a writable system config mount.");
     }
   } finally {
     await backend.stop();
@@ -334,6 +361,29 @@ async function waitFor(condition: () => boolean, timeoutMs: number, message: str
   }
   if (!condition()) {
     throw new Error(message);
+  }
+}
+
+async function waitForFinal(backend: PiRpcBackend, timeoutMs: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        for await (const event of backend.events()) {
+          if (event.type === "final") {
+            return event.text;
+          }
+        }
+        throw new Error("Pi event stream closed before a final response.");
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Timed out waiting for Pi's final response.")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
 

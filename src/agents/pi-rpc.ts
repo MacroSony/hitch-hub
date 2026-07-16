@@ -423,7 +423,7 @@ function trustedAgentConfigForSession(
       throw new Error("Sandboxed system Pi config requires a resolved agents.pi.system_config_root.");
     }
     expectedHostPath = config.piSystemConfigRoot;
-    expectedMode = "ro";
+    expectedMode = "rw";
   } else if (config.agents.pi.config_scope === "hitch") {
     const principalStateRoot = path.dirname(path.dirname(session.statePath));
     expectedHostPath = path.join(principalStateRoot, "shared", "pi", "agent");

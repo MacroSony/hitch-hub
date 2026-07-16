@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
@@ -105,6 +105,11 @@ function canonicalizePiSystemConfigRoot(candidate: string): string {
   ]);
   if (forbidden.has(canonical)) {
     throw new Error(`Pi system config root is too broad to mount into a worker: ${canonical}`);
+  }
+  try {
+    accessSync(canonical, constants.R_OK | constants.W_OK);
+  } catch {
+    throw new Error(`Pi system config root must be readable and writable by Hitch: ${canonical}`);
   }
   return canonical;
 }

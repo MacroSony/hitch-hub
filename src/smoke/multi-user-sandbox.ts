@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
@@ -115,6 +115,27 @@ function verifySystemScopeRejectsMultiplePrincipals(
     "cannot be combined with unsafe_allow_all",
     "A shared system Pi identity was accepted with unsafe_allow_all.",
   );
+
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    chmodSync(systemConfig, 0o500);
+    try {
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          data_dir: path.join(tempDir, "invalid-read-only-config-data"),
+          users: { alice: { allowed_roots: [aliceWorkspace] } },
+          agents: { pi: { config_scope: "system", system_config_root: systemConfig } },
+        }),
+      );
+      assertConfigRejected(
+        configPath,
+        "must be readable and writable by Hitch",
+        "A non-writable system Pi config root was accepted.",
+      );
+    } finally {
+      chmodSync(systemConfig, 0o700);
+    }
+  }
 }
 
 function assertConfigRejected(configPath: string, expected: string, message: string): void {

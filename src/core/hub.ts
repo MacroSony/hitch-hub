@@ -76,6 +76,7 @@ export class RemoteAgentHub {
   private readonly quarantinedSessionSecurityCount: number;
   private readonly migratedLegacyPiStateCount: number;
   private readonly migratedLegacyToolStateCount: number;
+  private readonly migratedWritableSystemConfigCount: number;
   private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -108,6 +109,10 @@ export class RemoteAgentHub {
       config.agents.pi.config_scope,
       config.agents.pi.legacy_state_principal,
     );
+    this.migratedWritableSystemConfigCount =
+      config.agents.pi.config_scope === "system" && config.piSystemConfigRoot
+        ? this.sessions.migrateSystemAgentConfigMounts(config.piSystemConfigRoot)
+        : 0;
     const reconciledSecurity = this.sessions.reconcileSessionSecurityMetadata(
       (sessionId, ownerPrincipalId, cwd, existing) => {
         const allowedRoots = this.principals.allowedRootsFor(ownerPrincipalId);
@@ -202,6 +207,7 @@ export class RemoteAgentHub {
         quarantinedSessionSecurity: this.quarantinedSessionSecurityCount,
         migratedLegacyPiState: this.migratedLegacyPiStateCount,
         migratedLegacyToolState: this.migratedLegacyToolStateCount,
+        migratedWritableSystemConfig: this.migratedWritableSystemConfigCount,
       },
     });
     this.startWorkerSweep();
@@ -466,7 +472,7 @@ export class RemoteAgentHub {
         : "active session: none",
       ...(operator
         ? [
-            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}; canonicalized session cwds ${this.canonicalizedSessionCwdCount}; inaccessible sessions ${this.inaccessibleSessionCount}; initialized session security ${this.initializedSessionSecurityCount}; quarantined session security ${this.quarantinedSessionSecurityCount}; migrated legacy Pi state ${this.migratedLegacyPiStateCount}; migrated legacy tool state ${this.migratedLegacyToolStateCount}`,
+            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}; canonicalized session cwds ${this.canonicalizedSessionCwdCount}; inaccessible sessions ${this.inaccessibleSessionCount}; initialized session security ${this.initializedSessionSecurityCount}; quarantined session security ${this.quarantinedSessionSecurityCount}; migrated legacy Pi state ${this.migratedLegacyPiStateCount}; migrated legacy tool state ${this.migratedLegacyToolStateCount}; migrated writable system config ${this.migratedWritableSystemConfigCount}`,
           ]
         : []),
     ];
@@ -1654,7 +1660,7 @@ export class RemoteAgentHub {
 
 function sessionRuntimeOptions(config: HubConfig): SessionRuntimeOptions {
   return config.agents.pi.config_scope === "system" && config.piSystemConfigRoot
-    ? { agentConfig: { hostPath: config.piSystemConfigRoot, mode: "ro" } }
+    ? { agentConfig: { hostPath: config.piSystemConfigRoot, mode: "rw" } }
     : {};
 }
 
