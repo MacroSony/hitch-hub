@@ -386,7 +386,7 @@ class SlowQueueChannel implements ChannelAdapter {
 
   async sendText(_target: ChatTarget, text: string): Promise<void> {
     if (text === "queue blocker") {
-      await sleep(50);
+      await sleep(150);
     }
     this.texts.push(text);
   }
@@ -660,8 +660,8 @@ async function runDurableDeliveryScenario(): Promise<void> {
   const target: ChatTarget = { platform: "fake", chatId: "durable", userId: "smoke" };
   const store = new DeliveryStore(dataDir);
   const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
-    sendTimeoutMs: 200,
-    queueTtlMs: 20,
+    sendTimeoutMs: 500,
+    queueTtlMs: 100,
     store,
   });
 
