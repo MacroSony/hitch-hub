@@ -54,6 +54,28 @@ export const executionPolicySchema = z
       }
       sandboxPaths.add(mount.sandbox_path);
     }
+    for (let leftIndex = 0; leftIndex < policy.mounts.length; leftIndex += 1) {
+      const left = policy.mounts[leftIndex];
+      if (!left) {
+        continue;
+      }
+      for (let rightIndex = leftIndex + 1; rightIndex < policy.mounts.length; rightIndex += 1) {
+        const right = policy.mounts[rightIndex];
+        if (!right) {
+          continue;
+        }
+        if (
+          right.sandbox_path.startsWith(`${left.sandbox_path}/`) ||
+          left.sandbox_path.startsWith(`${right.sandbox_path}/`)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["mounts", rightIndex, "sandbox_path"],
+            message: `Overlapping policy mount paths are not allowed: ${left.sandbox_path} and ${right.sandbox_path}`,
+          });
+        }
+      }
+    }
   });
 
 export type ExecutionPolicyInput = z.input<typeof executionPolicySchema>;

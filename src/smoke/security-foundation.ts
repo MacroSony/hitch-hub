@@ -158,6 +158,16 @@ function main(): void {
     "Duplicate sandbox mount target was accepted.",
   );
   assertRejected(
+    () =>
+      executionPolicySchema.parse({
+        mounts: [
+          { host_path: cwd, sandbox_path: "/data", mode: "rw" },
+          { host_path: cwd, sandbox_path: "/data/private", mode: "ro" },
+        ],
+      }),
+    "Overlapping policy mount targets were accepted.",
+  );
+  assertRejected(
     () => executionPolicySchema.parse({ filesystem: "host-unrestricted", sandbox: "required" }),
     "Unrestricted host policy was accepted with a required sandbox.",
   );
