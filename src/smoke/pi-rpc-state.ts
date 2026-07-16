@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { loadConfig } from "../config/load-config.js";
 import type { HubConfig } from "../config/schema.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
@@ -47,20 +48,71 @@ function resolvePiSpawn(command: string, args: string[]): { command: string; arg
   };
 }
 
-function buildPiEnv(config: HubConfig): NodeJS.ProcessEnv {
+type PiSmokeEnvironment = {
+  env: NodeJS.ProcessEnv;
+  cleanup: () => void;
+};
+
+function buildPiEnv(config: HubConfig): PiSmokeEnvironment {
   const env = { ...process.env };
   if (config.agents.pi.config_scope !== "hitch") {
-    return env;
+    return { env, cleanup: () => undefined };
   }
 
-  const piAgentDir = path.join(config.dataDir, "pi", "agent");
-  const piSessionDir = path.join(config.dataDir, "pi", "sessions");
+  // This smoke probes Pi's RPC protocol, not Hitch's persistent-state migration.
+  // A private scratch root prevents it from recreating the removed legacy
+  // data_dir/pi layout or colliding with repeated hub smoke runs.
+  const scratchRoot = mkdtempSync(path.join(os.tmpdir(), "hitch-pi-rpc-"));
+  const piAgentDir = path.join(scratchRoot, "agent");
+  const piSessionDir = path.join(scratchRoot, "sessions");
   mkdirSync(piAgentDir, { recursive: true });
   mkdirSync(piSessionDir, { recursive: true });
   env.PI_CODING_AGENT_DIR = piAgentDir;
   env.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
   env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
-  return env;
+  return {
+    env,
+    cleanup: () => rmSync(scratchRoot, { recursive: true, force: true }),
+  };
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve();
+      };
+      killer.once("error", () => {
+        child.kill("SIGTERM");
+        finish();
+      });
+      killer.once("close", finish);
+    });
+  } else {
+    child.kill("SIGTERM");
+  }
+  await new Promise<void>((resolve) => {
+    const forceTimer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+    const giveUpTimer = setTimeout(resolve, 3_000);
+    child.once("close", () => {
+      clearTimeout(forceTimer);
+      clearTimeout(giveUpTimer);
+      resolve();
+    });
+  });
 }
 
 async function main(): Promise<void> {
@@ -68,49 +120,82 @@ async function main(): Promise<void> {
   const config = loadConfig(args.configPath);
   const pi = config.agents.pi;
   const spawnSpec = resolvePiSpawn(pi.command, [...pi.default_args, "--no-session"]);
+  const smokeEnvironment = buildPiEnv(config);
 
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd: process.cwd(),
-    env: buildPiEnv(config),
+    env: smokeEnvironment.env,
     windowsHide: true,
   });
 
-  const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("Timed out waiting for Pi RPC get_state response."));
-    }, 10_000);
-
-    attachJsonlReader(
-      child.stdout,
-      (value) => {
-        if (value && typeof value === "object" && (value as Record<string, unknown>).command === "get_state") {
-          clearTimeout(timeout);
-          child.kill("SIGTERM");
-          resolve(value as Record<string, unknown>);
+  try {
+    const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      let settled = false;
+      const succeed = (value: Record<string, unknown>) => {
+        if (settled) {
+          return;
         }
-      },
-      reject,
-    );
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim();
-      if (text.length > 0) {
-        process.stderr.write(`${text}\n`);
-      }
-    });
-
-    child.on("exit", (code, signal) => {
-      if (code !== null && code !== 0) {
+        settled = true;
         clearTimeout(timeout);
-        reject(new Error(`Pi RPC exited before get_state response: code=${code} signal=${signal ?? ""}`));
-      }
+        resolve(value);
+      };
+      const fail = (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      };
+      const timeout = setTimeout(() => {
+        fail(new Error("Timed out waiting for Pi RPC get_state response."));
+      }, 10_000);
+
+      attachJsonlReader(
+        child.stdout,
+        (value) => {
+          if (!value || typeof value !== "object") {
+            return;
+          }
+          const response = value as Record<string, unknown>;
+          if (response.type !== "response" || response.id !== "smoke-state") {
+            return;
+          }
+          if (response.command !== "get_state" || response.success !== true) {
+            fail(new Error(`Pi RPC get_state failed: ${JSON.stringify(response)}`));
+            return;
+          }
+          if (!response.data || typeof response.data !== "object" || Array.isArray(response.data)) {
+            fail(new Error("Pi RPC get_state returned no state object."));
+            return;
+          }
+          succeed(response);
+        },
+        fail,
+      );
+
+      child.stderr.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8").trim();
+        if (text.length > 0) {
+          process.stderr.write(`${text}\n`);
+        }
+      });
+
+      child.once("error", fail);
+      child.once("exit", (code, signal) => {
+        if (!settled) {
+          fail(new Error(`Pi RPC exited before get_state response: code=${code ?? ""} signal=${signal ?? ""}`));
+        }
+      });
+
+      child.stdin.write(`${JSON.stringify({ id: "smoke-state", type: "get_state" })}\n`);
     });
 
-    child.stdin.write(`${JSON.stringify({ id: "smoke-state", type: "get_state" })}\n`);
-  });
-
-  process.stdout.write(`Pi RPC get_state success=${String(result.success)}\n`);
+    process.stdout.write(`Pi RPC get_state success=${String(result.success)}\n`);
+  } finally {
+    await stopChild(child);
+    smokeEnvironment.cleanup();
+  }
 }
 
 main().catch((error: unknown) => {
