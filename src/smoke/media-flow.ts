@@ -1,4 +1,16 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
@@ -7,7 +19,12 @@ import type { ChannelAdapter, InboundChatEvent, OutboundArtifact, SendOptions } 
 import type { ChatTarget, HubAttachment, HubSession } from "../core/types.js";
 import { MediaCache } from "../core/media-cache.js";
 import { DeliveryStore } from "../core/delivery-store.js";
+import { AuditLog } from "../core/audit-log.js";
 import { RemoteAgentHub } from "../core/hub.js";
+import { HubToolService } from "../core/hub-tools.js";
+import { resolveSessionMediaPath } from "../core/tool-bridge.js";
+import { executionPolicySchema } from "../security/policy.js";
+import { SessionRuntimeStore } from "../security/session-runtime.js";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -16,6 +33,7 @@ const PNG_1X1 = Buffer.from(
 
 class MediaFlowChannel implements ChannelAdapter {
   readonly artifacts: OutboundArtifact[] = [];
+  readonly artifactBytes: Buffer[] = [];
   readonly texts: string[] = [];
 
   constructor(private readonly events: InboundChatEvent[]) {}
@@ -31,6 +49,7 @@ class MediaFlowChannel implements ChannelAdapter {
   }
 
   async sendArtifact(_target: ChatTarget, artifact: OutboundArtifact, _opts?: SendOptions): Promise<void> {
+    this.artifactBytes.push(readFileSync(artifact.path));
     this.artifacts.push(artifact);
   }
 }
@@ -170,6 +189,9 @@ async function main(): Promise<void> {
   await runExplicitSendScenario();
   await runAutoDiscoveryDisabledScenario();
   await runToolBridgeScenario();
+  await runToolBridgeIsolationScenario();
+  runMountResolutionScenario();
+  await runImmutableSnapshotScenario();
   process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
 }
 
@@ -247,7 +269,11 @@ async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; 
   await hub.run();
 
   assertAttachmentFlow(backend.receivedInput?.attachments);
-  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath) {
+  if (
+    channel.artifacts.length !== 1 ||
+    !channel.artifactBytes[0]?.equals(PNG_1X1) ||
+    existsSync(channel.artifacts[0]?.path ?? "")
+  ) {
     throw new Error(`Expected outbound artifact delivery for ${artifactPath}`);
   }
   const toolStarted = channel.texts.find((text) => text.startsWith("Tool started: read_file"));
@@ -346,7 +372,12 @@ async function runExplicitSendScenario(): Promise<void> {
   const hub = new RemoteAgentHub(mediaFlowConfig(dataDir, false, false), channel, () => new MediaFlowBackend(artifactPath));
   await hub.run();
 
-  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath || channel.artifacts[0].caption !== "explicit caption") {
+  if (
+    channel.artifacts.length !== 1 ||
+    !channel.artifactBytes[0]?.equals(PNG_1X1) ||
+    channel.artifacts[0]?.caption !== "explicit caption" ||
+    existsSync(channel.artifacts[0]?.path ?? "")
+  ) {
     throw new Error("Expected explicit !send to deliver exactly one outbound media artifact.");
   }
   if (!channel.texts.some((text) => text === "Media sent: explicit.png")) {
@@ -398,7 +429,8 @@ async function runToolBridgeScenario(): Promise<void> {
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
 
-  const artifactPath = path.join(dataDir, "bridge.png");
+  const artifactPath = path.join(path.dirname(dataDir), "bridge-workspace.png");
+  rmSync(artifactPath, { force: true });
   writeFileSync(artifactPath, PNG_1X1);
 
   const target: ChatTarget = {
@@ -420,10 +452,18 @@ async function runToolBridgeScenario(): Promise<void> {
       receivedAt: new Date().toISOString(),
     },
   ]);
-  const hub = new RemoteAgentHub(mediaFlowConfig(dataDir, false, false), channel, () => new BridgeMediaBackend(artifactPath));
+  const config = mediaFlowConfig(dataDir, false, false);
+  config.outboundRoots.push(path.dirname(dataDir));
+  config.media.outbound_roots.push(path.dirname(dataDir));
+  const hub = new RemoteAgentHub(config, channel, () => new BridgeMediaBackend(artifactPath));
   await hub.run();
 
-  if (channel.artifacts.length !== 1 || channel.artifacts[0]?.path !== artifactPath || channel.artifacts[0].caption !== "bridge caption") {
+  if (
+    channel.artifacts.length !== 1 ||
+    !channel.artifactBytes[0]?.equals(PNG_1X1) ||
+    channel.artifacts[0]?.caption !== "bridge caption" ||
+    existsSync(channel.artifacts[0]?.path ?? "")
+  ) {
     throw new Error("Expected tool bridge send_media request to deliver one outbound media artifact.");
   }
   const resultPath = findBridgeResultPath(dataDir);
@@ -457,6 +497,211 @@ async function runToolBridgeScenario(): Promise<void> {
   if (readFileSync(path.join(dataDir, "hub.sqlite")).includes(Buffer.from(artifactPath))) {
     throw new Error("Delivery ledger persisted an artifact path.");
   }
+  rmSync(artifactPath, { force: true });
+}
+
+async function runToolBridgeIsolationScenario(): Promise<void> {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "hitch-media-mount-isolation-"));
+  try {
+    const workspace = path.join(tempRoot, "workspace");
+    const sibling = path.join(tempRoot, "sibling");
+    mkdirSync(workspace);
+    mkdirSync(sibling);
+    const siblingArtifact = path.join(sibling, "not-mounted.png");
+    writeFileSync(siblingArtifact, PNG_1X1);
+    const escapedLink = path.join(workspace, "escaped.png");
+    symlinkSync(siblingArtifact, escapedLink);
+
+    await assertBridgeMediaBlocked(tempRoot, workspace, siblingArtifact, "unmounted-sibling");
+    await assertBridgeMediaBlocked(tempRoot, workspace, escapedLink, "symlink-escape");
+    await assertBridgeMediaBlocked(tempRoot, workspace, "/agent-config/auth.json", "agent-config");
+    const globallyBlocked = path.join(workspace, "mounted-but-not-outbound.png");
+    writeFileSync(globallyBlocked, PNG_1X1);
+    await assertBridgeMediaBlocked(
+      tempRoot,
+      workspace,
+      globallyBlocked,
+      "mounted-but-not-outbound",
+      sibling,
+      "outbound roots",
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function assertBridgeMediaBlocked(
+  tempRoot: string,
+  workspace: string,
+  requestedPath: string,
+  scenario: string,
+  globalOutboundRoot = tempRoot,
+  expectedMessage = "active session mount",
+): Promise<void> {
+  const dataDir = path.join(tempRoot, `data-${scenario}`);
+  mkdirSync(dataDir);
+  const target: ChatTarget = {
+    platform: "fake",
+    chatId: `media-flow-bridge-${scenario}`,
+    userId: "media-user",
+  };
+  const channel = new MediaFlowChannel([
+    { id: "new", target, text: "!new pi", receivedAt: new Date().toISOString() },
+    { id: "prompt", target, text: "Attempt a session-scoped media send.", receivedAt: new Date().toISOString() },
+  ]);
+  const config = mediaFlowConfig(dataDir, false, false);
+  config.default_cwd = workspace;
+  config.defaultCwd = workspace;
+  config.allowedRoots = [tempRoot];
+  config.principalRoots = { media: [tempRoot] };
+  config.outboundRoots = [globalOutboundRoot];
+  config.users.media!.allowed_roots = [tempRoot];
+  config.media.outbound_roots = [globalOutboundRoot];
+  const hub = new RemoteAgentHub(config, channel, () => new BridgeMediaBackend(requestedPath));
+  await hub.run();
+
+  if (channel.artifacts.length !== 0) {
+    throw new Error(`Session bridge delivered media outside its attested mount (${scenario}).`);
+  }
+  const resultPath = findBridgeResultPath(dataDir);
+  const result = resultPath
+    ? JSON.parse(readFileSync(resultPath, "utf8")) as { status?: string; message?: string }
+    : undefined;
+  if (result?.status !== "failed" || !result.message?.includes(expectedMessage)) {
+    throw new Error(`Session bridge did not fail closed for ${scenario}: ${JSON.stringify(result)}`);
+  }
+}
+
+function runMountResolutionScenario(): void {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "hitch-media-mount-resolution-"));
+  try {
+    const workspace = path.join(tempRoot, "workspace");
+    const policyDirectory = path.join(tempRoot, "policy-directory");
+    const policyFile = path.join(tempRoot, "policy-file.png");
+    mkdirSync(workspace);
+    mkdirSync(policyDirectory);
+    const workspaceFile = path.join(workspace, "workspace.png");
+    const policyDirectoryFile = path.join(policyDirectory, "directory.png");
+    writeFileSync(workspaceFile, PNG_1X1);
+    writeFileSync(policyDirectoryFile, PNG_1X1);
+    writeFileSync(policyFile, PNG_1X1);
+    const dataDir = path.join(workspace, ".hitch-data");
+    const runtime = new SessionRuntimeStore(dataDir);
+    const security = runtime.materialize(
+      "media",
+      "mount-resolution",
+      workspace,
+      executionPolicySchema.parse({
+        mounts: [
+          { host_path: policyDirectory, sandbox_path: "/media-directory", mode: "rw" },
+          { host_path: policyFile, sandbox_path: "/media-file.png", mode: "ro" },
+        ],
+      }),
+      [tempRoot],
+    );
+
+    assertResolvedMediaPath(security.mountPlan, "workspace.png", workspaceFile, "relative workspace");
+    assertResolvedMediaPath(security.mountPlan, "/workspace/workspace.png", workspaceFile, "absolute workspace");
+    assertResolvedMediaPath(
+      security.mountPlan,
+      "/media-directory/directory.png",
+      policyDirectoryFile,
+      "policy directory",
+    );
+    assertResolvedMediaPath(security.mountPlan, "/media-file.png", policyFile, "exact policy file");
+    assertResolutionRejected(security.mountPlan, "/media-file.png/child", "descends through a file mount");
+
+    const maskedArtifact = path.join(dataDir, "media", "outbound", "masked.png");
+    mkdirSync(path.dirname(maskedArtifact), { recursive: true });
+    writeFileSync(maskedArtifact, PNG_1X1);
+    const relativeDataDir = path.relative(workspace, dataDir).split(path.sep).join("/");
+    assertResolutionRejected(
+      security.mountPlan,
+      `/workspace/${relativeDataDir}/media/outbound/masked.png`,
+      "masked from the active session",
+    );
+    assertResolutionRejected(security.mountPlan, maskedArtifact, "masked from the active session");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function runImmutableSnapshotScenario(): Promise<void> {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "hitch-media-snapshot-"));
+  try {
+    const dataDir = path.join(tempRoot, "data");
+    const workspace = path.join(tempRoot, "workspace");
+    mkdirSync(dataDir);
+    mkdirSync(workspace);
+    const sourcePath = path.join(workspace, "mutable.png");
+    const replacementPath = path.join(tempRoot, "replacement.txt");
+    writeFileSync(sourcePath, PNG_1X1);
+    writeFileSync(replacementPath, "replacement content must not be delivered");
+    const config = mediaFlowConfig(dataDir, false, false);
+    config.outboundRoots = [workspace];
+    config.media.outbound_roots = [workspace];
+    let deliveredBytes: Buffer | undefined;
+    let snapshotPath: string | undefined;
+    const channel = new MediaFlowChannel([]);
+    const tools = new HubToolService(
+      config,
+      channel,
+      new AuditLog(dataDir),
+      async () => undefined,
+      async (_target, artifact) => {
+        snapshotPath = artifact.path;
+        if ((statSync(artifact.path).mode & 0o777) !== 0o400) {
+          throw new Error("Validated media snapshot was not read-only.");
+        }
+        rmSync(sourcePath);
+        symlinkSync(replacementPath, sourcePath);
+        deliveredBytes = readFileSync(artifact.path);
+      },
+    );
+    const result = await tools.sendMedia(
+      { platform: "fake", chatId: "snapshot", userId: "media-user" },
+      { path: sourcePath, kind: "image" },
+      { source: "agent_tool", requiredAllowedRoots: [workspace] },
+    );
+    if (
+      result.status !== "sent" ||
+      !deliveredBytes?.equals(PNG_1X1) ||
+      !snapshotPath ||
+      existsSync(snapshotPath)
+    ) {
+      throw new Error(`Media delivery did not use and clean an immutable snapshot: ${JSON.stringify(result)}`);
+    }
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function assertResolvedMediaPath(
+  mountPlan: HubSession["mountPlan"],
+  requestedPath: string,
+  expectedPath: string,
+  scenario: string,
+): void {
+  const result = resolveSessionMediaPath(mountPlan, requestedPath);
+  if (result.hostPath !== expectedPath) {
+    throw new Error(`Media mount resolution failed for ${scenario}: ${JSON.stringify(result)}`);
+  }
+}
+
+function assertResolutionRejected(
+  mountPlan: HubSession["mountPlan"],
+  requestedPath: string,
+  expectedMessage: string,
+): void {
+  try {
+    resolveSessionMediaPath(mountPlan, requestedPath);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(expectedMessage)) {
+      return;
+    }
+    throw error;
+  }
+  throw new Error(`Media mount resolution accepted ${requestedPath}; expected ${expectedMessage}.`);
 }
 
 function findBridgeResultPath(dataDir: string): string | undefined {

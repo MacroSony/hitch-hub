@@ -69,11 +69,15 @@ export class AgentToolBridge {
 
   async processPending(
     context: AgentToolContext,
+    session: Pick<HubSession, "id" | "statePath" | "mountPlan">,
     target: ChatTarget,
     tools: HubToolService,
     deliveryContext: HubToolDeliveryContext = { sessionId: context.sessionId },
   ): Promise<void> {
     this.assertContextPaths(context);
+    if (session.id !== context.sessionId || session.statePath !== context.statePath) {
+      throw new Error(`Session tool bridge context does not match its session: ${context.sessionId}`);
+    }
     if (!existsSync(context.outboxPath)) {
       return;
     }
@@ -96,13 +100,14 @@ export class AgentToolBridge {
         continue;
       }
 
-      const result = await this.handleRequest(context, target, tools, request, id, deliveryContext);
+      const result = await this.handleRequest(context, session, target, tools, request, id, deliveryContext);
       this.writeResult(context, id, result);
     }
   }
 
   private async handleRequest(
     context: AgentToolContext,
+    session: Pick<HubSession, "mountPlan">,
     target: ChatTarget,
     tools: HubToolService,
     request: ToolRequest,
@@ -119,12 +124,28 @@ export class AgentToolBridge {
       return failedToolResult(id, target, "", "send_media requires a path.");
     }
 
+    let resolved: { hostPath: string; mountRoot: string };
+    try {
+      resolved = resolveSessionMediaPath(session.mountPlan, request.path);
+    } catch (error) {
+      return failedToolResult(
+        id,
+        target,
+        request.path,
+        error instanceof Error ? error.message : "Media path could not be resolved through the active session.",
+      );
+    }
     const input: SendMediaInput = {
-      path: request.path,
+      path: resolved.hostPath,
       ...(typeof request.caption === "string" && request.caption.length > 0 ? { caption: request.caption } : {}),
       ...(request.kind === "image" || request.kind === "file" ? { kind: request.kind } : {}),
     };
-    return tools.sendMedia(target, input, { source: "agent_tool", notifyOnFailure: true, deliveryContext });
+    return tools.sendMedia(target, input, {
+      source: "agent_tool",
+      notifyOnFailure: true,
+      requiredAllowedRoots: [resolved.mountRoot],
+      deliveryContext,
+    });
   }
 
   private writeResult(context: AgentToolContext, id: string, result: SendMediaResult): void {
@@ -203,6 +224,47 @@ export class AgentToolBridge {
       throw new Error(`Session tool bridge escaped its private state: ${context.sessionId}`);
     }
   }
+}
+
+export function resolveSessionMediaPath(
+  mountPlan: HubSession["mountPlan"],
+  requestedPath: string,
+): { hostPath: string; mountRoot: string } {
+  if (requestedPath.includes("\0")) {
+    throw new Error("Media path contains an invalid NUL byte.");
+  }
+  const sandboxPath = path.posix.resolve("/workspace", requestedPath);
+  if (mountPlan.masks.some((mask) => isPosixPathInside(sandboxPath, mask.sandboxPath))) {
+    throw new Error(`Media path is masked from the active session: ${requestedPath}`);
+  }
+  const eligible = mountPlan.mounts
+    .filter((mount) => mount.purpose === "workspace" || mount.purpose === "policy")
+    .filter((mount) => isPosixPathInside(sandboxPath, mount.sandboxPath))
+    .sort((left, right) => right.sandboxPath.length - left.sandboxPath.length);
+  const mount = eligible[0];
+  if (!mount) {
+    throw new Error(`Media path is outside the active session mounts: ${requestedPath}`);
+  }
+
+  const canonicalRoot = realpathSync.native(mount.hostPath);
+  const rootStat = lstatSync(canonicalRoot);
+  const relative = path.posix.relative(mount.sandboxPath, sandboxPath);
+  if (rootStat.isFile() && relative !== "") {
+    throw new Error(`Media path descends through a file mount: ${requestedPath}`);
+  }
+  const candidate = rootStat.isFile()
+    ? canonicalRoot
+    : path.join(canonicalRoot, ...relative.split("/").filter(Boolean));
+  const canonicalCandidate = realpathSync.native(candidate);
+  if (!isPathInsideAllowedRoots(canonicalCandidate, [canonicalRoot])) {
+    throw new Error(`Media path escapes its active session mount: ${requestedPath}`);
+  }
+  return { hostPath: canonicalCandidate, mountRoot: canonicalRoot };
+}
+
+function isPosixPathInside(candidate: string, root: string): boolean {
+  const relative = path.posix.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("../") && relative !== ".." && !path.posix.isAbsolute(relative));
 }
 
 function failedToolResult(id: string, target: ChatTarget, mediaPath: string, message: string): SendMediaResult {

@@ -1156,7 +1156,7 @@ export class RemoteAgentHub {
         do {
           pump.requested = false;
           const turn = this.activeTurns.get(session.id);
-          await this.toolBridge.processPending(pump.context, pump.target, this.tools, {
+          await this.toolBridge.processPending(pump.context, session, pump.target, this.tools, {
             sessionId: session.id,
             ...(turn ? { turnId: turn.id } : {}),
           });

@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
 import type { ChannelAdapter, OutboundArtifact } from "../channels/types.js";
@@ -28,6 +41,7 @@ type SendMediaOptions = {
   source?: "hub_command" | "auto_discovery" | "agent_tool";
   notifyOnFailure?: boolean;
   extraAllowedRoots?: string[];
+  requiredAllowedRoots?: string[];
   deliveryContext?: HubToolDeliveryContext;
 };
 
@@ -72,22 +86,26 @@ export class HubToolService {
     const source = options.source ?? "agent_tool";
     const context = options.deliveryContext ?? this.deliveryContextFor(target);
 
+    let prepared: PreparedMedia | undefined;
     try {
-      const artifact = this.validateMediaInput(input, options.extraAllowedRoots ?? []);
-      const size = statSync(artifact.path).size;
-      await this.sendArtifact(target, artifact, {
+      prepared = this.prepareMediaInput(
+        input,
+        options.extraAllowedRoots ?? [],
+        options.requiredAllowedRoots ?? [],
+      );
+      await this.sendArtifact(target, prepared.artifact, {
         deliveryId,
         source,
-        contentLength: size,
+        contentLength: prepared.size,
         ...(context.sessionId || context.turnId ? { deliveryContext: context } : {}),
       });
       const result: SendMediaResult = {
         deliveryId,
         status: "sent",
         platform: target.platform,
-        path: artifact.path,
-        kind: artifact.kind,
-        size,
+        path: prepared.sourcePath,
+        kind: prepared.artifact.kind,
+        size: prepared.size,
       };
       await this.audit.write({
         type: "artifact.delivery",
@@ -132,25 +150,50 @@ export class HubToolService {
         await this.notifyFailure(target, input.path, message, context);
       }
       return result;
+    } finally {
+      if (prepared?.snapshotPath && existsSync(prepared.snapshotPath)) {
+        unlinkSync(prepared.snapshotPath);
+      }
     }
   }
 
-  private validateMediaInput(input: SendMediaInput, extraAllowedRoots: string[]): OutboundArtifact {
+  private prepareMediaInput(
+    input: SendMediaInput,
+    extraAllowedRoots: string[],
+    requiredAllowedRoots: string[],
+  ): PreparedMedia {
     const realPath = realpathSync(input.path);
-    const stats = statSync(realPath);
-    if (!stats.isFile()) {
-      throw new Error(`Media path is not a file: ${input.path}`);
-    }
-    if (stats.size > this.config.media.max_outbound_bytes) {
-      throw new Error(`Media is too large (${stats.size} bytes > ${this.config.media.max_outbound_bytes} byte limit)`);
-    }
-
     const allowedRoots = [hubOutboundRoot(this.config), ...this.config.outboundRoots, ...extraAllowedRoots];
     if (!isPathInsideAllowedRoots(realPath, allowedRoots)) {
       throw new Error(`Media path is outside outbound roots: ${realPath}`);
     }
+    if (requiredAllowedRoots.length > 0 && !isPathInsideAllowedRoots(realPath, requiredAllowedRoots)) {
+      throw new Error(`Media path is outside the active session mounts: ${realPath}`);
+    }
 
-    const sniffedMimeType = sniffMimeType(readFileSync(realPath));
+    const descriptor = openSync(realPath, constants.O_RDONLY | noFollowFlag());
+    let bytes: Buffer;
+    let openedPath = realPath;
+    try {
+      const stats = fstatSync(descriptor);
+      if (!stats.isFile()) {
+        throw new Error(`Media path is not a file: ${input.path}`);
+      }
+      if (stats.size > this.config.media.max_outbound_bytes) {
+        throw new Error(`Media is too large (${stats.size} bytes > ${this.config.media.max_outbound_bytes} byte limit)`);
+      }
+      openedPath = canonicalPathForDescriptor(descriptor, realPath);
+      if (!isPathInsideAllowedRoots(openedPath, allowedRoots)) {
+        throw new Error(`Opened media file is outside outbound roots: ${openedPath}`);
+      }
+      if (requiredAllowedRoots.length > 0 && !isPathInsideAllowedRoots(openedPath, requiredAllowedRoots)) {
+        throw new Error(`Opened media file is outside the active session mounts: ${openedPath}`);
+      }
+      bytes = readSnapshotBytes(descriptor, stats.size);
+    } finally {
+      closeSync(descriptor);
+    }
+    const sniffedMimeType = sniffMimeType(bytes);
     const mimeType = sniffedMimeType ?? mimeTypeFromFilename(realPath);
     const inferredKind = sniffedMimeType?.startsWith("image/") ? "image" : "file";
     const kind = input.kind ?? inferredKind;
@@ -158,10 +201,16 @@ export class HubToolService {
       throw new Error(`Media kind image does not match detected MIME type: ${mimeType ?? "unknown"}`);
     }
 
+    const snapshotPath = writePrivateSnapshot(this.config, openedPath, bytes);
     return {
-      path: realPath,
-      kind,
-      ...(input.caption ? { caption: input.caption } : {}),
+      sourcePath: openedPath,
+      snapshotPath,
+      size: bytes.length,
+      artifact: {
+        path: snapshotPath,
+        kind,
+        ...(input.caption ? { caption: input.caption } : {}),
+      },
     };
   }
 
@@ -181,6 +230,80 @@ export class HubToolService {
       process.stderr.write(`[hitch] Media delivery failure notification failed: ${formatError(error)}\n`);
     }
   }
+}
+
+type PreparedMedia = {
+  sourcePath: string;
+  snapshotPath: string;
+  size: number;
+  artifact: OutboundArtifact;
+};
+
+function readSnapshotBytes(descriptor: number, size: number): Buffer {
+  const buffer = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = readSync(descriptor, buffer, offset, size - offset, offset);
+    if (count === 0) {
+      break;
+    }
+    offset += count;
+  }
+  return offset === size ? buffer : buffer.subarray(0, offset);
+}
+
+function canonicalPathForDescriptor(descriptor: number, fallback: string): string {
+  if (process.platform !== "linux") {
+    return fallback;
+  }
+  try {
+    return realpathSync.native(`/proc/self/fd/${descriptor}`);
+  } catch {
+    throw new Error("Media file changed while Hitch opened it for validation.");
+  }
+}
+
+function writePrivateSnapshot(config: HubConfig, sourcePath: string, bytes: Buffer): string {
+  const outboundRoot = ensurePrivateSnapshotDirectory(config);
+  const baseName = path.basename(sourcePath).replace(/[^A-Za-z0-9._-]/g, "_").slice(-120) || "artifact";
+  const snapshotPath = path.join(outboundRoot, `${randomUUID()}-${baseName}`);
+  try {
+    const descriptor = openSync(
+      snapshotPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(),
+      0o600,
+    );
+    try {
+      let offset = 0;
+      while (offset < bytes.length) {
+        offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+    chmodSync(snapshotPath, 0o400);
+    return snapshotPath;
+  } catch (error) {
+    if (existsSync(snapshotPath)) {
+      unlinkSync(snapshotPath);
+    }
+    throw error;
+  }
+}
+
+function ensurePrivateSnapshotDirectory(config: HubConfig): string {
+  const outboundRoot = hubOutboundRoot(config);
+  mkdirSync(outboundRoot, { recursive: true, mode: 0o700 });
+  const rootStat = lstatSync(outboundRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`Hitch outbound snapshot root is not a real directory: ${outboundRoot}`);
+  }
+  chmodSync(outboundRoot, 0o700);
+  return realpathSync.native(outboundRoot);
+}
+
+function noFollowFlag(): number {
+  return "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
 }
 
 function hubOutboundRoot(config: HubConfig): string {
