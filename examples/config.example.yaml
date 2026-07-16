@@ -53,10 +53,20 @@ agents:
   pi:
     command: pi
     config_scope: system
+    # system reuses one read-only Pi config identity and therefore supports one
+    # configured principal only. Use hitch when adding more users.
+    # system_config_root: ~/.pi/agent
     # Set once, after backup, when assigning legacy shared config_scope:hitch state.
     # legacy_state_principal: alice
     # Provider credentials are opt-in; channel credentials and host-control variables are rejected.
     # env_allowlist: [OPENAI_API_KEY]
+    execution_policy:
+      filesystem: workspace-write
+      mounts: []
+      tools: [read, write, edit, grep, find, ls]
+      process: false
+      agent_network: allow
+      sandbox: required
     default_args:
       - --mode
       - rpc

@@ -23,7 +23,7 @@ import { SessionRegistry, type PendingInteraction, type PendingInteractionOption
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
 import { PrincipalResolver } from "../security/authorization.js";
 import type { AuthorizationContext } from "../security/policy.js";
-import { SessionRuntimeStore } from "../security/session-runtime.js";
+import { SessionRuntimeStore, type SessionRuntimeOptions } from "../security/session-runtime.js";
 
 const INTERACTION_TTL_MS = 5 * 60 * 1000;
 const TIMEOUT_PARTIAL_GRACE_MS = 2_000;
@@ -111,9 +111,20 @@ export class RemoteAgentHub {
     const reconciledSecurity = this.sessions.reconcileSessionSecurityMetadata(
       (sessionId, ownerPrincipalId, cwd, existing) => {
         const allowedRoots = this.principals.allowedRootsFor(ownerPrincipalId);
-        const executionPolicy = existing?.executionPolicy ?? this.principals.executionPolicyFor(ownerPrincipalId);
+        const configuredPolicy = this.principals.executionPolicyFor(ownerPrincipalId);
+        const executionPolicy =
+          existing?.executionPolicy.sandbox === "disabled" && configuredPolicy?.sandbox !== "disabled"
+            ? configuredPolicy
+            : existing?.executionPolicy ?? configuredPolicy;
         return allowedRoots && executionPolicy
-          ? this.runtimeStore.materialize(ownerPrincipalId, sessionId, cwd, executionPolicy, allowedRoots)
+          ? this.runtimeStore.materialize(
+              ownerPrincipalId,
+              sessionId,
+              cwd,
+              executionPolicy,
+              allowedRoots,
+              sessionRuntimeOptions(this.config),
+            )
           : undefined;
       },
     );
@@ -377,6 +388,7 @@ export class RemoteAgentHub {
           cwd,
           authorization.executionPolicy,
           authorization.allowedRoots,
+          sessionRuntimeOptions(this.config),
         ),
       name,
     );
@@ -1032,6 +1044,7 @@ export class RemoteAgentHub {
       session.cwd,
       session.executionPolicy,
       allowedRoots,
+      sessionRuntimeOptions(this.config),
     );
     if (
       expected.statePath !== session.statePath ||
@@ -1637,6 +1650,12 @@ export class RemoteAgentHub {
     }
   }
 
+}
+
+function sessionRuntimeOptions(config: HubConfig): SessionRuntimeOptions {
+  return config.agents.pi.config_scope === "system" && config.piSystemConfigRoot
+    ? { agentConfig: { hostPath: config.piSystemConfigRoot, mode: "ro" } }
+    : {};
 }
 
 class ToolStatusBatcher {

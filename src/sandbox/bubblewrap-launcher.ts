@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, lstatSync, realpathSync, statSync } 
 import os from "node:os";
 import path from "node:path";
 import { isPathInsideAllowedRoots } from "../core/path-policy.js";
+import { planHubDataMasks } from "../security/session-runtime.js";
 import {
   type LaunchRequest,
   type LauncherProbe,
@@ -160,6 +161,16 @@ export class BubblewrapLauncher implements SandboxLauncher {
       addScaffolding(args, [mount.sandboxPath]);
       args.push(mount.mode === "ro" ? "--ro-bind" : "--bind", mount.hostPath, mount.sandboxPath);
     }
+    for (const mask of [...request.mountPlan.masks].sort(
+      (left, right) => depth(left.sandboxPath) - depth(right.sandboxPath),
+    )) {
+      assertMountDoesNotReplaceRuntime(mask.sandboxPath, readOnlyRuntime);
+      addScaffolding(args, [mask.sandboxPath]);
+      args.push("--tmpfs", mask.sandboxPath);
+      if (request.executionPolicy.filesystem === "read-only") {
+        args.push("--remount-ro", mask.sandboxPath);
+      }
+    }
     args.push(
       "--chdir",
       request.executionPolicy.filesystem === "none" ? "/state" : "/workspace",
@@ -201,11 +212,11 @@ function assertBubblewrapPolicy(request: LaunchRequest): void {
   ) {
     throw new Error("Workspace mount mode does not match the sandboxed filesystem policy.");
   }
-  const requiredMounts = new Map([
+  const requiredMounts = new Map<string, "ro" | "rw">([
     ["/state", "rw"],
     ["/hitch", "rw"],
     ["/hitch/results", "ro"],
-    ["/agent-config", "rw"],
+    ["/agent-config", request.agentPolicyEnforcement?.agentConfig.mode ?? "rw"],
     ["/agent-sessions", "rw"],
   ]);
   const seen = new Set<string>();
@@ -349,8 +360,14 @@ function addScaffolding(args: string[], destinations: readonly string[]): void {
 
 function assertMountDoesNotReplaceRuntime(sandboxPath: string, runtimePaths: readonly string[]): void {
   if (
-    RESERVED_SANDBOX_ROOTS.some((reserved) => isAtOrInside(sandboxPath, reserved)) ||
-    runtimePaths.some((runtime) => isAtOrInside(sandboxPath, runtime))
+    RESERVED_SANDBOX_ROOTS.some((reserved) =>
+      reserved === "/tmp"
+        ? sandboxPath === reserved
+        : isAtOrInside(sandboxPath, reserved),
+    ) ||
+    runtimePaths.some(
+      (runtime) => isAtOrInside(sandboxPath, runtime) || isAtOrInside(runtime, sandboxPath),
+    )
   ) {
     throw new Error(`Session mount cannot replace a Bubblewrap runtime path: ${sandboxPath}`);
   }
@@ -360,6 +377,9 @@ function assertAgentPolicyEnforcement(request: LaunchRequest): void {
   const enforcement = request.agentPolicyEnforcement;
   if (!enforcement) {
     throw new Error("Bubblewrap launch is missing agent-level tool/process policy enforcement.");
+  }
+  if (!enforcement.agentConfig) {
+    throw new Error("Bubblewrap launch is missing its trusted Pi config mount attestation.");
   }
   const expectedTools = [...new Set(request.executionPolicy.tools)].sort();
   const effectiveTools = [...new Set(enforcement.tools)].sort();
@@ -386,7 +406,11 @@ function assertMountPlanMatchesPolicy(request: LaunchRequest): void {
     ],
     [
       "/agent-config",
-      { hostPath: path.join(principalRoot, "shared", "pi", "agent"), mode: "rw", purpose: "agent-config" },
+      {
+        hostPath: request.agentPolicyEnforcement?.agentConfig.hostPath ?? path.join(principalRoot, "shared", "pi", "agent"),
+        mode: request.agentPolicyEnforcement?.agentConfig.mode ?? "rw",
+        purpose: "agent-config",
+      },
     ],
     [
       "/agent-sessions",
@@ -394,11 +418,19 @@ function assertMountPlanMatchesPolicy(request: LaunchRequest): void {
     ],
   ]);
   if (request.executionPolicy.filesystem !== "none") {
-    expected.set("/workspace", {
+    const workspaceMount: {
+      hostPath: string;
+      mode: "ro" | "rw";
+      purpose: "workspace";
+    } = {
       hostPath: request.cwd,
       mode: request.executionPolicy.filesystem === "read-only" ? "ro" : "rw",
-      purpose: "workspace",
-    });
+      purpose: "workspace" as const,
+    };
+    expected.set("/workspace", workspaceMount);
+    if (request.cwd !== "/workspace") {
+      expected.set(request.cwd, workspaceMount);
+    }
   }
   for (const mount of request.executionPolicy.mounts) {
     expected.set(mount.sandbox_path, {
@@ -438,6 +470,32 @@ function assertMountPlanMatchesPolicy(request: LaunchRequest): void {
     ) {
       throw new Error(`Persisted mount does not match the execution policy: ${mount.sandboxPath}`);
     }
+  }
+  const dataDir = dataDirFromStatePath(statePath);
+  const expectedMasks = planHubDataMasks(dataDir, request.cwd, request.executionPolicy);
+  const actualMasks = request.mountPlan.masks;
+  if (
+    actualMasks.length !== expectedMasks.length ||
+    actualMasks.some(
+      (mask, index) =>
+        mask.sandboxPath !== expectedMasks[index]?.sandboxPath || mask.purpose !== expectedMasks[index]?.purpose,
+    )
+  ) {
+    throw new Error("Persisted hub-data masks do not match the session workspace and state path.");
+  }
+}
+
+function dataDirFromStatePath(statePath: string): string {
+  let current = statePath;
+  while (true) {
+    if (path.basename(current) === "session-state") {
+      return path.dirname(current);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      throw new Error(`Session state path is outside a Hitch session-state root: ${statePath}`);
+    }
+    current = parent;
   }
 }
 

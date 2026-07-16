@@ -5,6 +5,7 @@ import type { HubConfig } from "../config/schema.js";
 import { DeliveryStore } from "../core/delivery-store.js";
 import { RemoteAgentHub } from "../core/hub.js";
 import type { ChatTarget } from "../core/types.js";
+import { UNSAFE_DIRECT_EXECUTION_POLICY } from "../security/policy.js";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z4WQAAAAASUVORK5CYII=",
@@ -192,6 +193,7 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
         telegram_ids: [],
         wechat_ids: [],
         allowed_roots: [cwd, dataDir],
+        execution_policy: UNSAFE_DIRECT_EXECUTION_POLICY,
       },
     },
     channels: {

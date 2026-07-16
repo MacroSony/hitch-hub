@@ -2,10 +2,10 @@ import type { HubConfig } from "../config/schema.js";
 import type { ChatTarget, Platform } from "../core/types.js";
 import { snapshotCanonicalAllowedRoots } from "../core/path-policy.js";
 import {
+  DEFAULT_REMOTE_EXECUTION_POLICY,
   type AuthorizationContext,
   type Principal,
   type PrincipalIdentity,
-  UNSAFE_DIRECT_EXECUTION_POLICY,
 } from "./policy.js";
 
 type ConfiguredPrincipal = HubConfig["users"][string];
@@ -82,10 +82,10 @@ export class PrincipalResolver {
   executionPolicyFor(principalId: string) {
     const principal = this.config.users[principalId];
     if (principal) {
-      return principal.execution_policy ?? this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY;
+      return principal.execution_policy ?? this.config.agents.pi.execution_policy ?? DEFAULT_REMOTE_EXECUTION_POLICY;
     }
     return principalId.startsWith("__hitch_unsafe__:")
-      ? this.config.agents.pi.execution_policy ?? UNSAFE_DIRECT_EXECUTION_POLICY
+      ? this.config.agents.pi.execution_policy ?? DEFAULT_REMOTE_EXECUTION_POLICY
       : undefined;
   }
 
@@ -127,7 +127,7 @@ export class PrincipalResolver {
       principal,
       target,
       allowedRoots: principal.allowedRoots,
-      executionPolicy: this.executionPolicyFor(principalId) ?? UNSAFE_DIRECT_EXECUTION_POLICY,
+      executionPolicy: this.executionPolicyFor(principalId) ?? DEFAULT_REMOTE_EXECUTION_POLICY,
       authorizationMode: unsafeAllowAll ? "unsafe_allow_all" : "configured",
     };
   }
@@ -145,7 +145,7 @@ export class PrincipalResolver {
       principal,
       target,
       allowedRoots: principal.allowedRoots,
-      executionPolicy: this.executionPolicyFor(principalId) ?? UNSAFE_DIRECT_EXECUTION_POLICY,
+      executionPolicy: this.executionPolicyFor(principalId) ?? DEFAULT_REMOTE_EXECUTION_POLICY,
       authorizationMode: "unsafe_allow_all",
     };
   }

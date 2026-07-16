@@ -23,7 +23,14 @@ export const executionPolicySchema = z
   .object({
     filesystem: z.enum(filesystemPolicyValues).default("workspace-write"),
     mounts: z.array(policyMountSchema).default([]),
-    tools: z.array(z.string().min(1)).default(["read", "write", "edit", "grep", "find", "ls"]),
+    tools: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .regex(/^(?:\*|[A-Za-z0-9_.:-]+)$/, "Pi tool names cannot contain commas or whitespace."),
+      )
+      .default(["read", "write", "edit", "grep", "find", "ls"]),
     process: z.boolean().default(false),
     agent_network: z.enum(agentNetworkPolicyValues).default("allow"),
     sandbox: z.enum(sandboxModeValues).default("required"),
@@ -41,6 +48,30 @@ export const executionPolicySchema = z
         code: "custom",
         path: ["filesystem"],
         message: "host-unrestricted filesystem access is valid only when sandbox is disabled.",
+      });
+    }
+    const exposesProcessTool = policy.tools.includes("bash") || policy.tools.includes("*");
+    if (exposesProcessTool !== policy.process) {
+      context.addIssue({
+        code: "custom",
+        path: ["process"],
+        message: policy.process
+          ? "process=true requires the Pi bash tool (or '*') in tools."
+          : "The Pi bash tool (or '*') requires process=true.",
+      });
+    }
+    if (policy.tools.includes("*") && (policy.tools.length !== 1 || policy.tools[0] !== "*")) {
+      context.addIssue({
+        code: "custom",
+        path: ["tools"],
+        message: "The '*' Pi tool wildcard must be the only configured tool.",
+      });
+    }
+    if (new Set(policy.tools).size !== policy.tools.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["tools"],
+        message: "Duplicate Pi tool names are not allowed.",
       });
     }
     const sandboxPaths = new Set<string>();
@@ -137,10 +168,25 @@ export const mountPlanSchema = z.object({
   workspacePath: z.string().min(1).refine(path.isAbsolute, "Mount plan workspacePath must be absolute."),
   statePath: z.string().min(1).refine(path.isAbsolute, "Mount plan statePath must be absolute."),
   mounts: z.array(plannedMountSchema),
+  masks: z
+    .array(
+      z.object({
+        sandboxPath: z
+          .string()
+          .startsWith("/")
+          .refine(
+            (value) => value !== "/" && path.posix.normalize(value) === value,
+            "Planned mask sandboxPath must be a normalized absolute path below /.",
+          ),
+        purpose: z.literal("hub-data"),
+      }),
+    )
+    .default([]),
 });
 
 export type PlannedMount = z.output<typeof plannedMountSchema>;
 export type MountPlan = z.output<typeof mountPlanSchema>;
+export type PlannedMask = MountPlan["masks"][number];
 
 export type SessionSecurityMetadata = {
   statePath: string;

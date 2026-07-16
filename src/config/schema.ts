@@ -42,6 +42,7 @@ const piAgentSchema = z.object({
   // this formerly security-looking but unenforced field.
   default_policy: z.enum(["ask", "deny", "allow"]).optional(),
   config_scope: z.enum(["hitch", "system"]).default("hitch"),
+  system_config_root: z.string().min(1).optional(),
   legacy_state_principal: z.string().min(1).optional(),
   env_allowlist: z.array(z.string()).optional(),
   execution_policy: executionPolicySchema.optional(),
@@ -160,4 +161,5 @@ export type HubConfig = z.output<typeof configSchema> & {
   allowedRoots: string[];
   outboundRoots: string[];
   principalRoots: Record<string, string[]>;
+  piSystemConfigRoot?: string;
 };

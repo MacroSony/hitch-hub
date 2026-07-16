@@ -15,6 +15,7 @@ import {
   executionPolicySchema,
   mountPlanSchema,
   type ExecutionPolicy,
+  type PlannedMask,
   type PlannedMount,
   type SessionSecurityMetadata,
 } from "./policy.js";
@@ -26,6 +27,13 @@ export type SessionBridgePaths = {
   bridgePath: string;
   outboxPath: string;
   resultDir: string;
+};
+
+export type SessionRuntimeOptions = {
+  agentConfig?: {
+    hostPath: string;
+    mode: "ro" | "rw";
+  };
 };
 
 export class SessionRuntimeStore {
@@ -99,6 +107,7 @@ export class SessionRuntimeStore {
     workspacePath: string,
     policy: ExecutionPolicy,
     allowedRoots: readonly string[],
+    options: SessionRuntimeOptions = {},
   ): SessionSecurityMetadata {
     const canonicalWorkspace = canonicalExistingPath(workspacePath, "Session workspace");
     if (!statSync(canonicalWorkspace).isDirectory()) {
@@ -112,11 +121,18 @@ export class SessionRuntimeStore {
     const sessionsRoot = ensurePrivateDirectory(path.join(principalState, "sessions"));
     const statePath = ensurePrivateDirectory(path.join(sessionsRoot, stableSegment(sessionId)));
     const workerStatePath = ensurePrivateDirectory(path.join(statePath, "worker"));
+    ensurePrivateDirectory(path.join(workerStatePath, "home"));
     const bridge = this.materializeBridgeState(sessionId, statePath);
     const sharedPiRoot = this.sharedPiRoot(principalId);
-    const piAgentPath = ensurePrivateDirectory(path.join(sharedPiRoot, "agent"));
+    const piAgentPath = options.agentConfig
+      ? canonicalDirectory(options.agentConfig.hostPath, "Pi agent config directory")
+      : ensurePrivateDirectory(path.join(sharedPiRoot, "agent"));
+    if (options.agentConfig && hostPathsOverlap(piAgentPath, this.dataDir)) {
+      throw new Error("External Pi agent config must not overlap Hitch's private data directory.");
+    }
+    const piAgentMode = options.agentConfig?.mode ?? "rw";
     const piSessionsPath = ensurePrivateDirectory(path.join(sharedPiRoot, "sessions"));
-    const normalizedPolicy = normalizeExecutionPolicy(policy, allowedRoots);
+    const normalizedPolicy = normalizeExecutionPolicy(policy, allowedRoots, canonicalWorkspace, this.dataDir);
     const mounts: PlannedMount[] = [
       {
         hostPath: workerStatePath,
@@ -139,7 +155,7 @@ export class SessionRuntimeStore {
       {
         hostPath: piAgentPath,
         sandboxPath: "/agent-config",
-        mode: "rw",
+        mode: piAgentMode,
         purpose: "agent-config",
       },
       {
@@ -150,12 +166,25 @@ export class SessionRuntimeStore {
       },
     ];
     if (normalizedPolicy.filesystem !== "none") {
+      const workspaceMode = normalizedPolicy.filesystem === "read-only" ? "ro" : "rw";
       mounts.push({
         hostPath: canonicalWorkspace,
         sandboxPath: "/workspace",
-        mode: normalizedPolicy.filesystem === "read-only" ? "ro" : "rw",
+        mode: workspaceMode,
         purpose: "workspace",
       });
+      if (
+        normalizedPolicy.sandbox !== "disabled" &&
+        canonicalWorkspace !== "/workspace" &&
+        path.posix.isAbsolute(canonicalWorkspace)
+      ) {
+        mounts.push({
+          hostPath: canonicalWorkspace,
+          sandboxPath: canonicalWorkspace,
+          mode: workspaceMode,
+          purpose: "workspace",
+        });
+      }
     }
     mounts.push(
       ...normalizedPolicy.mounts.map((mount) => ({
@@ -173,6 +202,7 @@ export class SessionRuntimeStore {
       workspacePath: canonicalWorkspace,
       statePath,
       mounts,
+      masks: planHubDataMasks(this.dataDir, canonicalWorkspace, normalizedPolicy),
     });
     return { statePath, executionPolicy: normalizedPolicy, mountPlan };
   }
@@ -211,6 +241,34 @@ export class SessionRuntimeStore {
   }
 }
 
+export function planHubDataMasks(
+  dataDir: string,
+  workspacePath: string,
+  policy: ExecutionPolicy,
+): PlannedMask[] {
+  if (policy.sandbox === "disabled" || policy.filesystem === "none") {
+    return [];
+  }
+  if (isPathInsideAllowedRoots(workspacePath, [dataDir])) {
+    throw new Error("A sandbox workspace cannot be the Hitch data directory or one of its descendants.");
+  }
+  if (!isPathInsideAllowedRoots(dataDir, [workspacePath])) {
+    return [];
+  }
+
+  const relativeDataPath = path.relative(workspacePath, dataDir);
+  const masks: PlannedMask[] = [
+    {
+      sandboxPath: path.posix.join("/workspace", ...relativeDataPath.split(path.sep)),
+      purpose: "hub-data",
+    },
+  ];
+  if (path.posix.isAbsolute(workspacePath)) {
+    masks.push({ sandboxPath: dataDir, purpose: "hub-data" });
+  }
+  return masks;
+}
+
 export function secureSessionBridgePaths(statePath: string): SessionBridgePaths {
   const canonicalState = assertPrivateDirectory(statePath, "Session state directory");
   const bridgePath = assertPrivateDirectory(path.join(canonicalState, "bridge"), "Session bridge directory");
@@ -226,24 +284,50 @@ export function secureMountHostPath(
   if (!mount) {
     throw new Error(`Session mount plan is missing ${sandboxPath}.`);
   }
-  return assertPrivateDirectory(mount.hostPath, `Session mount ${sandboxPath}`);
+  return mount.purpose === "agent-config" && mount.mode === "ro"
+    ? canonicalDirectory(mount.hostPath, `Session mount ${sandboxPath}`)
+    : assertPrivateDirectory(mount.hostPath, `Session mount ${sandboxPath}`);
 }
 
 function normalizeExecutionPolicy(
   policy: ExecutionPolicy,
   allowedRoots: readonly string[],
+  canonicalWorkspace: string,
+  dataDir: string,
 ): ExecutionPolicy {
   const mounts = policy.mounts.map((mount) => {
-    if (isReservedSandboxPath(mount.sandbox_path)) {
+    if (
+      isReservedSandboxPath(mount.sandbox_path) ||
+      (policy.sandbox !== "disabled" &&
+        path.posix.isAbsolute(canonicalWorkspace) &&
+        pathsOverlap(mount.sandbox_path, canonicalWorkspace))
+    ) {
       throw new Error(`Policy mount overlaps Hitch's reserved sandbox paths: ${mount.sandbox_path}`);
     }
     const canonicalHostPath = canonicalExistingPath(mount.host_path, "Policy mount host path");
+    if (hostPathsOverlap(canonicalHostPath, dataDir)) {
+      throw new Error(`Policy mount overlaps Hitch's private data directory: ${mount.host_path}`);
+    }
     if (!isPathInsideAllowedRoots(canonicalHostPath, allowedRoots)) {
       throw new Error(`Policy mount is outside the principal's allowed roots: ${mount.host_path}`);
     }
     return { ...mount, host_path: canonicalHostPath };
   });
   return executionPolicySchema.parse({ ...policy, mounts });
+}
+
+function hostPathsOverlap(left: string, right: string): boolean {
+  return isPathInsideAllowedRoots(left, [right]) || isPathInsideAllowedRoots(right, [left]);
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  const leftFromRight = path.posix.relative(right, left);
+  const rightFromLeft = path.posix.relative(left, right);
+  return (
+    leftFromRight === "" ||
+    (!leftFromRight.startsWith("../") && leftFromRight !== "..") ||
+    (!rightFromLeft.startsWith("../") && rightFromLeft !== "..")
+  );
 }
 
 function isReservedSandboxPath(candidate: string): boolean {
@@ -258,6 +342,19 @@ function canonicalExistingPath(candidate: string, label: string): string {
   } catch {
     throw new Error(`${label} does not exist or cannot be resolved: ${candidate}`);
   }
+}
+
+function canonicalDirectory(candidate: string, label: string): string {
+  const resolved = path.resolve(candidate);
+  const stat = lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`${label} is not a real directory: ${candidate}`);
+  }
+  const canonical = realpathSync.native(resolved);
+  if (normalizeForCompare(canonical) !== normalizeForCompare(resolved)) {
+    throw new Error(`${label} unexpectedly retargeted: ${candidate}`);
+  }
+  return canonical;
 }
 
 function ensurePrivateDirectory(directoryPath: string): string {

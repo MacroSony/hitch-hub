@@ -2,7 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { canonicalizeAllowedRoots, canonicalizeExistingDirectory } from "../core/path-policy.js";
+import { assertNoPiToolPolicyArguments } from "../agents/pi-policy.js";
+import {
+  canonicalizeAllowedRoots,
+  canonicalizeExistingDirectory,
+  isPathInsideAllowedRoots,
+} from "../core/path-policy.js";
 import {
   assertWorkerEnvironmentAllowlist,
   assertWorkerEnvironmentCredentialNames,
@@ -35,6 +40,8 @@ export function loadConfig(configPath: string): HubConfig {
   const parsed = YAML.parse(raw) as HubConfigInput;
   const config = configSchema.parse(parsed);
   assertLiveChannelAuthorization(config);
+  assertPiConfigurationIsolation(config);
+  assertNoPiToolPolicyArguments(config.agents.pi.default_args);
   const channelCredentialNames = [config.channels.telegram.bot_token_env];
   assertWorkerEnvironmentCredentialNames(channelCredentialNames);
   assertWorkerEnvironmentAllowlist(config.agents.pi.env_allowlist ?? [], channelCredentialNames);
@@ -44,6 +51,12 @@ export function loadConfig(configPath: string): HubConfig {
   }
   const configDir = path.dirname(resolvedConfigPath);
   const dataDir = resolvePath(config.data_dir, configDir);
+  const piSystemConfigRoot =
+    config.agents.pi.config_scope === "system"
+      ? canonicalizePiSystemConfigRoot(
+          resolvePath(config.agents.pi.system_config_root ?? path.join(os.homedir(), ".pi", "agent"), configDir),
+        )
+      : undefined;
 
   const principalRoots = Object.fromEntries(
     Object.entries(config.users).map(([principalId, user]) => [
@@ -55,6 +68,13 @@ export function loadConfig(configPath: string): HubConfig {
     ]),
   );
   const allowedRoots = Object.values(principalRoots).flat();
+  if (
+    piSystemConfigRoot &&
+    (isPathInsideAllowedRoots(piSystemConfigRoot, allowedRoots) ||
+      allowedRoots.some((root) => isPathInsideAllowedRoots(root, [piSystemConfigRoot])))
+  ) {
+    throw new Error("Pi system config root must not overlap any principal's allowed filesystem roots.");
+  }
   const outboundRoots = canonicalizeAllowedRoots(
     config.media.outbound_roots.map((root) => resolvePath(root, configDir)),
     "Outbound media root",
@@ -70,7 +90,42 @@ export function loadConfig(configPath: string): HubConfig {
     allowedRoots,
     outboundRoots,
     principalRoots,
+    ...(piSystemConfigRoot ? { piSystemConfigRoot } : {}),
   };
+}
+
+function canonicalizePiSystemConfigRoot(candidate: string): string {
+  const canonical = canonicalizeExistingDirectory(candidate, "Pi system config root");
+  const forbidden = new Set([
+    path.parse(canonical).root,
+    path.resolve(os.homedir()),
+    ...["/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/proc", "/root", "/run", "/sys", "/tmp", "/usr", "/var"]
+      .filter((root) => existsSync(root))
+      .map((root) => path.resolve(root)),
+  ]);
+  if (forbidden.has(canonical)) {
+    throw new Error(`Pi system config root is too broad to mount into a worker: ${canonical}`);
+  }
+  return canonical;
+}
+
+function assertPiConfigurationIsolation(config: ReturnType<typeof configSchema.parse>): void {
+  if (config.agents.pi.config_scope !== "system") {
+    return;
+  }
+  if (Object.keys(config.users).length !== 1) {
+    throw new Error(
+      "agents.pi.config_scope=system shares one Pi identity and is allowed only with one configured principal. Use config_scope=hitch for multi-user isolation.",
+    );
+  }
+  if (
+    (config.channels.telegram.enabled && config.channels.telegram.unsafe_allow_all) ||
+    (config.channels.wechat.enabled && config.channels.wechat.unsafe_allow_all)
+  ) {
+    throw new Error(
+      "agents.pi.config_scope=system cannot be combined with unsafe_allow_all. Use config_scope=hitch for isolated principals.",
+    );
+  }
 }
 
 function assertLiveChannelAuthorization(config: HubConfigInput): void {

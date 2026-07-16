@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import type { AgentToolContext } from "../core/tool-bridge.js";
+import { FailClosedLauncherSelector, type LauncherSelector } from "../sandbox/launcher-selector.js";
 import { buildWorkerEnvironment } from "../security/worker-environment.js";
 import { secureMountHostPath } from "../security/session-runtime.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
@@ -18,6 +19,7 @@ import type {
   AgentModelInfo,
   AgentSelectionInput,
 } from "./types.js";
+import { applyPiExecutionPolicy } from "./pi-policy.js";
 
 type SpawnSpec = {
   command: string;
@@ -44,6 +46,8 @@ function resolveSpawnSpec(command: string, args: string[]): SpawnSpec {
     args: ["/d", "/c", "call", cmdShim, ...args],
   };
 }
+
+const sharedLauncherSelector = new FailClosedLauncherSelector();
 
 class AsyncEventQueue<T> {
   private readonly values: T[] = [];
@@ -97,7 +101,10 @@ export class PiRpcBackend implements AgentBackend {
   private pendingSettledFinal: Extract<AgentEvent, { type: "final" }> | undefined;
   private stderrTail = "";
 
-  constructor(private readonly config: HubConfig) {}
+  constructor(
+    private readonly config: HubConfig,
+    private readonly launcherSelector: LauncherSelector = sharedLauncherSelector,
+  ) {}
 
   async start(session: HubSession, toolContext?: AgentToolContext): Promise<number | undefined> {
     if (this.proc) {
@@ -105,21 +112,44 @@ export class PiRpcBackend implements AgentBackend {
     }
 
     const piConfig = this.config.agents.pi;
-    const spawnSpec = resolveSpawnSpec(piConfig.command, piArgsForSession(piConfig.default_args, session));
+    const launcher = await this.launcherSelector.select(session.executionPolicy);
+    const policyEnforcement = applyPiExecutionPolicy(
+      piArgsForSession(piConfig.default_args, session),
+      session.executionPolicy,
+    );
+    const spawnSpec = resolveSpawnSpec(piConfig.command, policyEnforcement.args);
+    const sandboxed = launcher.kind !== "direct";
     const overrides: Record<string, string> = {};
+    const piAgentDir = secureMountHostPath(session, "/agent-config");
+    const piSessionDir = secureMountHostPath(session, "/agent-sessions");
+    const agentConfigMount = session.mountPlan.mounts.find((mount) => mount.sandboxPath === "/agent-config");
+    if (!agentConfigMount) {
+      throw new Error("Session mount plan is missing /agent-config.");
+    }
+    const trustedAgentConfig = trustedAgentConfigForSession(
+      this.config,
+      session,
+      piAgentDir,
+      agentConfigMount.mode,
+      sandboxed,
+    );
 
-    if (piConfig.config_scope === "hitch") {
-      const piAgentDir = secureMountHostPath(session, "/agent-config");
-      const piSessionDir = secureMountHostPath(session, "/agent-sessions");
+    if (sandboxed) {
+      overrides.HOME = "/state/home";
+      overrides.PI_CODING_AGENT_DIR = "/agent-config";
+      overrides.PI_CODING_AGENT_SESSION_DIR = "/agent-sessions";
+    } else if (piConfig.config_scope === "hitch") {
       overrides.PI_CODING_AGENT_DIR = piAgentDir;
       overrides.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
+    }
+    if (piConfig.config_scope === "hitch") {
       overrides.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
     }
     if (toolContext) {
       overrides.HITCH_SESSION_ID = toolContext.sessionId;
       overrides.HITCH_TOOL_TOKEN = toolContext.token;
-      overrides.HITCH_TOOL_OUTBOX = toolContext.outboxPath;
-      overrides.HITCH_TOOL_RESULT_DIR = toolContext.resultDir;
+      overrides.HITCH_TOOL_OUTBOX = sandboxed ? "/hitch/outbox.jsonl" : toolContext.outboxPath;
+      overrides.HITCH_TOOL_RESULT_DIR = sandboxed ? "/hitch/results" : toolContext.resultDir;
       overrides.HITCH_TOOL_TIMEOUT_MS = String(this.config.agent_turn_timeout_ms);
     }
     const env = buildWorkerEnvironment({
@@ -128,10 +158,18 @@ export class PiRpcBackend implements AgentBackend {
       overrides,
     });
 
-    this.proc = spawn(spawnSpec.command, spawnSpec.args, {
+    this.proc = launcher.launch({
+      command: spawnSpec.command,
+      args: spawnSpec.args,
       cwd: session.cwd,
       env,
-      windowsHide: true,
+      executionPolicy: session.executionPolicy,
+      mountPlan: session.mountPlan,
+      agentPolicyEnforcement: {
+        tools: policyEnforcement.tools,
+        processToolEnabled: policyEnforcement.processToolEnabled,
+        agentConfig: trustedAgentConfig,
+      },
     });
 
     attachJsonlReader(
@@ -366,6 +404,38 @@ export class PiRpcBackend implements AgentBackend {
     waiter(value as RpcResponse);
     return true;
   }
+}
+
+function trustedAgentConfigForSession(
+  config: HubConfig,
+  session: HubSession,
+  actualHostPath: string,
+  actualMode: "ro" | "rw",
+  sandboxed: boolean,
+): { hostPath: string; mode: "ro" | "rw" } {
+  if (session.statePath !== session.mountPlan.statePath) {
+    throw new Error("Session state path does not match its persisted mount plan.");
+  }
+  let expectedHostPath: string;
+  let expectedMode: "ro" | "rw";
+  if (config.agents.pi.config_scope === "system" && sandboxed) {
+    if (!config.piSystemConfigRoot) {
+      throw new Error("Sandboxed system Pi config requires a resolved agents.pi.system_config_root.");
+    }
+    expectedHostPath = config.piSystemConfigRoot;
+    expectedMode = "ro";
+  } else if (config.agents.pi.config_scope === "hitch") {
+    const principalStateRoot = path.dirname(path.dirname(session.statePath));
+    expectedHostPath = path.join(principalStateRoot, "shared", "pi", "agent");
+    expectedMode = "rw";
+  } else {
+    expectedHostPath = actualHostPath;
+    expectedMode = actualMode;
+  }
+  if (path.resolve(actualHostPath) !== path.resolve(expectedHostPath) || actualMode !== expectedMode) {
+    throw new Error("Persisted Pi config mount does not match Hitch's trusted config scope.");
+  }
+  return { hostPath: expectedHostPath, mode: expectedMode };
 }
 
 type RpcResponse = {

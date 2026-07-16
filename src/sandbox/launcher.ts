@@ -11,6 +11,10 @@ export type LaunchRequest = {
   agentPolicyEnforcement?: {
     tools: string[];
     processToolEnabled: boolean;
+    agentConfig: {
+      hostPath: string;
+      mode: "ro" | "rw";
+    };
   };
 };
 

@@ -75,6 +75,9 @@ function main(): void {
   if (bob?.principal.id !== "bob" || bob.allowedRoots[0] !== path.dirname(cwd)) {
     throw new Error(`Bob principal resolution failed: ${JSON.stringify(bob)}`);
   }
+  if (bob.executionPolicy.sandbox !== "required" || bob.executionPolicy.process) {
+    throw new Error("A principal without an override did not receive the safe remote execution policy.");
+  }
   if (resolver.resolve({ platform: "telegram", chatId: "shared-chat", userId: "mallory" })) {
     throw new Error("Unknown locked-down Telegram identity was authorized.");
   }
@@ -170,6 +173,14 @@ function main(): void {
   assertRejected(
     () => executionPolicySchema.parse({ filesystem: "host-unrestricted", sandbox: "required" }),
     "Unrestricted host policy was accepted with a required sandbox.",
+  );
+  assertRejected(
+    () => executionPolicySchema.parse({ tools: ["read", "bash"], process: false }),
+    "The Pi bash tool was accepted while process execution was disabled.",
+  );
+  assertRejected(
+    () => executionPolicySchema.parse({ tools: ["read"], process: true }),
+    "Process execution was enabled without the Pi bash tool.",
   );
 
   verifySessionOwnership(cwd);
@@ -330,6 +341,31 @@ function verifySessionOwnership(cwd: string): void {
         [cwd],
       ),
     "A policy mount over Hitch's private state path was materialized.",
+  );
+  assertRejected(
+    () =>
+      runtime.materialize(
+        "alice",
+        "hub-data-policy-mount",
+        cwd,
+        executionPolicySchema.parse({
+          mounts: [{ host_path: runtime.dataDir, sandbox_path: "/leaked-hub-data", mode: "ro" }],
+        }),
+        [cwd],
+      ),
+    "A policy mount exposed Hitch's private data directory under an unrelated sandbox path.",
+  );
+  assertRejected(
+    () =>
+      runtime.materialize(
+        "alice",
+        "hub-data-agent-config",
+        cwd,
+        executionPolicySchema.parse({}),
+        [cwd],
+        { agentConfig: { hostPath: runtime.dataDir, mode: "ro" } },
+      ),
+    "An external Pi config mount exposed Hitch's private data directory.",
   );
   rmSync(dataDir, { force: true, recursive: true });
 }

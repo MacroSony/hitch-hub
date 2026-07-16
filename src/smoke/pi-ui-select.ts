@@ -97,8 +97,12 @@ class PiUiSelectSmokeChannel implements ChannelAdapter {
 
 async function main(): Promise<void> {
   const dataDir = path.resolve("examples/.remote-agent-hub-smoke", "pi-ui-select");
-  const editorResponsePath = path.join(dataDir, "editor-response.txt");
+  const editorResponsePath = path.resolve(
+    "examples/.remote-agent-hub-smoke",
+    `pi-ui-select-editor-${process.pid}.txt`,
+  );
   rmSync(dataDir, { force: true, recursive: true });
+  rmSync(editorResponsePath, { force: true });
   mkdirSync(dataDir, { recursive: true });
 
   const channel = new PiUiSelectSmokeChannel();
@@ -125,6 +129,7 @@ async function main(): Promise<void> {
   }
 
   rmSync(dataDir, { force: true, recursive: true });
+  rmSync(editorResponsePath, { force: true });
   process.stdout.write("Pi UI select smoke ok\n");
 }
 

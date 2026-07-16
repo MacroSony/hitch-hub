@@ -70,7 +70,9 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
 - `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or future hub tools; roots are canonicalized at startup
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
-- `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
+- `agents.pi.config_scope`: `system` mounts one normal Pi config read-only for a single principal, while `hitch` gives every principal isolated Pi config/state under `data_dir`
+- `agents.pi.system_config_root`: optional system-scope Pi config directory; defaults to `~/.pi/agent` and may not be the home directory itself
+- `agents.pi.execution_policy`: filesystem mounts, Pi tool allowlist, `bash`/process capability, network namespace mode, and required sandbox mode; the remote default is workspace write with non-shell built-ins only
 - `agents.pi.env_allowlist`: optional environment variable names Pi needs for provider authentication; channel credentials, host-control sockets, loader injection variables, and `HITCH_*` names are rejected
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress ordinary successful tool chatter while still showing explicit `hitch.send_media` progress, or `none` for no tool-status messages
@@ -290,10 +292,17 @@ Channel behavior:
 Pi config behavior:
 
 - Workers receive a small runtime/proxy environment allowlist. Provider API-key variables must be named explicitly under `agents.pi.env_allowlist`; Telegram credentials and host-control sockets are never inherited.
-- `config_scope: system` uses Pi's normal config beneath the inherited home directory. Pi-specific environment overrides are not inherited unless explicitly allowlisted.
+- Sandboxed Pi workers use Bubblewrap on Linux and fail closed when it is unavailable. Restricted `sandbox: preferred` policies do not fall back to direct execution because direct mode cannot enforce them.
+- `config_scope: system` mounts only the configured Pi directory at `/agent-config` read-only, uses private principal-owned session storage, and is rejected unless exactly one principal is configured without `unsafe_allow_all`.
 - `config_scope: hitch` stores Pi config/session state inside that session's private state directory and defaults `PI_OFFLINE=1` unless already set.
-- Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. The tool-result subtree is planned as read-only to the worker.
+- Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. `/hitch/results` is overlaid read-only to the worker and the sandbox receives an empty private home plus ephemeral `/tmp`.
+- The workspace is mounted at `/workspace` and at its canonical host path so trusted Pi/MCP configuration containing an absolute project cwd continues to work; both aliases have the same policy-selected read/write mode.
+- If `data_dir` is beneath the workspace, persisted tmpfs masks hide it through both aliases so workers cannot read Hitch's database, audit log, credentials, or other principals' state. Policy mounts and external Pi config roots may not re-expose that directory.
+- Explicit policy mounts can expose additional principal-approved paths. For example, a media extension that writes `/tmp/pi-paint-outputs` needs that exact directory as a writable policy mount and as a `media.outbound_roots` entry.
+- `execution_policy.tools` is translated into Hitch-owned Pi `--tools`/`--no-tools` arguments. `process: true` must include `bash` (or the sole `"*"` wildcard); `process: false` rejects it. Tool-control flags are not accepted in `default_args`.
+- Pi extensions are trusted code inside the namespace and may launch their own helper processes even when the model-facing `bash` tool is disabled. Their processes still share the sandbox mounts, environment, namespaces, and cleanup boundary.
 - Execution policy and mount plans are persisted with the session; missing legacy metadata is initialized, while partial, modified, escaped, or no-longer-authorized metadata is quarantined instead of silently regenerated.
+- Tightening an old explicit unsafe/direct policy to a sandboxed policy is one-way: the old immutable session is quarantined and must be recreated rather than silently continuing with host access.
 - On the first `config_scope: hitch` upgrade, old shared `data_dir/pi` state stops startup until it is backed up and explicitly assigned with `agents.pi.legacy_state_principal`. Old `data_dir/tools/<session-id>` state is moved into the matching private session state.
 - Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
 - Hitch starts Pi with a stable `--session-id` based on the Hitch session unless `agents.pi.default_args` already includes an explicit Pi session mode such as `--no-session`, `--session`, `--session-id`, `--continue`, `--resume`, or `--fork`.
