@@ -14,16 +14,16 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Local fake adapter for repeatable testing
 - Pi RPC backend
 - SQLite session and approval registry
-- cwd allowlist checks
-- Basic audit logging
+- Principal-scoped canonical cwd/root enforcement
+- Size-bounded JSONL audit logging and operator health diagnostics
 - Pi extension UI approval requests answered through `!approve` / `!deny`
 - Configurable default cwd
 - SHA-256 inbound media cache for Telegram photos/documents and WeChat media
 - Cached images passed to Pi through native RPC image attachments when supported, with local path references kept in the prompt
 - Pi RPC model inspection and switching through agent-native `/model`
 - Explicit session listing and switching with optional names
-- Prototype outbound Telegram/WeChat upload for local image/file paths mentioned by Pi
-- Planned minimal `hitch.send_media` hub tool/MCP path for outbound media, replacing path auto-discovery as the primary design
+- Legacy opt-in outbound Telegram/WeChat upload for local image/file paths mentioned by Pi
+- Explicit session-scoped `hitch.send_media` hub tool/MCP path for outbound media, with path auto-discovery disabled by default
 - Basic text chunking, summarized tool-output delivery, and timeout handling
 
 See `implementation_steps.md` for the current iteration checklist, `docs/completed-work.md` for finished checkpoint history, and `docs/hub-tools-mcp.md` for the explicit outbound media/tool design.
@@ -68,9 +68,9 @@ Edit `examples/config.example.yaml` for your machine:
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
-- `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or future hub tools; roots are canonicalized at startup
+- `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or `hitch.send_media`; roots are canonicalized at startup
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
-- `agents.pi.config_scope`: `system` mounts one normal Pi config read-only for a single principal, while `hitch` gives every principal isolated Pi config/state under `data_dir`
+- `agents.pi.config_scope`: under sandboxed execution, `system` mounts one normal Pi config read-only for a single principal, while `hitch` gives every principal isolated Pi config/state under `data_dir`
 - `agents.pi.system_config_root`: optional system-scope Pi config directory; defaults to `~/.pi/agent` and may not be the home directory itself
 - `agents.pi.execution_policy`: filesystem mounts, Pi tool allowlist, `bash`/process capability, network namespace mode, and required sandbox mode; the remote default is workspace write with non-shell built-ins only
 - `agents.pi.env_allowlist`: optional environment variable names Pi needs for provider authentication; channel credentials, host-control sockets, loader injection variables, and `HITCH_*` names are rejected
@@ -293,8 +293,8 @@ Pi config behavior:
 
 - Workers receive a small runtime/proxy environment allowlist. Provider API-key variables must be named explicitly under `agents.pi.env_allowlist`; Telegram credentials and host-control sockets are never inherited.
 - Sandboxed Pi workers use Bubblewrap on Linux and fail closed when it is unavailable. Restricted `sandbox: preferred` policies do not fall back to direct execution because direct mode cannot enforce them.
-- `config_scope: system` mounts only the configured Pi directory at `/agent-config` read-only, uses private principal-owned session storage, and is rejected unless exactly one principal is configured without `unsafe_allow_all`.
-- `config_scope: hitch` stores Pi config/session state inside that session's private state directory and defaults `PI_OFFLINE=1` unless already set.
+- Under sandboxed execution, `config_scope: system` mounts only the configured Pi directory at `/agent-config` read-only, uses private principal-owned session storage, and is rejected unless exactly one principal is configured without `unsafe_allow_all`. Explicit unsafe direct execution does not enforce that read-only mount boundary.
+- `config_scope: hitch` stores Pi config/session state in principal-private directories under `data_dir` and defaults `PI_OFFLINE=1` unless already set.
 - Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. `/hitch/results` is overlaid read-only to the worker and the sandbox receives an empty private home plus ephemeral `/tmp`.
 - The workspace is mounted at `/workspace` and at its canonical host path so trusted Pi/MCP configuration containing an absolute project cwd continues to work; both aliases have the same policy-selected read/write mode.
 - If `data_dir` is beneath the workspace, persisted tmpfs masks hide it through both aliases so workers cannot read Hitch's database, audit log, credentials, or other principals' state. Policy mounts and external Pi config roots may not re-expose that directory.
@@ -309,9 +309,13 @@ Pi config behavior:
 
 ## Roadmap
 
-- Robust live Telegram and WeChat usage testing
+- Live WeChat soak testing through the required Bubblewrap boundary
+- One internal owned/re-authorized session-dispatch service for chat and future triggers
+- Durable generic trigger inbox, initially without unattended producers
+- Resource, temporary-storage, output, credential, network, and unattended-extension safeguards before enabling schedules
+- A deliberately small scheduler after that unattended-execution gate passes
+- Explicit group-sharing authority before any shared session visibility
 - Pi-native MCP server list wiring, once Pi exposes a stable MCP client configuration surface
-- Durable delivery tracking and user-visible delivery failures
 - Richer approval rendering across non-Telegram channels
 - Discord adapter
 - Additional agent backends

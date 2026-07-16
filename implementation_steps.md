@@ -2,8 +2,8 @@
 
 This file is the short active tracker. Completed checkpoint history lives in
 [docs/completed-work.md](docs/completed-work.md), the outbound media/tool design lives in
-[docs/hub-tools-mcp.md](docs/hub-tools-mcp.md), and the accepted follow-on plan for per-principal
-authorization, persistent writable state, Bubblewrap isolation, proactive triggers, and scheduling lives
+[docs/hub-tools-mcp.md](docs/hub-tools-mcp.md), and the focused roadmap recording the completed
+principal/state/Bubblewrap foundation plus the planned dispatch, trigger, safety-gate, and scheduling work lives
 in [docs/security-sandbox-automation-roadmap.md](docs/security-sandbox-automation-roadmap.md).
 
 For the broad architecture roadmap, see [plan.md](plan.md). For the current user-facing surface, see
@@ -18,26 +18,44 @@ Status legend:
 
 ## Current Direction
 
-Outbound media should move from implicit path auto-discovery to explicit hub-owned tools.
+The reliability, durable delivery, principal ownership, private runtime state, and Linux Bubblewrap milestones are implemented. Remote Pi sessions now default to required sandboxing, while explicit direct execution remains an unsafe configuration-only mode.
 
-The current scanner that uploads files mentioned in final text is useful as a prototype, but it is too ambiguous for remote use:
+The next production change should extract one internal session-dispatch path before adding triggers or schedules. Chat handling already has the semantics that unattended work will need; those semantics should be centralized instead of duplicated.
 
-- it misses images when Pi does not print the exact path
-- it may upload unrelated files when Pi mentions allowed local paths
-- it cannot return a structured delivery result to the agent
-- it hides delivery failures from the user unless they inspect logs
+## Next Iteration: Unified Session Dispatch
 
-The target design is:
+Goal: make chat and future trigger producers call one owned, re-authorized prompt runner without changing current chat behavior.
 
-```text
-agent writes generated media into a hub-approved export path
-agent calls a Hitch tool to send that artifact
-hub validates path/MIME/size/session/channel
-hub sends via Telegram/WeChat/etc.
-hub returns a structured result and audits the delivery
-```
+Checklist:
 
-## Active Iteration: Runtime Reliability
+- [ ] Define a typed `runSessionPrompt` request/result contract carrying authenticated producer context, session ID, text/attachments, origin/delivery context, and idempotency metadata. A caller-supplied principal ID must never constitute authorization.
+- [ ] Move immutable session-owner verification, current-authority checks, active-turn ownership, worker start/reuse, timeout/cancellation, event consumption, delivery correlation, and audit correlation behind that contract.
+- [ ] Revalidate the persisted execution-policy/mount snapshot at dispatch; do not silently replace it with current defaults.
+- [ ] Keep chat commands and interactive approvals on the existing surface while routing ordinary prompts through the service.
+- [ ] Preserve the current reject-while-busy behavior for chat; do not design trigger queue semantics inside this refactor.
+- [ ] Add equivalence tests proving chat prompts retain final text, tool/media delivery, timeout recovery, and per-principal sandbox selection.
+- [ ] Only after this boundary is stable, design the durable trigger inbox and its `skip`/`queue-one`/`replace` policy.
+- [ ] Keep unattended producers and schedules disabled until CPU/memory/PID, temporary-storage/output, credentials/network, and unattended-extension safeguards have explicit enforced limits or an approved fail-closed profile.
+
+## Completed Iteration: Sandbox and Multi-User Foundation
+
+Goal: make principal ownership and filesystem boundaries enforceable before expanding unattended or shared use.
+
+- [x] Define execution policies, principals, authorization contexts, mount plans, and explicit unsafe direct mode.
+- [x] Resolve Telegram/WeChat identities to one principal and persist private session ownership.
+- [x] Canonicalize principal roots and reject symlink/path escape.
+- [x] Persist private per-principal Pi config/session state and per-session worker/tool state.
+- [x] Replace worker environment inheritance with a small allowlist and block channel credentials/host-control variables.
+- [x] Add Direct and Bubblewrap launchers with fail-closed selection and exact mount reconstruction.
+- [x] Translate execution-policy tools into Hitch-owned Pi flags and keep `bash` consistent with the process capability.
+- [x] Under Bubblewrap, support a read-only system Pi config for exactly one principal; require Hitch-scoped config for multiple principals.
+- [x] Hide Hitch data beneath a workspace with persisted tmpfs masks through both workspace aliases.
+- [x] Preserve the sandboxed `hitch.send_media` bridge and explicit writable media export mounts.
+- [x] Verify installed Pi extensions, descendant cleanup, unsafe-policy tightening, and two-principal route/mount isolation.
+
+Rollout note (2026-07-16): the implementation is committed but the live WeChat process was intentionally not restarted. Existing sessions with old direct or unmasked mount metadata will be quarantined and should be recreated on the first sandboxed restart.
+
+## Completed Iteration: Runtime Reliability
 
 Goal: prevent channel delivery failures or stale agent streams from leaving a session indefinitely marked as running.
 
@@ -145,7 +163,7 @@ Checklist:
 
 ## Design Decision: Agent Config Ownership
 
-Hitch should default to using system-level agent configuration. The product boundary is that Hitch is a remote control and session hub around local agents, not a replacement config/auth/plugin manager for those agents.
+Hitch defaults to principal-private Hitch-scoped agent configuration. A single-principal operator may explicitly select system-level configuration when preserving an existing local Pi identity is more important than writable config isolation. The product boundary is that Hitch is a remote control and session hub around local agents, not a replacement config/auth/plugin manager for those agents.
 
 Default ownership:
 
@@ -155,7 +173,8 @@ Default ownership:
 
 Config scope policy:
 
-- `config_scope: system` is the recommended default for normal use. It starts Pi like a terminal-launched Pi and inherits the user's existing system Pi config, auth, sessions, plugins, and preferences.
-- `config_scope: hitch` remains useful for smoke tests, demos, isolated bot profiles, and future controlled automation environments where Hitch-owned agent state is intentional.
+- Under sandboxed execution, `config_scope: system` mounts one explicitly resolved Pi config read-only while storing sessions privately under Hitch. It is appropriate for the current single-principal personal deployment and is rejected with multiple principals or `unsafe_allow_all`; unsafe direct execution does not enforce that read-only mount boundary.
+- `config_scope: hitch` gives every principal separate writable Pi config/session directories. It is the required mode for multi-user operation, smoke tests, isolated bot profiles, and future controlled automation.
+- Under sandboxed execution, neither mode exposes the full home directory. Provider environment variables remain opt-in through `env_allowlist`.
 
 This keeps the mental model simple: Hitch is the transport, authorization, cwd, session, approval, media, and artifact-delivery layer; the selected agent remains the source of truth for agent-specific behavior.

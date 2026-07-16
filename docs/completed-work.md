@@ -20,6 +20,9 @@ This file archives completed implementation checkpoints so
 | 11 | Tool output delivery defaults | Done |
 | 12 | Interactive selection and session reconnect foundation | Done |
 | 13 | Multi-channel runtime adapter | Done |
+| 14 | Runtime reliability and durable delivery evidence | Done |
+| 15 | Principal ownership and private runtime state | Done |
+| 16 | Fail-closed Bubblewrap and multi-user isolation | Done |
 
 ## Implemented Capabilities
 
@@ -70,6 +73,14 @@ This file archives completed implementation checkpoints so
 - Graceful signal shutdown, channel-health transition auditing, and a user-level systemd example.
 - SQLite-backed outbound delivery lifecycle with queue expiry, restart recovery, terminal retention, and no persisted message bodies or artifact paths.
 - Size-bounded JSONL audit rotation and hub-level `!health` diagnostics.
+- Principal-specific Telegram/WeChat identity resolution, roots, capabilities, and private session ownership.
+- Canonical cwd/root enforcement with fail-closed legacy ownership and security-metadata reconciliation.
+- Principal-private Pi config/session storage plus private per-session worker/tool state.
+- Explicit unsafe direct execution and required Linux Bubblewrap sandbox selection without fallback.
+- Pi tool/process policy translation, sandboxed read-only single-principal system config, private sandbox home, and cleared worker environment.
+- Persisted workspace aliases and hub-data masks that keep absolute MCP cwd compatibility without exposing Hitch state.
+- Sandboxed `hitch.send_media` bridge paths, explicit writable media exports, and deterministic sandbox descendant cleanup.
+- Adversarial two-principal Telegram route and mount isolation coverage.
 - Smoke tests for fake flow, media cache, media flow, interaction flow, Pi RPC, Pi approval, Pi UI selection, Telegram health checks, and multi-channel routing.
 
 ## Verification Snapshot
@@ -86,6 +97,12 @@ Latest local verification from the review pass:
 - `npm run smoke:pi-approval`: passed.
 - `npm run smoke:pi-ui-select`: passed.
 - `npm run smoke:multi-channel`: passed.
+- `npm run smoke:multi-user-sandbox`: passed.
+- `npm run smoke:security-foundation`: passed.
+- `npm run smoke:sandbox-launcher`: passed.
+- `npm run smoke:worker-environment`: passed.
+- `npm run smoke:pi-sandbox-integration`: passed.
+- `npm run smoke:pi-retry-lifecycle`: passed.
 - `npm run smoke:reliability-flow`: passed.
 - `npm run smoke:wechat-reliability`: passed.
 - `npm run smoke:mcp-session`: passed.
@@ -93,10 +110,9 @@ Latest local verification from the review pass:
 
 ## Lessons Carried Forward
 
-The outbound artifact prototype proved that channel upload plumbing works, but the trigger model is too loose. Final-text path scanning can miss generated images and can also upload unrelated files when an agent mentions paths under broad allowed roots.
+The outbound artifact prototype proved that channel upload plumbing works, but final-text path scanning can miss generated images and can also upload unrelated files when an agent mentions paths under broad allowed roots.
 
-The next design should treat artifact delivery as an explicit hub tool call. See
-[hub-tools-mcp.md](hub-tools-mcp.md).
+Artifact delivery now uses the explicit, session-scoped `hitch.send_media` hub tool path as the primary design, with legacy path scanning disabled by default. See [hub-tools-mcp.md](hub-tools-mcp.md).
 
 ## Historical Commit Notes
 

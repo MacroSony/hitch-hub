@@ -1,6 +1,6 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound media, explicit outbound media foundation, multi-channel routing, bounded delivery queue, hard turn deadlines, and health-aware status have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, `docs/completed-work.md` for checkpoint history, and `docs/security-sandbox-automation-roadmap.md` for the accepted follow-on order covering principal authorization, persistent writable state, Bubblewrap, proactive triggers, and scheduling. Where this older broad roadmap differs on those topics, the focused follow-on document records the current decision and unresolved conflicts.
+> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound/outbound media, multi-channel routing, durable delivery, hard turn deadlines, principal authorization, private runtime state, and fail-closed Bubblewrap isolation have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, `docs/completed-work.md` for checkpoint history, and `docs/security-sandbox-automation-roadmap.md` for the current order covering unified dispatch, trigger durability, unattended-execution safeguards, and scheduling. Where this older broad roadmap differs on those topics, the focused follow-on document records the current decision and unresolved conflicts.
 
 ## Current Roadmap Reset (July 2026)
 
@@ -8,10 +8,13 @@ The original milestones correctly prioritized proving Telegram + Pi, but the imp
 
 Recommended order from the current state:
 
-1. Finish live validation of hard deadlines, turn ownership, and bounded WeChat delivery.
-2. Add service supervision, graceful shutdown, durable delivery lifecycle records, channel-health transition auditing, and operator diagnostics.
-3. Finish the Pi-facing explicit media tool adapter so `hitch.send_media` is naturally available in normal Pi sessions, not only through the session bridge/MCP wrapper.
-4. Reassess whether the next breadth investment should be Discord or a second structured backend based on actual use; do not build both in one iteration.
+1. Soak the committed single-principal WeChat configuration through the new Bubblewrap boundary and recreate quarantined pre-sandbox sessions.
+2. Extract one owned, re-authorized session-dispatch service without changing chat behavior.
+3. Build a durable generic trigger inbox on that service, initially without enabling unattended producers.
+4. Enforce CPU/memory/PID, temporary-storage/output, credential/network, and unattended-extension safeguards before schedules can run.
+5. Add a deliberately small scheduler only after the trigger semantics and unattended-execution gate are verified.
+6. Keep group-shared sessions disabled until owner/admin/approval authority is explicitly designed.
+7. Reassess Discord versus a second structured backend only after the local deployment boundary is stable.
 
 This keeps the project aligned with its lightweight positioning: make one local deployment trustworthy before multiplying channel/backend combinations.
 
