@@ -41,6 +41,7 @@ const piAgentSchema = z.object({
   // this formerly security-looking but unenforced field.
   default_policy: z.enum(["ask", "deny", "allow"]).optional(),
   config_scope: z.enum(["hitch", "system"]).default("hitch"),
+  env_allowlist: z.array(z.string()).optional(),
   execution_policy: executionPolicySchema.optional(),
 });
 

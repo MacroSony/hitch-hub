@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { canonicalizeAllowedRoots, canonicalizeExistingDirectory } from "../core/path-policy.js";
+import {
+  assertWorkerEnvironmentAllowlist,
+  assertWorkerEnvironmentCredentialNames,
+} from "../security/worker-environment.js";
 import { configSchema, type HubConfig, type HubConfigInput } from "./schema.js";
 
 function expandHome(value: string): string {
@@ -31,6 +35,9 @@ export function loadConfig(configPath: string): HubConfig {
   const parsed = YAML.parse(raw) as HubConfigInput;
   const config = configSchema.parse(parsed);
   assertLiveChannelAuthorization(config);
+  const channelCredentialNames = [config.channels.telegram.bot_token_env];
+  assertWorkerEnvironmentCredentialNames(channelCredentialNames);
+  assertWorkerEnvironmentAllowlist(config.agents.pi.env_allowlist ?? [], channelCredentialNames);
   const configDir = path.dirname(resolvedConfigPath);
   const dataDir = resolvePath(config.data_dir, configDir);
 

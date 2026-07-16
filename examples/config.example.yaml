@@ -53,6 +53,8 @@ agents:
   pi:
     command: pi
     config_scope: system
+    # Provider credentials are opt-in; channel credentials and host-control variables are rejected.
+    # env_allowlist: [OPENAI_API_KEY]
     default_args:
       - --mode
       - rpc

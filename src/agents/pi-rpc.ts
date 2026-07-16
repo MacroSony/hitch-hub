@@ -5,6 +5,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import type { HubSession } from "../core/types.js";
 import type { AgentToolContext } from "../core/tool-bridge.js";
+import { buildWorkerEnvironment } from "../security/worker-environment.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
 import type {
   AgentBackend,
@@ -104,24 +105,29 @@ export class PiRpcBackend implements AgentBackend {
 
     const piConfig = this.config.agents.pi;
     const spawnSpec = resolveSpawnSpec(piConfig.command, piArgsForSession(piConfig.default_args, session));
-    const env = { ...process.env };
+    const overrides: Record<string, string> = {};
 
     if (piConfig.config_scope === "hitch") {
       const piAgentDir = path.join(this.config.dataDir, "pi", "agent");
       const piSessionDir = path.join(this.config.dataDir, "pi", "sessions");
       mkdirSync(piAgentDir, { recursive: true });
       mkdirSync(piSessionDir, { recursive: true });
-      env.PI_CODING_AGENT_DIR = piAgentDir;
-      env.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
-      env.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
+      overrides.PI_CODING_AGENT_DIR = piAgentDir;
+      overrides.PI_CODING_AGENT_SESSION_DIR = piSessionDir;
+      overrides.PI_OFFLINE = process.env.PI_OFFLINE ?? "1";
     }
     if (toolContext) {
-      env.HITCH_SESSION_ID = toolContext.sessionId;
-      env.HITCH_TOOL_TOKEN = toolContext.token;
-      env.HITCH_TOOL_OUTBOX = toolContext.outboxPath;
-      env.HITCH_TOOL_RESULT_DIR = toolContext.resultDir;
-      env.HITCH_TOOL_TIMEOUT_MS = String(this.config.agent_turn_timeout_ms);
+      overrides.HITCH_SESSION_ID = toolContext.sessionId;
+      overrides.HITCH_TOOL_TOKEN = toolContext.token;
+      overrides.HITCH_TOOL_OUTBOX = toolContext.outboxPath;
+      overrides.HITCH_TOOL_RESULT_DIR = toolContext.resultDir;
+      overrides.HITCH_TOOL_TIMEOUT_MS = String(this.config.agent_turn_timeout_ms);
     }
+    const env = buildWorkerEnvironment({
+      ...(piConfig.env_allowlist ? { allowlist: piConfig.env_allowlist } : {}),
+      blockedNames: [this.config.channels.telegram.bot_token_env],
+      overrides,
+    });
 
     this.proc = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: session.cwd,

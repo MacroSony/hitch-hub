@@ -20,6 +20,7 @@
     "smoke:pi-ui-select": "node --use-env-proxy --import tsx src/smoke/pi-ui-select.ts",
     "smoke:pi-retry-lifecycle": "node --use-env-proxy --import tsx src/smoke/pi-retry-lifecycle.ts",
     "smoke:security-foundation": "node --use-env-proxy --import tsx src/smoke/security-foundation.ts",
+    "smoke:worker-environment": "node --use-env-proxy --import tsx src/smoke/worker-environment.ts",
     "smoke:telegram-getme": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",
     "smoke:telegram-updates": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getUpdates",
     "typecheck": "tsc --noEmit",
