@@ -1,5 +1,6 @@
 import type { HubConfig } from "../config/schema.js";
 import type { ChatTarget, Platform } from "../core/types.js";
+import { snapshotCanonicalAllowedRoots } from "../core/path-policy.js";
 import {
   type AuthorizationContext,
   type Principal,
@@ -11,9 +12,20 @@ type ConfiguredPrincipal = HubConfig["users"][string];
 
 export class PrincipalResolver {
   private readonly identities = new Map<string, string>();
+  private readonly rootSnapshots = new Map<string, string[]>();
+  private readonly unsafeRootSnapshot: string[];
 
   constructor(private readonly config: HubConfig) {
+    this.unsafeRootSnapshot = snapshotCanonicalAllowedRoots(config.allowedRoots);
     for (const [principalId, principal] of Object.entries(config.users)) {
+      const roots = config.principalRoots[principalId];
+      if (!roots || roots.length === 0) {
+        throw new Error(`Principal ${principalId} has no resolved allowed roots.`);
+      }
+      this.rootSnapshots.set(
+        principalId,
+        snapshotCanonicalAllowedRoots(roots, `Allowed root for principal ${principalId}`),
+      );
       for (const identity of identitiesFor(principal)) {
         const key = identityKey(identity.platform, identity.userId);
         const existing = this.identities.get(key);
@@ -58,6 +70,13 @@ export class PrincipalResolver {
     }
 
     return this.contextFor(principalId, principalConfig, target, channel.unsafe_allow_all);
+  }
+
+  allowedRootsFor(principalId: string): string[] | undefined {
+    if (this.config.users[principalId]) {
+      return this.resolvedRootsFor(principalId);
+    }
+    return principalId.startsWith("__hitch_unsafe__:") ? [...this.unsafeRootSnapshot] : undefined;
   }
 
   private resolveFake(target: ChatTarget): AuthorizationContext | undefined {
@@ -109,7 +128,7 @@ export class PrincipalResolver {
       id: principalId,
       identities: target.userId ? [{ platform: target.platform, userId: target.userId }] : [],
       allowedChatIds: { [target.platform]: [target.chatId] },
-      allowedRoots: this.config.allowedRoots,
+      allowedRoots: [...this.unsafeRootSnapshot],
       capabilities: ["unsafe_allow_all"],
     };
     return {
@@ -122,11 +141,11 @@ export class PrincipalResolver {
   }
 
   private resolvedRootsFor(principalId: string): string[] {
-    const roots = this.config.principalRoots[principalId];
+    const roots = this.rootSnapshots.get(principalId);
     if (!roots || roots.length === 0) {
       throw new Error(`Principal ${principalId} has no resolved allowed roots.`);
     }
-    return roots;
+    return [...roots];
   }
 }
 

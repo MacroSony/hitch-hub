@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { canonicalizeAllowedRoots, canonicalizeExistingDirectory } from "../core/path-policy.js";
 import { configSchema, type HubConfig, type HubConfigInput } from "./schema.js";
 
 function expandHome(value: string): string {
@@ -36,12 +37,20 @@ export function loadConfig(configPath: string): HubConfig {
   const principalRoots = Object.fromEntries(
     Object.entries(config.users).map(([principalId, user]) => [
       principalId,
-      user.allowed_roots.map((root) => resolvePath(root, configDir)),
+      canonicalizeAllowedRoots(
+        user.allowed_roots.map((root) => resolvePath(root, configDir)),
+        `Allowed root for principal ${principalId}`,
+      ),
     ]),
   );
   const allowedRoots = Object.values(principalRoots).flat();
-  const outboundRoots = config.media.outbound_roots.map((root) => resolvePath(root, configDir));
-  const defaultCwd = config.default_cwd ? resolvePath(config.default_cwd, configDir) : allowedRoots[0];
+  const outboundRoots = canonicalizeAllowedRoots(
+    config.media.outbound_roots.map((root) => resolvePath(root, configDir)),
+    "Outbound media root",
+  );
+  const defaultCwd = config.default_cwd
+    ? canonicalizeExistingDirectory(resolvePath(config.default_cwd, configDir), "Default cwd")
+    : allowedRoots[0];
 
   return {
     ...config,

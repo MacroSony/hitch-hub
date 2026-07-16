@@ -13,6 +13,7 @@ import type {
 type SessionRow = {
   id: string;
   owner_principal_id: string | null;
+  authorization_state: "active" | "quarantined" | null;
   visibility: SessionVisibility | null;
   name: string | null;
   platform: Platform;
@@ -102,7 +103,7 @@ export type PendingInteraction = {
 };
 
 function rowToSession(row: SessionRow): HubSession | undefined {
-  if (!row.owner_principal_id) {
+  if (!row.owner_principal_id || row.authorization_state === "quarantined") {
     return undefined;
   }
   return {
@@ -233,6 +234,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
+           AND COALESCE(authorization_state, 'active') = 'active'
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC
          LIMIT 1`,
@@ -250,6 +252,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
+           AND COALESCE(authorization_state, 'active') = 'active'
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC`,
       )
@@ -274,6 +277,7 @@ export class SessionRegistry {
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
            AND owner_principal_id = ?
+           AND COALESCE(authorization_state, 'active') = 'active'
            AND status != 'stopped'
            AND (id = ? OR id LIKE ? OR name = ?)
          ORDER BY updated_at DESC
@@ -298,23 +302,34 @@ export class SessionRegistry {
 
   selectSession(id: string, ownerPrincipalId: string): boolean {
     const result = this.db
-      .prepare("UPDATE hub_sessions SET selected_at = ?, updated_at = ? WHERE id = ? AND owner_principal_id = ?")
+      .prepare(
+        `UPDATE hub_sessions
+         SET selected_at = ?, updated_at = ?
+         WHERE id = ?
+           AND owner_principal_id = ?
+           AND COALESCE(authorization_state, 'active') = 'active'`,
+      )
       .run(new Date().toISOString(), new Date().toISOString(), id, ownerPrincipalId);
     return result.changes === 1;
   }
 
   assignLegacySessionOwners(
-    resolvePrincipalId: (target: ChatTarget, cwd: string) => string | undefined,
+    resolvePrincipal: (
+      target: ChatTarget,
+      cwd: string,
+    ) => { principalId: string; canonicalCwd: string } | undefined,
   ): number {
     const rows = this.db
-      .prepare("SELECT * FROM hub_sessions WHERE owner_principal_id IS NULL")
+      .prepare(
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NULL AND COALESCE(authorization_state, 'active') = 'active'",
+      )
       .all() as SessionRow[];
     let assigned = 0;
     const update = this.db.prepare(
-      "UPDATE hub_sessions SET owner_principal_id = ?, visibility = 'private', updated_at = ? WHERE id = ? AND owner_principal_id IS NULL",
+      "UPDATE hub_sessions SET owner_principal_id = ?, cwd = ?, visibility = 'private', updated_at = ? WHERE id = ? AND owner_principal_id IS NULL",
     );
     for (const row of rows) {
-      const principalId = resolvePrincipalId(
+      const resolved = resolvePrincipal(
         {
           platform: row.platform,
           chatId: row.chat_id,
@@ -323,12 +338,54 @@ export class SessionRegistry {
         },
         row.cwd,
       );
-      if (!principalId) {
+      if (!resolved) {
         continue;
       }
-      assigned += Number(update.run(principalId, new Date().toISOString(), row.id).changes);
+      assigned += Number(
+        update
+          .run(resolved.principalId, resolved.canonicalCwd, new Date().toISOString(), row.id)
+          .changes,
+      );
     }
     return assigned;
+  }
+
+  reconcileOwnedSessionCwds(
+    resolveCanonicalCwd: (ownerPrincipalId: string, cwd: string) => string | undefined,
+  ): { canonicalized: number; madeInaccessible: number } {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM hub_sessions WHERE owner_principal_id IS NOT NULL AND COALESCE(authorization_state, 'active') = 'active'",
+      )
+      .all() as SessionRow[];
+    const updateCwd = this.db.prepare(
+      "UPDATE hub_sessions SET cwd = ?, updated_at = ? WHERE id = ? AND owner_principal_id = ?",
+    );
+    const quarantine = this.db.prepare(
+      `UPDATE hub_sessions
+       SET authorization_state = 'quarantined', status = 'stopped', process_id = NULL,
+           visibility = 'private', updated_at = ?
+       WHERE id = ? AND owner_principal_id = ? AND COALESCE(authorization_state, 'active') = 'active'`,
+    );
+    let canonicalized = 0;
+    let madeInaccessible = 0;
+    for (const row of rows) {
+      const ownerPrincipalId = row.owner_principal_id;
+      if (!ownerPrincipalId) {
+        continue;
+      }
+      const canonicalCwd = resolveCanonicalCwd(ownerPrincipalId, row.cwd);
+      if (!canonicalCwd) {
+        madeInaccessible += Number(quarantine.run(new Date().toISOString(), row.id, ownerPrincipalId).changes);
+        continue;
+      }
+      if (canonicalCwd !== row.cwd) {
+        canonicalized += Number(
+          updateCwd.run(canonicalCwd, new Date().toISOString(), row.id, ownerPrincipalId).changes,
+        );
+      }
+    }
+    return { canonicalized, madeInaccessible };
   }
 
   updateStatus(id: string, status: SessionStatus): void {
@@ -557,6 +614,7 @@ export class SessionRegistry {
       CREATE TABLE IF NOT EXISTS hub_sessions (
         id TEXT PRIMARY KEY,
         owner_principal_id TEXT,
+        authorization_state TEXT NOT NULL DEFAULT 'active',
         visibility TEXT NOT NULL DEFAULT 'private',
         name TEXT,
         platform TEXT NOT NULL,
@@ -618,6 +676,7 @@ export class SessionRegistry {
     this.addColumnIfMissing("hub_sessions", "name", "TEXT");
     this.addColumnIfMissing("hub_sessions", "selected_at", "TEXT");
     this.addColumnIfMissing("hub_sessions", "owner_principal_id", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "authorization_state", "TEXT NOT NULL DEFAULT 'active'");
     this.addColumnIfMissing("hub_sessions", "visibility", "TEXT NOT NULL DEFAULT 'private'");
     this.addColumnIfMissing("pending_interactions", "owner_principal_id", "TEXT");
     // Menus are short-lived and may contain session metadata. Old rows cannot

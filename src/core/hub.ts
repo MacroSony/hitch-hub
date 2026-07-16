@@ -14,7 +14,11 @@ import {
   type DeliveryHealth,
 } from "./delivery-coordinator.js";
 import { DeliveryStore } from "./delivery-store.js";
-import { isPathInsideAllowedRoots } from "./path-policy.js";
+import {
+  canonicalizeExistingDirectory,
+  isPathInsideAllowedRoots,
+  realDirectoryInsideAllowedRoots,
+} from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
 import { PrincipalResolver } from "../security/authorization.js";
@@ -64,6 +68,8 @@ export class RemoteAgentHub {
   private readonly recoveredDeliveryCount: number;
   private readonly prunedDeliveryCount: number;
   private readonly claimedLegacySessionCount: number;
+  private readonly canonicalizedSessionCwdCount: number;
+  private readonly inaccessibleSessionCount: number;
   private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -77,10 +83,19 @@ export class RemoteAgentHub {
     this.sessions = new SessionRegistry(config.dataDir);
     this.claimedLegacySessionCount = this.sessions.assignLegacySessionOwners((target, cwd) => {
       const authorization = this.principals.resolve(target);
-      return authorization && isPathInsideAllowedRoots(path.resolve(cwd), authorization.allowedRoots)
-        ? authorization.principal.id
+      const canonicalCwd = authorization
+        ? realDirectoryInsideAllowedRoots(cwd, authorization.allowedRoots)
+        : undefined;
+      return authorization && canonicalCwd
+        ? { principalId: authorization.principal.id, canonicalCwd }
         : undefined;
     });
+    const reconciledSessions = this.sessions.reconcileOwnedSessionCwds((ownerPrincipalId, cwd) => {
+      const allowedRoots = this.principals.allowedRootsFor(ownerPrincipalId);
+      return allowedRoots ? realDirectoryInsideAllowedRoots(cwd, allowedRoots) : undefined;
+    });
+    this.canonicalizedSessionCwdCount = reconciledSessions.canonicalized;
+    this.inaccessibleSessionCount = reconciledSessions.madeInaccessible;
     this.sessions.recoverInterruptedSessions();
     this.deliveryStore = new DeliveryStore(config.dataDir);
     this.recoveredDeliveryCount = this.deliveryStore.recoverInterrupted();
@@ -146,6 +161,8 @@ export class RemoteAgentHub {
         recoveredDeliveries: this.recoveredDeliveryCount,
         prunedDeliveries: this.prunedDeliveryCount,
         claimedLegacySessions: this.claimedLegacySessionCount,
+        canonicalizedSessionCwds: this.canonicalizedSessionCwdCount,
+        inaccessibleSessions: this.inaccessibleSessionCount,
       },
     });
     this.startWorkerSweep();
@@ -287,7 +304,7 @@ export class RemoteAgentHub {
     name?: string,
   ): Promise<void> {
     const agent = this.parseAgent(rawAgent);
-    const cwd = this.resolveRequestedCwd(rawCwd, authorization.allowedRoots);
+    const requestedCwd = this.resolveRequestedCwd(rawCwd, authorization.allowedRoots);
     const activeSession = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (activeSession && isTurnBlocked(activeSession)) {
       await this.sendChunkedText(
@@ -297,23 +314,26 @@ export class RemoteAgentHub {
       return;
     }
 
+    let cwd: string;
+    try {
+      cwd = canonicalizeExistingDirectory(requestedCwd, "Requested cwd");
+    } catch {
+      await this.audit.write({
+        type: "session.rejected_missing_cwd",
+        target: event.target,
+        details: { cwd: requestedCwd },
+      });
+      await this.sendChunkedText(event.target, `Rejected cwd because it is not an existing directory: ${requestedCwd}`);
+      return;
+    }
+
     if (!isPathInsideAllowedRoots(cwd, authorization.allowedRoots)) {
       await this.audit.write({
         type: "session.rejected_cwd",
         target: event.target,
-        details: { cwd },
+        details: { cwd: requestedCwd, canonicalCwd: cwd },
       });
-      await this.safeSendText(event.target, `Rejected cwd outside allowed roots: ${cwd}`);
-      return;
-    }
-
-    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-      await this.audit.write({
-        type: "session.rejected_missing_cwd",
-        target: event.target,
-        details: { cwd },
-      });
-      await this.sendChunkedText(event.target, `Rejected cwd because it is not an existing directory: ${cwd}`);
+      await this.safeSendText(event.target, `Rejected cwd outside allowed roots: ${requestedCwd}`);
       return;
     }
 
@@ -392,7 +412,7 @@ export class RemoteAgentHub {
         : "active session: none",
       ...(operator
         ? [
-            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}`,
+            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}; canonicalized session cwds ${this.canonicalizedSessionCwdCount}; inaccessible sessions ${this.inaccessibleSessionCount}`,
           ]
         : []),
     ];
@@ -756,6 +776,7 @@ export class RemoteAgentHub {
     }
 
     try {
+      this.assertSessionCwdAuthorized(session);
       const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
       await this.ensureToolPump(session, backend);
       this.sessions.setBackendProcess(session.id, processId);
@@ -957,12 +978,21 @@ export class RemoteAgentHub {
     return backend;
   }
 
+  private assertSessionCwdAuthorized(session: HubSession): void {
+    const allowedRoots = this.principals.allowedRootsFor(session.ownerPrincipalId);
+    const currentCwd = allowedRoots ? realDirectoryInsideAllowedRoots(session.cwd, allowedRoots) : undefined;
+    if (!currentCwd || currentCwd !== session.cwd) {
+      throw new Error(`Session cwd is no longer an authorized canonical directory: ${session.cwd}`);
+    }
+  }
+
   private async startBackendForTurn(
     session: HubSession,
     backend: AgentBackend,
     turn: ActiveTurn,
     target: ChatTarget,
   ): Promise<number | undefined> {
+    this.assertSessionCwdAuthorized(session);
     const wasAlive = backend.isAlive();
     const processId = await backend.start(session, this.toolBridge.contextFor(session.id));
     await this.ensureToolPump(session, backend);
@@ -1249,7 +1279,13 @@ export class RemoteAgentHub {
         await toolMessages.flush();
         if (finalText.length > 0) {
           await this.sendChunkedText(target, finalText, deliveryContext);
-          await this.sendArtifactsMentionedInText(target, finalText, deliveredArtifactPaths, deliveryContext);
+          await this.sendArtifactsMentionedInText(
+            target,
+            finalText,
+            deliveredArtifactPaths,
+            deliveryContext,
+            this.principals.allowedRootsFor(session.ownerPrincipalId) ?? [],
+          );
         }
         return true;
       }
@@ -1522,12 +1558,13 @@ export class RemoteAgentHub {
     text: string,
     deliveredArtifactPaths: Set<string>,
     deliveryContext?: DeliveryContext,
+    principalRoots: string[] = [],
   ): Promise<void> {
     if (!this.config.media.auto_discovery || !this.channel.sendArtifact) {
       return;
     }
 
-    const artifacts = extractLocalArtifacts(text, [this.config.dataDir, ...this.config.allowedRoots])
+    const artifacts = extractLocalArtifacts(text, [path.join(this.config.dataDir, "media", "outbound"), ...principalRoots])
       .filter((artifact) => !deliveredArtifactPaths.has(path.resolve(artifact.path)))
       .slice(0, Math.max(0, 5 - deliveredArtifactPaths.size));
     for (const artifact of artifacts) {
@@ -1535,7 +1572,7 @@ export class RemoteAgentHub {
       const result = await this.tools.sendMedia(target, artifact, {
         source: "auto_discovery",
         notifyOnFailure: true,
-        extraAllowedRoots: [this.config.dataDir, ...this.config.allowedRoots],
+        extraAllowedRoots: principalRoots,
         ...(deliveryContext ? { deliveryContext } : {}),
       });
       if (result.status === "failed") {

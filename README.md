@@ -59,15 +59,15 @@ TELEGRAM_BOT_TOKEN=123456:your-token
 
 Edit `examples/config.example.yaml` for your machine:
 
-- `default_cwd`: where `!new pi` starts by default
-- `users.*.allowed_roots`: directories Hitch may launch workers in
+- `default_cwd`: an existing directory where `!new pi` starts by default; it is canonicalized at startup
+- `users.*.allowed_roots`: existing directories Hitch may launch workers in; roots are canonicalized at startup
 - `users.*.allowed_chat_ids`: optional per-principal chat restriction applied in addition to the channel allowlist
 - `users.*.capabilities`: optional hub capabilities; `operator` reveals hub-global recovery/transition diagnostics in `!health`
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
 - `users.*.wechat_ids`: WeChat users allowed to control the hub
-- `media.outbound_roots`: directories Hitch may explicitly send media from with `!send` or future hub tools
+- `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or future hub tools; roots are canonicalized at startup
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
 - `agents.pi.config_scope`: `system` to use your normal Pi config, or `hitch` to isolate Pi state under `data_dir`
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text

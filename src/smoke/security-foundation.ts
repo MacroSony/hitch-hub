@@ -1,9 +1,14 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { HubConfig } from "../config/schema.js";
 import { configSchema } from "../config/schema.js";
 import { SessionRegistry } from "../core/session-registry.js";
+import {
+  canonicalizeAllowedRoots,
+  canonicalizeExistingDirectory,
+  realDirectoryInsideAllowedRoots,
+} from "../core/path-policy.js";
 import { PrincipalResolver } from "../security/authorization.js";
 import { executionPolicySchema } from "../security/policy.js";
 
@@ -144,6 +149,7 @@ function main(): void {
 
   verifySessionOwnership(cwd);
   verifyLegacySessionClaim(cwd);
+  verifyCanonicalRoots(cwd);
 
   process.stdout.write("Security foundation smoke ok\n");
 }
@@ -256,9 +262,12 @@ function verifyLegacySessionClaim(cwd: string): void {
   legacy.close();
 
   const registry = new SessionRegistry(dataDir);
-  const assigned = registry.assignLegacySessionOwners((target, sessionCwd) =>
-    target.platform === "telegram" && target.userId === "alice-user" && sessionCwd === cwd ? "alice" : undefined,
-  );
+  const assigned = registry.assignLegacySessionOwners((target, sessionCwd) => {
+    const canonicalCwd = realDirectoryInsideAllowedRoots(sessionCwd, [cwd]);
+    return target.platform === "telegram" && target.userId === "alice-user" && canonicalCwd
+      ? { principalId: "alice", canonicalCwd }
+      : undefined;
+  });
   if (assigned !== 1 || registry.getById("legacy-owned")?.ownerPrincipalId !== "alice") {
     throw new Error("Resolvable legacy session was not privately claimed by its principal.");
   }
@@ -277,6 +286,93 @@ function verifyLegacySessionClaim(cwd: string): void {
   verify.close();
   if (unresolved?.owner_principal_id !== null) {
     throw new Error("Unresolvable legacy session was assigned instead of remaining inaccessible.");
+  }
+  rmSync(dataDir, { force: true, recursive: true });
+}
+
+function verifyCanonicalRoots(cwd: string): void {
+  const dataDir = path.join(cwd, "examples/.remote-agent-hub-smoke", `security-symlinks-${process.pid}`);
+  const allowedRoot = path.join(dataDir, "allowed");
+  const outsideRoot = path.join(dataDir, "outside");
+  const linkedRoot = path.join(dataDir, "linked-root");
+  const escape = path.join(allowedRoot, "escape");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(allowedRoot, { recursive: true });
+  mkdirSync(outsideRoot, { recursive: true });
+  try {
+    symlinkSync(allowedRoot, linkedRoot, "dir");
+    symlinkSync(outsideRoot, escape, "dir");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EPERM") {
+      rmSync(dataDir, { force: true, recursive: true });
+      return;
+    }
+    throw error;
+  }
+
+  const canonicalRoots = canonicalizeAllowedRoots([linkedRoot]);
+  if (canonicalRoots.length !== 1 || canonicalRoots[0] !== canonicalizeExistingDirectory(allowedRoot)) {
+    throw new Error(`Configured symlink root was not canonicalized: ${JSON.stringify(canonicalRoots)}`);
+  }
+  if (realDirectoryInsideAllowedRoots(escape, canonicalRoots) !== undefined) {
+    throw new Error("A cwd symlink escaped its principal's canonical allowed root.");
+  }
+  const registry = new SessionRegistry(path.join(dataDir, "registry"));
+  const target = { platform: "fake" as const, chatId: "canonical", userId: "owner" };
+  const aliased = registry.createSession(target, "owner", "pi", linkedRoot, "aliased");
+  const outside = registry.createSession(target, "owner", "pi", outsideRoot, "outside");
+  const reconciled = registry.reconcileOwnedSessionCwds((_ownerPrincipalId, sessionCwd) =>
+    realDirectoryInsideAllowedRoots(sessionCwd, canonicalRoots),
+  );
+  if (
+    reconciled.canonicalized !== 1 ||
+    reconciled.madeInaccessible !== 1 ||
+    registry.getById(aliased.id)?.cwd !== allowedRoot ||
+    registry.getById(outside.id) !== undefined
+  ) {
+    throw new Error(`Owned-session cwd reconciliation failed: ${JSON.stringify(reconciled)}`);
+  }
+  const reassigned = registry.assignLegacySessionOwners((_target, sessionCwd) => ({
+    principalId: "attacker",
+    canonicalCwd: sessionCwd,
+  }));
+  if (reassigned !== 0) {
+    throw new Error("A quarantined session was released for reassignment to another principal.");
+  }
+  registry.close();
+
+  const quarantineDb = new DatabaseSync(path.join(dataDir, "registry", "hub.sqlite"));
+  const quarantined = quarantineDb
+    .prepare(
+      "SELECT owner_principal_id, authorization_state, status FROM hub_sessions WHERE id = ?",
+    )
+    .get(outside.id) as
+    | { owner_principal_id: string | null; authorization_state: string; status: string }
+    | undefined;
+  quarantineDb.close();
+  if (
+    quarantined?.owner_principal_id !== "owner" ||
+    quarantined.authorization_state !== "quarantined" ||
+    quarantined.status !== "stopped"
+  ) {
+    throw new Error(`Invalid session was not privately quarantined: ${JSON.stringify(quarantined)}`);
+  }
+
+  const parsed = configSchema.parse({ users: { owner: { allowed_roots: [allowedRoot] } } });
+  const resolver = new PrincipalResolver({
+    ...parsed,
+    dataDir,
+    defaultCwd: allowedRoot,
+    allowedRoots: [allowedRoot],
+    outboundRoots: [],
+    principalRoots: { owner: [allowedRoot] },
+  });
+  const movedRoot = path.join(dataDir, "allowed-moved");
+  renameSync(allowedRoot, movedRoot);
+  symlinkSync(outsideRoot, allowedRoot, "dir");
+  const rootSnapshot = resolver.allowedRootsFor("owner");
+  if (rootSnapshot?.[0] !== allowedRoot || realDirectoryInsideAllowedRoots(allowedRoot, rootSnapshot) !== undefined) {
+    throw new Error("A replaced allowed-root path silently retargeted the principal's immutable root snapshot.");
   }
   rmSync(dataDir, { force: true, recursive: true });
 }
