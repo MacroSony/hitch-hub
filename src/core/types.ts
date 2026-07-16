@@ -1,6 +1,7 @@
 export type Platform = "fake" | "telegram" | "discord" | "wechat" | "qq" | "feishu";
 export type AgentName = "pi" | "claude" | "codex" | "opencode" | "gemini" | "pty";
 export type SessionStatus = "idle" | "running" | "waiting_approval" | "waiting_input" | "error" | "stopped";
+export type SessionVisibility = "private" | "chat-shared";
 
 export type ChatTarget = {
   platform: Platform;
@@ -23,6 +24,8 @@ export type HubAttachment = {
 
 export type HubSession = {
   id: string;
+  ownerPrincipalId: string;
+  visibility: SessionVisibility;
   name?: string;
   platform: Platform;
   chatId: string;

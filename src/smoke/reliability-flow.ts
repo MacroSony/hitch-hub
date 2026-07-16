@@ -780,7 +780,7 @@ function reliabilityConfig(dataDir: string): HubConfig {
     principalRoots: { smoke: [cwd] },
     outboundRoots: [],
     users: {
-      smoke: { telegram_ids: [], wechat_ids: [], allowed_roots: [cwd] },
+      smoke: { telegram_ids: [], wechat_ids: [], allowed_roots: [cwd], capabilities: ["operator"] },
     },
     channels: {
       fake: { enabled: true },

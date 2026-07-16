@@ -61,6 +61,8 @@ Edit `examples/config.example.yaml` for your machine:
 
 - `default_cwd`: where `!new pi` starts by default
 - `users.*.allowed_roots`: directories Hitch may launch workers in
+- `users.*.allowed_chat_ids`: optional per-principal chat restriction applied in addition to the channel allowlist
+- `users.*.capabilities`: optional hub capabilities; `operator` reveals hub-global recovery/transition diagnostics in `!health`
 - `channels.telegram.allowed_chat_ids`: Telegram chats allowed to control the hub
 - `users.*.telegram_ids`: Telegram users allowed to control the hub
 - `channels.wechat.allowed_chat_ids`: WeChat chats/users allowed to control the hub
@@ -83,6 +85,7 @@ Edit `examples/config.example.yaml` for your machine:
 For a personal setup, copy the example to a local config name such as `config.local.yaml` and keep chat IDs and machine-specific paths out of public commits.
 When Telegram is enabled, `allowed_chat_ids` and at least one `users.*.telegram_ids` entry are required. For local-only experiments, `channels.telegram.unsafe_allow_all: true` restores the old allow-all behavior explicitly.
 When WeChat is enabled, `allowed_chat_ids` and at least one `users.*.wechat_ids` entry are required. For local-only experiments, `channels.wechat.unsafe_allow_all: true` allows every WeChat sender explicitly.
+Each `users` key is a principal ID. An inbound platform/user identity must map to exactly one principal, sessions are private to that principal, and duplicate identity assignments fail closed. Group-shared sessions remain disabled.
 
 ## Usage
 
@@ -176,7 +179,7 @@ Runtime health behavior:
 - Accepted text/media deliveries progress through durable `queued`, `sending`, and terminal `sent`/`failed`/`expired` states. Startup expires interrupted nonterminal rows without automatically resending them.
 - After a WeChat send failure, the rest of that broken batch fails quickly instead of consuming one full timeout per item; a new inbound message reopens delivery immediately.
 - `!status` reports active-turn age/deadline, worker liveness, pending/recent delivery health, and channel receive health.
-- `!health` reports process uptime, channel state, last inbound activity, durable delivery counts, active workers/turns, and startup recovery.
+- `!health` reports process uptime, channel state, last inbound activity, durable delivery counts, and principal-scoped workers/turns. Hub-global transition and startup-recovery totals require the `operator` capability.
 - Text delivery attempts are recorded in the audit log without storing message contents.
 - Delivery audit records include a delivery ID and, when available, session/turn correlation.
 - The SQLite delivery ledger stores lengths and correlation metadata, not text bodies or artifact paths. Terminal rows and audit files have configurable retention limits.

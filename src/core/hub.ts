@@ -17,6 +17,8 @@ import { DeliveryStore } from "./delivery-store.js";
 import { isPathInsideAllowedRoots } from "./path-policy.js";
 import { SessionRegistry, type PendingInteraction, type PendingInteractionOption } from "./session-registry.js";
 import type { AgentName, ChatTarget, HubSession } from "./types.js";
+import { PrincipalResolver } from "../security/authorization.js";
+import type { AuthorizationContext } from "../security/policy.js";
 
 const INTERACTION_TTL_MS = 5 * 60 * 1000;
 const TIMEOUT_PARTIAL_GRACE_MS = 2_000;
@@ -43,6 +45,7 @@ type SessionToolPump = {
 
 export class RemoteAgentHub {
   private readonly sessions: SessionRegistry;
+  private readonly principals: PrincipalResolver;
   private readonly audit: AuditLog;
   private readonly deliveryStore: DeliveryStore;
   private readonly tools: HubToolService;
@@ -60,6 +63,7 @@ export class RemoteAgentHub {
   private readonly startedAtMs = Date.now();
   private readonly recoveredDeliveryCount: number;
   private readonly prunedDeliveryCount: number;
+  private readonly claimedLegacySessionCount: number;
   private workerSweepTimer: ReturnType<typeof setInterval> | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -69,7 +73,14 @@ export class RemoteAgentHub {
     private readonly channel: ChannelAdapter,
     private readonly backendFactory: (config: HubConfig) => AgentBackend = (config) => new PiRpcBackend(config),
   ) {
+    this.principals = new PrincipalResolver(config);
     this.sessions = new SessionRegistry(config.dataDir);
+    this.claimedLegacySessionCount = this.sessions.assignLegacySessionOwners((target, cwd) => {
+      const authorization = this.principals.resolve(target);
+      return authorization && isPathInsideAllowedRoots(path.resolve(cwd), authorization.allowedRoots)
+        ? authorization.principal.id
+        : undefined;
+    });
     this.sessions.recoverInterruptedSessions();
     this.deliveryStore = new DeliveryStore(config.dataDir);
     this.recoveredDeliveryCount = this.deliveryStore.recoverInterrupted();
@@ -134,6 +145,7 @@ export class RemoteAgentHub {
       details: {
         recoveredDeliveries: this.recoveredDeliveryCount,
         prunedDeliveries: this.prunedDeliveryCount,
+        claimedLegacySessions: this.claimedLegacySessionCount,
       },
     });
     this.startWorkerSweep();
@@ -182,7 +194,12 @@ export class RemoteAgentHub {
   }
 
   private shouldHandleInBackground(event: InboundChatEvent): boolean {
-    if (selectionReplyFromText(event.text) !== undefined && this.sessions.getPendingInteractionForTarget(event.target)) {
+    const authorization = this.principals.resolve(event.target);
+    if (
+      selectionReplyFromText(event.text) !== undefined &&
+      authorization &&
+      this.sessions.getPendingInteractionForTarget(event.target, authorization.principal.id)
+    ) {
       return false;
     }
 
@@ -205,12 +222,13 @@ export class RemoteAgentHub {
       // A fresh inbound message proves the user is present and supplies a new
       // WeChat context token, so allow one new delivery attempt immediately.
       this.delivery.noteInbound(event.target);
-      if (!this.isAuthorizedTarget(event)) {
+      const authorization = this.principals.resolve(event.target);
+      if (!authorization) {
         await this.safeSendText(event.target, "Unauthorized chat/user.");
         return;
       }
 
-      if (await this.handlePendingInteractionSelection(event)) {
+      if (await this.handlePendingInteractionSelection(event, authorization)) {
         return;
       }
 
@@ -218,40 +236,40 @@ export class RemoteAgentHub {
 
       switch (command.type) {
         case "new":
-          await this.handleNew(event, command.agent, command.cwd, command.name);
+          await this.handleNew(event, authorization, command.agent, command.cwd, command.name);
           return;
         case "status":
-          await this.handleStatus(event);
+          await this.handleStatus(event, authorization);
           return;
         case "health":
-          await this.handleHealth(event);
+          await this.handleHealth(event, authorization);
           return;
         case "sessions":
-          await this.handleSessions(event);
+          await this.handleSessions(event, authorization);
           return;
         case "switch":
-          await this.handleSwitch(event, command.ref);
+          await this.handleSwitch(event, authorization, command.ref);
           return;
         case "cwd":
-          await this.handleCwd(event);
+          await this.handleCwd(event, authorization);
           return;
         case "abort":
-          await this.handleAbort(event);
+          await this.handleAbort(event, authorization);
           return;
         case "send":
-          await this.handleSendMedia(event, command.path, command.caption);
+          await this.handleSendMedia(event, authorization, command.path, command.caption);
           return;
         case "approve":
-          await this.handleApprovalDecision(event, command.id, "allowed");
+          await this.handleApprovalDecision(event, authorization, command.id, "allowed");
           return;
         case "deny":
-          await this.handleApprovalDecision(event, command.id, "denied");
+          await this.handleApprovalDecision(event, authorization, command.id, "denied");
           return;
         case "agent_command":
-          await this.handleAgentCommand(event, command.raw);
+          await this.handleAgentCommand(event, authorization, command.raw);
           return;
         case "prompt":
-          await this.handlePrompt(event, command.text);
+          await this.handlePrompt(event, authorization, command.text);
           return;
       }
     } catch (error) {
@@ -261,10 +279,16 @@ export class RemoteAgentHub {
     }
   }
 
-  private async handleNew(event: InboundChatEvent, rawAgent: string, rawCwd?: string, name?: string): Promise<void> {
+  private async handleNew(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+    rawAgent: string,
+    rawCwd?: string,
+    name?: string,
+  ): Promise<void> {
     const agent = this.parseAgent(rawAgent);
-    const cwd = this.resolveRequestedCwd(rawCwd);
-    const activeSession = this.sessions.getActiveForTarget(event.target);
+    const cwd = this.resolveRequestedCwd(rawCwd, authorization.allowedRoots);
+    const activeSession = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (activeSession && isTurnBlocked(activeSession)) {
       await this.sendChunkedText(
         event.target,
@@ -273,7 +297,7 @@ export class RemoteAgentHub {
       return;
     }
 
-    if (!isPathInsideAllowedRoots(cwd, this.config.allowedRoots)) {
+    if (!isPathInsideAllowedRoots(cwd, authorization.allowedRoots)) {
       await this.audit.write({
         type: "session.rejected_cwd",
         target: event.target,
@@ -293,12 +317,19 @@ export class RemoteAgentHub {
       return;
     }
 
-    const session = this.sessions.createSession(event.target, agent, cwd, name);
+    const session = this.sessions.createSession(event.target, authorization.principal.id, agent, cwd, name);
     await this.audit.write({
       type: "session.created",
       sessionId: session.id,
       target: event.target,
-      details: { agent, cwd, name },
+      details: {
+        agent,
+        cwd,
+        name,
+        ownerPrincipalId: authorization.principal.id,
+        visibility: session.visibility,
+        authorizationMode: authorization.authorizationMode,
+      },
     });
 
     await this.sendChunkedText(
@@ -307,8 +338,8 @@ export class RemoteAgentHub {
     );
   }
 
-  private async handleStatus(event: InboundChatEvent): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
+  private async handleStatus(event: InboundChatEvent, authorization: AuthorizationContext): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (!session) {
       await this.sendChunkedText(event.target, "No active session.");
       return;
@@ -331,45 +362,58 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, lines.join("\n"));
   }
 
-  private async handleHealth(event: InboundChatEvent): Promise<void> {
+  private async handleHealth(event: InboundChatEvent, authorization: AuthorizationContext): Promise<void> {
     const key = targetRuntimeKey(event.target);
-    const session = this.sessions.getActiveForTarget(event.target);
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     const turn = session ? this.activeTurns.get(session.id) : undefined;
     const worker = session ? this.workers.get(session.id) : undefined;
     const delivery = this.delivery.health(event.target);
     const channel = this.channel.health?.(event.target);
     const inboundAt = this.lastInboundAt.get(key);
+    const visibleSessionIds = new Set(
+      this.sessions.listForTarget(event.target, authorization.principal.id).map((item) => item.id),
+    );
+    const visibleWorkerCount = [...this.workers.keys()].filter((sessionId) => visibleSessionIds.has(sessionId)).length;
+    const visibleTurnCount = [...this.activeTurns.keys()].filter((sessionId) => visibleSessionIds.has(sessionId)).length;
+    const operator = authorization.principal.capabilities.includes("operator");
     const lines = [
       "Hitch health",
       `uptime: ${formatDuration(Date.now() - this.startedAtMs)}`,
       `channel: ${formatChannelHealth(channel)}`,
-      `channel transitions: ${this.channelTransitionCounts.get(event.target.platform) ?? 0}`,
+      ...(operator
+        ? [`channel transitions: ${this.channelTransitionCounts.get(event.target.platform) ?? 0}`]
+        : []),
       `last inbound: ${inboundAt ? `${formatDuration(Math.max(0, Date.now() - Date.parse(inboundAt)))} ago` : "none"}; received ${this.inboundCounts.get(key) ?? 0}`,
       `delivery runtime: ${formatDeliveryHealth(delivery)}`,
       `delivery ledger: ${formatDeliveryLedger(delivery)}`,
-      `workers: ${this.workers.size}; active turns: ${this.activeTurns.size}`,
+      `workers: ${visibleWorkerCount}; active turns: ${visibleTurnCount}`,
       session
         ? `active session: ${shortId(session)}; ${session.status}; turn ${formatTurnHealth(turn, session.status)}; worker ${formatWorkerHealth(worker, session.processId, Boolean(turn))}`
         : "active session: none",
-      `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}`,
+      ...(operator
+        ? [
+            `startup recovery: expired ${this.recoveredDeliveryCount}; retention pruned ${this.prunedDeliveryCount}; claimed legacy sessions ${this.claimedLegacySessionCount}`,
+          ]
+        : []),
     ];
     await this.sendChunkedText(event.target, lines.join("\n"));
   }
 
-  private async handleSessions(event: InboundChatEvent): Promise<void> {
-    const sessions = this.sessions.listForTarget(event.target);
+  private async handleSessions(event: InboundChatEvent, authorization: AuthorizationContext): Promise<void> {
+    const sessions = this.sessions.listForTarget(event.target, authorization.principal.id);
     if (sessions.length === 0) {
       await this.sendChunkedText(event.target, "No sessions.");
       return;
     }
 
-    const active = this.sessions.getActiveForTarget(event.target);
+    const active = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     const options = sessions.map((session) => ({
       label: session.name ? `${session.name} (${shortId(session)})` : shortId(session),
       description: `${active?.id === session.id ? "active | " : ""}${session.status} | ${session.agent} | ${session.cwd}`,
       value: { sessionId: session.id },
     }));
     await this.createAndSendInteraction(event.target, {
+      ownerPrincipalId: authorization.principal.id,
       owner: "hub",
       kind: "hub.session.switch",
       title: "Select session",
@@ -377,14 +421,21 @@ export class RemoteAgentHub {
     });
   }
 
-  private async handleSwitch(event: InboundChatEvent, ref: string): Promise<void> {
-    const session = this.sessions.findForTarget(event.target, ref);
+  private async handleSwitch(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+    ref: string,
+  ): Promise<void> {
+    const session = this.sessions.findForTarget(event.target, authorization.principal.id, ref);
     if (!session) {
       await this.sendChunkedText(event.target, `No session found for ${ref}. Use \`!sessions\` to list sessions.`);
       return;
     }
 
-    this.sessions.selectSession(session.id);
+    if (!this.sessions.selectSession(session.id, authorization.principal.id)) {
+      await this.sendChunkedText(event.target, "Session selection was rejected because ownership changed.");
+      return;
+    }
     const selected = this.sessions.getById(session.id) ?? session;
     await this.audit.write({
       type: "session.selected",
@@ -398,13 +449,13 @@ export class RemoteAgentHub {
     );
   }
 
-  private async handleCwd(event: InboundChatEvent): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
+  private async handleCwd(event: InboundChatEvent, authorization: AuthorizationContext): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     await this.sendChunkedText(event.target, session ? session.cwd : "No active session.");
   }
 
-  private async handleAbort(event: InboundChatEvent): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
+  private async handleAbort(event: InboundChatEvent, authorization: AuthorizationContext): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (!session) {
       await this.sendChunkedText(event.target, "No active session to abort.");
       return;
@@ -426,14 +477,23 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Stopped session ${shortId(session)}.`);
   }
 
-  private async handleSendMedia(event: InboundChatEvent, mediaPath: string, caption?: string): Promise<void> {
+  private async handleSendMedia(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+    mediaPath: string,
+    caption?: string,
+  ): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     const result = await this.tools.sendMedia(
       event.target,
       {
         path: mediaPath,
         ...(caption ? { caption } : {}),
       },
-      { source: "hub_command" },
+      {
+        source: "hub_command",
+        ...(session ? { deliveryContext: { sessionId: session.id } } : {}),
+      },
     );
 
     if (result.status === "sent") {
@@ -444,8 +504,12 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Media delivery failed: ${result.message ?? "unknown error"}`);
   }
 
-  private async handleAgentCommand(event: InboundChatEvent, raw: string): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
+  private async handleAgentCommand(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+    raw: string,
+  ): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (!session) {
       await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
       return;
@@ -499,8 +563,12 @@ export class RemoteAgentHub {
     }
   }
 
-  private async handlePrompt(event: InboundChatEvent, text: string): Promise<void> {
-    const session = this.sessions.getActiveForTarget(event.target);
+  private async handlePrompt(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+    text: string,
+  ): Promise<void> {
+    const session = this.sessions.getActiveForTarget(event.target, authorization.principal.id);
     if (!session) {
       await this.sendChunkedText(event.target, "No active session. Start one with `!new pi <cwd>`.");
       return;
@@ -551,6 +619,7 @@ export class RemoteAgentHub {
 
   private async handleApprovalDecision(
     event: InboundChatEvent,
+    authorization: AuthorizationContext,
     approvalId: string,
     decision: "allowed" | "denied",
   ): Promise<void> {
@@ -566,7 +635,11 @@ export class RemoteAgentHub {
     }
 
     const session = this.sessions.getById(approval.sessionId);
-    if (!session || !targetMatchesSession(event.target, session)) {
+    if (
+      !session ||
+      session.ownerPrincipalId !== authorization.principal.id ||
+      !targetMatchesSession(event.target, session)
+    ) {
       await this.audit.write({
         type: "approval.rejected_target",
         sessionId: approval.sessionId,
@@ -607,13 +680,16 @@ export class RemoteAgentHub {
     await this.sendChunkedText(event.target, `Approval ${approvalId} ${decision}.`);
   }
 
-  private async handlePendingInteractionSelection(event: InboundChatEvent): Promise<boolean> {
+  private async handlePendingInteractionSelection(
+    event: InboundChatEvent,
+    authorization: AuthorizationContext,
+  ): Promise<boolean> {
     const selection = selectionReplyFromText(event.text);
     if (selection === undefined) {
       return false;
     }
 
-    const interaction = this.sessions.getPendingInteractionForTarget(event.target);
+    const interaction = this.sessions.getPendingInteractionForTarget(event.target, authorization.principal.id);
     if (!interaction) {
       return false;
     }
@@ -625,7 +701,11 @@ export class RemoteAgentHub {
         selection.type === "next"
           ? (interaction.pageIndex + 1) % pageCount
           : (interaction.pageIndex - 1 + pageCount) % pageCount;
-      const updated = this.sessions.updatePendingInteractionPage(interaction.id, nextPage);
+      const updated = this.sessions.updatePendingInteractionPage(
+        interaction.id,
+        authorization.principal.id,
+        nextPage,
+      );
       await this.sendInteractionMenu(event.target, updated ?? interaction);
       return true;
     }
@@ -637,23 +717,30 @@ export class RemoteAgentHub {
       return true;
     }
 
-    this.sessions.deletePendingInteraction(interaction.id);
-    await this.executeInteractionSelection(event.target, interaction, option);
+    this.sessions.deletePendingInteraction(interaction.id, authorization.principal.id);
+    await this.executeInteractionSelection(event.target, authorization, interaction, option);
     return true;
   }
 
   private async executeInteractionSelection(
     target: ChatTarget,
+    authorization: AuthorizationContext,
     interaction: PendingInteraction,
     option: PendingInteractionOption,
   ): Promise<void> {
     if (interaction.owner === "hub") {
-      await this.executeHubSelection(target, interaction, option);
+      await this.executeHubSelection(target, authorization, interaction, option);
       return;
     }
 
-    const session = interaction.sessionId ? this.sessions.getById(interaction.sessionId) : this.sessions.getActiveForTarget(target);
-    if (!session || !targetMatchesSession(target, session)) {
+    const session = interaction.sessionId
+      ? this.sessions.getById(interaction.sessionId)
+      : this.sessions.getActiveForTarget(target, authorization.principal.id);
+    if (
+      !session ||
+      session.ownerPrincipalId !== authorization.principal.id ||
+      !targetMatchesSession(target, session)
+    ) {
       await this.sendChunkedText(target, "The selected session is no longer available.");
       return;
     }
@@ -700,6 +787,7 @@ export class RemoteAgentHub {
 
   private async executeHubSelection(
     target: ChatTarget,
+    authorization: AuthorizationContext,
     interaction: PendingInteraction,
     option: PendingInteractionOption,
   ): Promise<void> {
@@ -715,12 +803,19 @@ export class RemoteAgentHub {
     }
 
     const session = this.sessions.getById(value.sessionId);
-    if (!session || !targetMatchesSession(target, session)) {
+    if (
+      !session ||
+      session.ownerPrincipalId !== authorization.principal.id ||
+      !targetMatchesSession(target, session)
+    ) {
       await this.sendChunkedText(target, "Selected session is no longer available.");
       return;
     }
 
-    this.sessions.selectSession(session.id);
+    if (!this.sessions.selectSession(session.id, authorization.principal.id)) {
+      await this.sendChunkedText(target, "Selected session ownership changed; selection was rejected.");
+      return;
+    }
     const selected = this.sessions.getById(session.id) ?? session;
     await this.audit.write({
       type: "session.selected",
@@ -746,6 +841,7 @@ export class RemoteAgentHub {
     }
     if (result.interaction) {
       await this.createAndSendInteraction(target, {
+        ownerPrincipalId: session.ownerPrincipalId,
         owner: "agent",
         sessionId: session.id,
         kind: result.interaction.kind,
@@ -776,6 +872,7 @@ export class RemoteAgentHub {
   private async createAndSendInteraction(
     target: ChatTarget,
     input: {
+      ownerPrincipalId: string;
       owner: "hub" | "agent";
       kind: string;
       title: string;
@@ -791,6 +888,7 @@ export class RemoteAgentHub {
     }
 
     const interaction = this.sessions.createPendingInteraction(target, {
+      ownerPrincipalId: input.ownerPrincipalId,
       owner: input.owner,
       kind: input.kind,
       title: input.title,
@@ -829,8 +927,11 @@ export class RemoteAgentHub {
     return value;
   }
 
-  private resolveRequestedCwd(rawCwd: string | undefined): string {
-    const defaultCwd = this.config.defaultCwd;
+  private resolveRequestedCwd(rawCwd: string | undefined, allowedRoots: string[]): string {
+    const defaultCwd =
+      this.config.defaultCwd && isPathInsideAllowedRoots(this.config.defaultCwd, allowedRoots)
+        ? this.config.defaultCwd
+        : allowedRoots[0];
     if (!defaultCwd) {
       throw new Error("No default cwd configured. Use `!new pi <absolute-cwd>` or set `default_cwd`.");
     }
@@ -1211,6 +1312,7 @@ export class RemoteAgentHub {
         this.setTurnPhase(turn, "waiting_input");
         this.updateStatusForTurn(turn, "waiting_input");
         await this.createAndSendInteraction(target, {
+          ownerPrincipalId: session.ownerPrincipalId,
           owner: "agent",
           sessionId: session.id,
           kind: event.interaction.kind,
@@ -1400,7 +1502,11 @@ export class RemoteAgentHub {
   }
 
   private deliveryContextFor(target: ChatTarget): DeliveryContext {
-    const session = this.sessions.getActiveForTarget(target);
+    const authorization = this.principals.resolve(target);
+    if (!authorization) {
+      return {};
+    }
+    const session = this.sessions.getActiveForTarget(target, authorization.principal.id);
     if (!session) {
       return {};
     }
@@ -1438,41 +1544,6 @@ export class RemoteAgentHub {
     }
   }
 
-  private isAuthorizedTarget(event: InboundChatEvent): boolean {
-    if (event.target.platform === "fake") {
-      return true;
-    }
-
-    if (event.target.platform === "telegram") {
-      if (this.config.channels.telegram.unsafe_allow_all) {
-        return true;
-      }
-
-      const allowedChatIds = this.config.channels.telegram.allowed_chat_ids;
-      if (allowedChatIds.length === 0 || !allowedChatIds.includes(event.target.chatId)) {
-        return false;
-      }
-
-      const telegramUserIds = Object.values(this.config.users).flatMap((user) => user.telegram_ids);
-      return event.target.userId !== undefined && telegramUserIds.includes(event.target.userId);
-    }
-
-    if (event.target.platform === "wechat") {
-      if (this.config.channels.wechat.unsafe_allow_all) {
-        return true;
-      }
-
-      const allowedChatIds = this.config.channels.wechat.allowed_chat_ids;
-      if (allowedChatIds.length === 0 || !allowedChatIds.includes(event.target.chatId)) {
-        return false;
-      }
-
-      const wechatUserIds = Object.values(this.config.users).flatMap((user) => user.wechat_ids);
-      return event.target.userId !== undefined && wechatUserIds.includes(event.target.userId);
-    }
-
-    return false;
-  }
 }
 
 class ToolStatusBatcher {
@@ -1694,8 +1765,7 @@ function targetMatchesSession(target: ChatTarget, session: HubSession): boolean 
   return (
     target.platform === session.platform &&
     target.chatId === session.chatId &&
-    (target.threadId ?? "") === (session.threadId ?? "") &&
-    (session.userId === undefined || target.userId === session.userId)
+    (target.threadId ?? "") === (session.threadId ?? "")
   );
 }
 

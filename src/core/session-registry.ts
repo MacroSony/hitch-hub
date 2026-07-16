@@ -1,10 +1,19 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentName, ChatTarget, HubSession, Platform, SessionStatus } from "./types.js";
+import type {
+  AgentName,
+  ChatTarget,
+  HubSession,
+  Platform,
+  SessionStatus,
+  SessionVisibility,
+} from "./types.js";
 
 type SessionRow = {
   id: string;
+  owner_principal_id: string | null;
+  visibility: SessionVisibility | null;
   name: string | null;
   platform: Platform;
   chat_id: string;
@@ -38,6 +47,7 @@ type ApprovalRow = {
 
 type PendingInteractionRow = {
   id: string;
+  owner_principal_id: string | null;
   platform: Platform;
   chat_id: string;
   thread_id: string | null;
@@ -77,6 +87,7 @@ export type PendingInteractionOption = {
 
 export type PendingInteraction = {
   id: string;
+  ownerPrincipalId: string;
   target: ChatTarget;
   sessionId?: string;
   owner: "hub" | "agent";
@@ -90,9 +101,14 @@ export type PendingInteraction = {
   updatedAt: string;
 };
 
-function rowToSession(row: SessionRow): HubSession {
+function rowToSession(row: SessionRow): HubSession | undefined {
+  if (!row.owner_principal_id) {
+    return undefined;
+  }
   return {
     id: row.id,
+    ownerPrincipalId: row.owner_principal_id,
+    visibility: row.visibility === "chat-shared" ? "chat-shared" : "private",
     ...(row.name ? { name: row.name } : {}),
     platform: row.platform,
     chatId: row.chat_id,
@@ -126,9 +142,13 @@ function rowToPendingApproval(row: ApprovalRow): PendingApproval {
   };
 }
 
-function rowToPendingInteraction(row: PendingInteractionRow): PendingInteraction {
+function rowToPendingInteraction(row: PendingInteractionRow): PendingInteraction | undefined {
+  if (!row.owner_principal_id) {
+    return undefined;
+  }
   return {
     id: row.id,
+    ownerPrincipalId: row.owner_principal_id,
     target: {
       platform: row.platform,
       chatId: row.chat_id,
@@ -157,17 +177,26 @@ export class SessionRegistry {
     this.migrate();
   }
 
-  createSession(target: ChatTarget, agent: AgentName, cwd: string, name?: string): HubSession {
+  createSession(
+    target: ChatTarget,
+    ownerPrincipalId: string,
+    agent: AgentName,
+    cwd: string,
+    name?: string,
+  ): HubSession {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     this.db
       .prepare(
         `INSERT INTO hub_sessions (
-          id, name, platform, chat_id, thread_id, user_id, agent, cwd, backend_session_id, status, created_at, updated_at, selected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, owner_principal_id, visibility, name, platform, chat_id, thread_id, user_id, agent, cwd,
+          backend_session_id, status, created_at, updated_at, selected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
+        ownerPrincipalId,
+        "private",
         name?.trim() || null,
         target.platform,
         target.chatId,
@@ -196,38 +225,43 @@ export class SessionRegistry {
     return row ? rowToSession(row) : undefined;
   }
 
-  getActiveForTarget(target: ChatTarget): HubSession | undefined {
+  getActiveForTarget(target: ChatTarget, ownerPrincipalId: string): HubSession | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM hub_sessions
          WHERE platform = ?
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND owner_principal_id = ?
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC
          LIMIT 1`,
       )
-      .get(target.platform, target.chatId, target.threadId ?? null) as SessionRow | undefined;
+      .get(target.platform, target.chatId, target.threadId ?? null, ownerPrincipalId) as SessionRow | undefined;
 
     return row ? rowToSession(row) : undefined;
   }
 
-  listForTarget(target: ChatTarget): HubSession[] {
+  listForTarget(target: ChatTarget, ownerPrincipalId: string): HubSession[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM hub_sessions
          WHERE platform = ?
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND owner_principal_id = ?
            AND status != 'stopped'
          ORDER BY COALESCE(selected_at, updated_at) DESC, updated_at DESC`,
       )
-      .all(target.platform, target.chatId, target.threadId ?? null) as SessionRow[];
+      .all(target.platform, target.chatId, target.threadId ?? null, ownerPrincipalId) as SessionRow[];
 
-    return rows.map(rowToSession);
+    return rows.flatMap((row) => {
+      const session = rowToSession(row);
+      return session ? [session] : [];
+    });
   }
 
-  findForTarget(target: ChatTarget, ref: string): HubSession | undefined {
+  findForTarget(target: ChatTarget, ownerPrincipalId: string, ref: string): HubSession | undefined {
     const trimmed = ref.trim();
     if (!trimmed) {
       return undefined;
@@ -239,12 +273,21 @@ export class SessionRegistry {
          WHERE platform = ?
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
+           AND owner_principal_id = ?
            AND status != 'stopped'
            AND (id = ? OR id LIKE ? OR name = ?)
          ORDER BY updated_at DESC
          LIMIT 2`,
       )
-      .all(target.platform, target.chatId, target.threadId ?? null, trimmed, `${trimmed}%`, trimmed) as SessionRow[];
+      .all(
+        target.platform,
+        target.chatId,
+        target.threadId ?? null,
+        ownerPrincipalId,
+        trimmed,
+        `${trimmed}%`,
+        trimmed,
+      ) as SessionRow[];
 
     if (rows.length > 1) {
       throw new Error(`Session reference is ambiguous: ${trimmed}`);
@@ -253,10 +296,39 @@ export class SessionRegistry {
     return rows[0] ? rowToSession(rows[0]) : undefined;
   }
 
-  selectSession(id: string): void {
-    this.db
-      .prepare("UPDATE hub_sessions SET selected_at = ?, updated_at = ? WHERE id = ?")
-      .run(new Date().toISOString(), new Date().toISOString(), id);
+  selectSession(id: string, ownerPrincipalId: string): boolean {
+    const result = this.db
+      .prepare("UPDATE hub_sessions SET selected_at = ?, updated_at = ? WHERE id = ? AND owner_principal_id = ?")
+      .run(new Date().toISOString(), new Date().toISOString(), id, ownerPrincipalId);
+    return result.changes === 1;
+  }
+
+  assignLegacySessionOwners(
+    resolvePrincipalId: (target: ChatTarget, cwd: string) => string | undefined,
+  ): number {
+    const rows = this.db
+      .prepare("SELECT * FROM hub_sessions WHERE owner_principal_id IS NULL")
+      .all() as SessionRow[];
+    let assigned = 0;
+    const update = this.db.prepare(
+      "UPDATE hub_sessions SET owner_principal_id = ?, visibility = 'private', updated_at = ? WHERE id = ? AND owner_principal_id IS NULL",
+    );
+    for (const row of rows) {
+      const principalId = resolvePrincipalId(
+        {
+          platform: row.platform,
+          chatId: row.chat_id,
+          ...(row.thread_id ? { threadId: row.thread_id } : {}),
+          ...(row.user_id ? { userId: row.user_id } : {}),
+        },
+        row.cwd,
+      );
+      if (!principalId) {
+        continue;
+      }
+      assigned += Number(update.run(principalId, new Date().toISOString(), row.id).changes);
+    }
+    return assigned;
   }
 
   updateStatus(id: string, status: SessionStatus): void {
@@ -366,6 +438,7 @@ export class SessionRegistry {
   createPendingInteraction(
     target: ChatTarget,
     input: {
+      ownerPrincipalId: string;
       owner: "hub" | "agent";
       kind: string;
       title: string;
@@ -377,16 +450,17 @@ export class SessionRegistry {
   ): PendingInteraction {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
-    this.deletePendingInteractionForTarget(target);
+    this.deletePendingInteractionForTarget(target, input.ownerPrincipalId);
     this.db
       .prepare(
         `INSERT INTO pending_interactions (
-          id, platform, chat_id, thread_id, user_id, session_id, owner, kind, title, options_json,
-          page_index, page_size, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, owner_principal_id, platform, chat_id, thread_id, user_id, session_id, owner, kind, title,
+          options_json, page_index, page_size, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
+        input.ownerPrincipalId,
         target.platform,
         target.chatId,
         target.threadId ?? null,
@@ -410,54 +484,69 @@ export class SessionRegistry {
     return interaction;
   }
 
-  getPendingInteractionForTarget(target: ChatTarget): PendingInteraction | undefined {
+  getPendingInteractionForTarget(target: ChatTarget, ownerPrincipalId: string): PendingInteraction | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM pending_interactions
          WHERE platform = ?
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
-           AND COALESCE(user_id, '') = COALESCE(?, '')
+           AND owner_principal_id = ?
          ORDER BY updated_at DESC
          LIMIT 1`,
       )
-      .get(target.platform, target.chatId, target.threadId ?? null, target.userId ?? null) as PendingInteractionRow | undefined;
+      .get(
+        target.platform,
+        target.chatId,
+        target.threadId ?? null,
+        ownerPrincipalId,
+      ) as PendingInteractionRow | undefined;
     return row ? this.activeInteractionFromRow(row) : undefined;
   }
 
-  updatePendingInteractionPage(id: string, pageIndex: number): PendingInteraction | undefined {
+  updatePendingInteractionPage(id: string, ownerPrincipalId: string, pageIndex: number): PendingInteraction | undefined {
     this.db
-      .prepare("UPDATE pending_interactions SET page_index = ?, updated_at = ? WHERE id = ?")
-      .run(pageIndex, new Date().toISOString(), id);
-    return this.getPendingInteractionById(id);
+      .prepare(
+        "UPDATE pending_interactions SET page_index = ?, updated_at = ? WHERE id = ? AND owner_principal_id = ?",
+      )
+      .run(pageIndex, new Date().toISOString(), id, ownerPrincipalId);
+    return this.getPendingInteractionById(id, ownerPrincipalId);
   }
 
-  deletePendingInteraction(id: string): void {
-    this.db.prepare("DELETE FROM pending_interactions WHERE id = ?").run(id);
+  deletePendingInteraction(id: string, ownerPrincipalId: string): void {
+    this.db
+      .prepare("DELETE FROM pending_interactions WHERE id = ? AND owner_principal_id = ?")
+      .run(id, ownerPrincipalId);
   }
 
-  private deletePendingInteractionForTarget(target: ChatTarget): void {
+  private deletePendingInteractionForTarget(target: ChatTarget, ownerPrincipalId: string): void {
     this.db
       .prepare(
         `DELETE FROM pending_interactions
          WHERE platform = ?
            AND chat_id = ?
            AND COALESCE(thread_id, '') = COALESCE(?, '')
-           AND COALESCE(user_id, '') = COALESCE(?, '')`,
+           AND owner_principal_id = ?`,
       )
-      .run(target.platform, target.chatId, target.threadId ?? null, target.userId ?? null);
+      .run(target.platform, target.chatId, target.threadId ?? null, ownerPrincipalId);
   }
 
-  private getPendingInteractionById(id: string): PendingInteraction | undefined {
+  private getPendingInteractionById(id: string, ownerPrincipalId?: string): PendingInteraction | undefined {
     const row = this.db
-      .prepare("SELECT * FROM pending_interactions WHERE id = ?")
-      .get(id) as PendingInteractionRow | undefined;
+      .prepare(
+        `SELECT * FROM pending_interactions
+         WHERE id = ?
+           AND (? IS NULL OR owner_principal_id = ?)`,
+      )
+      .get(id, ownerPrincipalId ?? null, ownerPrincipalId ?? null) as PendingInteractionRow | undefined;
     return row ? this.activeInteractionFromRow(row) : undefined;
   }
 
   private activeInteractionFromRow(row: PendingInteractionRow): PendingInteraction | undefined {
     if (Date.parse(row.expires_at) <= Date.now()) {
-      this.deletePendingInteraction(row.id);
+      if (row.owner_principal_id) {
+        this.deletePendingInteraction(row.id, row.owner_principal_id);
+      }
       return undefined;
     }
     return rowToPendingInteraction(row);
@@ -467,6 +556,8 @@ export class SessionRegistry {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hub_sessions (
         id TEXT PRIMARY KEY,
+        owner_principal_id TEXT,
+        visibility TEXT NOT NULL DEFAULT 'private',
         name TEXT,
         platform TEXT NOT NULL,
         chat_id TEXT NOT NULL,
@@ -481,9 +572,6 @@ export class SessionRegistry {
         updated_at TEXT NOT NULL,
         selected_at TEXT
       );
-
-      CREATE INDEX IF NOT EXISTS idx_hub_sessions_target
-        ON hub_sessions(platform, chat_id, thread_id, selected_at, updated_at);
 
       CREATE TABLE IF NOT EXISTS approval_requests (
         id TEXT PRIMARY KEY,
@@ -506,6 +594,7 @@ export class SessionRegistry {
 
       CREATE TABLE IF NOT EXISTS pending_interactions (
         id TEXT PRIMARY KEY,
+        owner_principal_id TEXT,
         platform TEXT NOT NULL,
         chat_id TEXT NOT NULL,
         thread_id TEXT,
@@ -528,6 +617,18 @@ export class SessionRegistry {
 
     this.addColumnIfMissing("hub_sessions", "name", "TEXT");
     this.addColumnIfMissing("hub_sessions", "selected_at", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "owner_principal_id", "TEXT");
+    this.addColumnIfMissing("hub_sessions", "visibility", "TEXT NOT NULL DEFAULT 'private'");
+    this.addColumnIfMissing("pending_interactions", "owner_principal_id", "TEXT");
+    // Menus are short-lived and may contain session metadata. Old rows cannot
+    // be attributed safely after an identity mapping change, so fail closed.
+    this.db.prepare("DELETE FROM pending_interactions WHERE owner_principal_id IS NULL").run();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_hub_sessions_principal_target
+        ON hub_sessions(platform, chat_id, thread_id, owner_principal_id, selected_at, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_pending_interactions_principal_target_v2
+        ON pending_interactions(platform, chat_id, thread_id, owner_principal_id, updated_at);
+    `);
   }
 
   private addColumnIfMissing(tableName: string, columnName: string, columnType: string): void {
