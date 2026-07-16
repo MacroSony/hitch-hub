@@ -1,6 +1,6 @@
 # Security, Sandbox, and Automation Roadmap
 
-Status: phases 0-4 implemented and reviewed on 2026-07-16; phase 5 unified dispatch is next.
+Status: phases 0-4 and the credential-containment follow-up are implemented and reviewed on 2026-07-16; restricted live soak and Pi compatibility protection precede phase 5 unified dispatch.
 
 This document records the intended order for per-principal authorization, persistent agent state, Linux Bubblewrap isolation, generic proactive triggers, and scheduled agent work. It also reconciles this direction with the older broad roadmap in [`plan.md`](../plan.md).
 
@@ -28,9 +28,12 @@ The implemented boundary is now:
 - `/workspace`, `/state`, `/agent-config`, `/agent-sessions`, and `/hitch` are reconstructed from persisted, revalidated metadata
 - Hitch data nested beneath a workspace is hidden with exact persisted tmpfs masks
 - under Bubblewrap, system Pi config is an explicit writable single-principal mount; multi-user profiles use principal-private Hitch config
-- Pi extension code remains trusted code inside the namespace; `process: false` removes the model-facing `bash` tool but cannot prevent a trusted extension from launching its own helper
+- required credential isolation disables caller-supplied Pi resources and exposes only guarded workspace file tools plus optional native media delivery
+- the guard mirrors Pi's path normalization, blocks model access to config/runtime/session/host paths, rejects command-backed credentials, and attests startup before use
+- provider credentials still exist in Pi's controller/config boundary; a provider broker or narrower scoped tokens remain future hardening
+- when credential isolation is disabled, Pi extension code remains trusted code inside the namespace; `process: false` removes the model-facing `bash` tool but cannot prevent a trusted extension from launching its own helper
 
-The remaining large gaps are resource quotas, provider-only network isolation, state retention policy, and unattended dispatch/trigger semantics.
+The remaining large gaps are Pi-version normalization compatibility, a provider credential broker/scoped-token strategy, resource quotas, provider-only network isolation, state retention policy, and unattended dispatch/trigger semantics.
 
 ## Working Policy Model
 
@@ -56,7 +59,7 @@ interface ExecutionPolicy {
 }
 ```
 
-Initial remote default:
+General Hitch-scoped remote default (without required credential isolation):
 
 ```yaml
 filesystem: workspace-write
@@ -67,6 +70,21 @@ sandbox: required
 ```
 
 `bash`/general process execution is a separate privilege and is not implied by file read/write access.
+
+The single-principal system-scope rollout uses the narrower required-credential profile:
+
+```yaml
+credential_isolation: required
+execution_policy:
+  filesystem: workspace-write
+  mounts: []
+  tools: [read, write, edit, ls, hitch_send_media]
+  process: false
+  agent_network: allow
+  sandbox: required
+```
+
+For private multi-user operation, use the same guarded policy with `config_scope: hitch` and provision separate provider identities out of band for each principal.
 
 The `limits` fields are fail-closed contract placeholders today: both launchers reject a policy containing any limit because no resource-limit backend enforces them yet. `host-unrestricted` is accepted only with `sandbox: disabled` and is the explicit unsafe direct policy.
 
@@ -189,6 +207,8 @@ Resource limits are a separate layer: add cgroup v2 or `systemd-run --user` cont
 
 Implementation note (2026-07-16): complete for the isolation MVP. Pi now launches through fail-closed Direct/Bubblewrap selection; system config, tool flags, media bridge paths, workspace compatibility aliases, hub-data masks, installed extensions, and process-tree cleanup have adversarial coverage. Multi-user routing/mount isolation is verified through locked-down synthetic Telegram identities.
 
+Credential-containment follow-up (2026-07-16): required mode now provisions and attests only Hitch's guard, limits model-facing tools to workspace file operations and an authenticated native media adapter, scans command-backed credential configuration, and validates both raw and Pi-normalized paths. Session media is intersected with active mounts and global export roots and delivered from a private immutable snapshot. The remaining provider credential exposure is explicitly the Pi controller/config boundary, not the model tool surface.
+
 ### 5. Extract a single session-dispatch service
 
 Refactor chat-driven prompt execution into one internal path:
@@ -251,12 +271,12 @@ Before enabling any unattended producer or schedule, require an enforced or expl
 
 - CPU, memory, and PID limits
 - temporary-storage and output-size limits
-- scoped/revocable credentials, or a documented single-principal credential boundary accepted by the operator
+- scoped/revocable per-principal provider credentials, or a host-side provider broker that keeps long-lived provider credentials out of the worker boundary
 - extension/tool allowlists suitable for unattended work
 - network enforcement receipts that distinguish provider connectivity from agent-controlled access
 - complete process-tree termination and status/audit enforcement receipts
 
-Provider-only proxy or host-side provider broker work may continue beyond the first profile, but the enabled profile must state and enforce its actual network boundary.
+At least one of those credential controls must be complete before the first unattended profile is enabled. A shared/system provider credential accepted for the attended single-principal soak is not sufficient. Further provider-only network proxy hardening may continue afterward, but the enabled profile must state and enforce its actual network boundary.
 
 ### 8. Add the built-in scheduler as a trigger producer
 
@@ -303,7 +323,7 @@ The original estimate for principal isolation and Bubblewrap is retired because 
 
 ### 1. Current roadmap ordering: reconciled
 
-`plan.md` and this focused roadmap now agree: soak the sandboxed single-principal deployment, extract unified dispatch, add a dormant durable trigger inbox, pass an unattended resource/credential gate, and only then enable a scheduler. Channel/backend breadth and group sharing remain later work.
+This focused roadmap refines `plan.md` with Pi compatibility and guarded Hitch-scoped identity preparation, while preserving its main order: soak the sandboxed single-principal deployment, extract unified dispatch, add a dormant durable trigger inbox, pass an unattended resource/credential gate, and only then enable a scheduler. Channel/backend breadth and group sharing remain later work.
 
 ### 2. Write approval default: semantic conflict, resolved by narrower authority
 
@@ -315,7 +335,7 @@ Shell/process and agent-controlled network remain separate privileges. The old w
 
 Under Bubblewrap, `config_scope: system` mounts one explicitly resolved, host-writable Pi config root read/write and keeps new Pi sessions in principal-private Hitch state. It is rejected with multiple principals or `unsafe_allow_all`. Pi needs write access for settings/trust lock directories and may also persistently modify credentials, settings, trust decisions, packages, extensions, and legacy sessions inside that root. `config_scope: hitch` gives every principal isolated writable Pi config/session directories and is the required multi-user mode. Neither sandboxed mode mounts the full home directory; explicit unsafe direct execution does not enforce these mount restrictions.
 
-Provider auth is currently supplied by the explicitly mounted writable system config or explicit environment allowlist. Scoped/revocable provider credentials remain follow-up hardening rather than an unacknowledged sandbox claim.
+Provider auth is currently supplied by the explicitly mounted writable system config or explicit environment allowlist. Required credential isolation blocks model tools from reading those sources but does not remove credentials from Pi's controller process. Scoped/revocable per-principal credentials or a host-side broker are required before unattended execution rather than treated as an unacknowledged sandbox claim.
 
 ### 4. `default_policy`: compatibility field replaced
 

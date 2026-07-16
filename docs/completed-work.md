@@ -23,6 +23,7 @@ This file archives completed implementation checkpoints so
 | 14 | Runtime reliability and durable delivery evidence | Done |
 | 15 | Principal ownership and private runtime state | Done |
 | 16 | Fail-closed Bubblewrap and multi-user isolation | Done |
+| 17 | Credential guard and session-scoped native media | Done |
 
 ## Implemented Capabilities
 
@@ -81,6 +82,8 @@ This file archives completed implementation checkpoints so
 - Persisted workspace aliases and hub-data masks that keep absolute MCP cwd compatibility without exposing Hitch state.
 - Sandboxed `hitch.send_media` bridge paths, explicit writable media exports, and deterministic sandbox descendant cleanup.
 - Adversarial two-principal Telegram route and mount isolation coverage.
+- Fail-closed Pi credential isolation with workspace-only file tools, Pi 0.80.6-normalization compatibility checks, startup attestation, command-backed credential rejection, and disabled caller resources.
+- Native guarded `hitch_send_media` backed by the authenticated session bridge, active mount/export intersection, immutable private delivery snapshots, sanitized results, and post-media retry/final-message coverage.
 - Smoke tests for fake flow, media cache, media flow, interaction flow, Pi RPC, Pi approval, Pi UI selection, Telegram health checks, and multi-channel routing.
 
 ## Verification Snapshot
@@ -101,6 +104,7 @@ Latest local verification from the review pass:
 - `npm run smoke:security-foundation`: passed.
 - `npm run smoke:sandbox-launcher`: passed.
 - `npm run smoke:worker-environment`: passed.
+- `npm run smoke:credential-guard`: passed.
 - `npm run smoke:pi-sandbox-integration`: passed.
 - `npm run smoke:pi-retry-lifecycle`: passed.
 - `npm run smoke:reliability-flow`: passed.

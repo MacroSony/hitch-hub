@@ -8,7 +8,9 @@ media:
   max_inbound_bytes: 20971520
   max_outbound_bytes: 52428800
   auto_discovery: false
-  outbound_roots: []
+  # Keep this aligned with the exact workspace(s) agents may export from.
+  outbound_roots:
+    - ..
 
 delivery:
   full_tool_output: false
@@ -53,9 +55,11 @@ agents:
   pi:
     command: pi
     config_scope: system
+    credential_isolation: required
     # system reuses one writable Pi config identity and therefore supports one
-    # configured principal only. Pi may persistently change settings, trust,
-    # credentials, packages, and extensions there. Use hitch for multiple users.
+    # configured principal only. Required credential isolation disables caller-
+    # supplied extensions/resources and exposes only the guarded tools below.
+    # Use config_scope:hitch plus credential_isolation:required for multiple users.
     # system_config_root: ~/.pi/agent
     # Set once, after backup, when assigning legacy shared config_scope:hitch state.
     # legacy_state_principal: alice
@@ -64,11 +68,10 @@ agents:
     execution_policy:
       filesystem: workspace-write
       mounts: []
-      tools: [read, write, edit, grep, find, ls]
+      tools: [read, write, edit, ls, hitch_send_media]
       process: false
       agent_network: allow
       sandbox: required
     default_args:
       - --mode
       - rpc
-    default_policy: ask

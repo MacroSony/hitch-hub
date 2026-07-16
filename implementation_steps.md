@@ -18,9 +18,31 @@ Status legend:
 
 ## Current Direction
 
-The reliability, durable delivery, principal ownership, private runtime state, and Linux Bubblewrap milestones are implemented. Remote Pi sessions now default to required sandboxing, while explicit direct execution remains an unsafe configuration-only mode.
+The reliability, durable delivery, principal ownership, private runtime state, Linux Bubblewrap, credential guard, and guarded native media milestones are implemented. The live single-principal profile is ready for a restricted workspace soak; explicit direct execution remains an unsafe configuration-only mode.
 
-The next production change should extract one internal session-dispatch path before adding triggers or schedules. Chat handling already has the semantics that unattended work will need; those semantics should be centralized instead of duplicated.
+After the restricted soak and Pi-version compatibility follow-up, the next production code change should extract one internal session-dispatch path before adding triggers or schedules. Chat handling already has the semantics that unattended work will need; those semantics should be centralized instead of duplicated.
+
+## Immediate Rollout: Restricted Sandbox and Multi-User Preparation
+
+- [ ] Soak a fresh single-principal WeChat Pi session with `credential_isolation: required`, one exact read/write workspace, no policy mounts, no shell, and native `hitch_send_media`.
+- [ ] Verify workspace create/read/edit/list, outside-path rejection, symlink rejection, media delivery, post-media final text, abort, worker restart, and fresh-session behavior.
+- [ ] Pin or compatibility-test the installed Pi path resolver before upgrading Pi; the guard mirrors Pi 0.80.6 normalization and must fail closed if those semantics drift.
+- [ ] Before adding a second principal, switch from `config_scope: system` to `config_scope: hitch`, keep `credential_isolation: required`, provision a distinct provider identity for each principal out of band, and create fresh sessions. Do not share the system Pi config or old transcripts across principals.
+- [ ] Treat a shared provider key as an explicitly accepted boundary for the attended single-principal soak only. Require scoped/revocable per-principal credentials or a host-side provider broker before unattended execution; a broker is required before any claim that workers do not possess provider credentials.
+- [ ] Keep group-shared sessions disabled until owner/admin/approval authority is designed and tested independently from private multi-user routing.
+
+## Completed Iteration: Credential and Guarded Media Containment
+
+- [x] Add fail-closed `credential_isolation` policy validation and a private, read-only provisioned Pi guard runtime.
+- [x] Disable caller-supplied extensions, skills, templates, themes, approval flags, shell/process tools, and command-backed credential values in required mode.
+- [x] Restrict built-in file tools to the mounted workspace while matching Pi's `@`, tilde, `file://`, Unicode-space, and symlink path behavior.
+- [x] Keep the Pi config writable for controller lock/state needs while blocking model tool access to `/agent-config`, `/agent-sessions`, `/state`, `/hitch`, `/proc`, and unmounted host paths.
+- [x] Scope outbound agent media to the active mount plan and global export roots, send an immutable private snapshot, and remove it after channel delivery.
+- [x] Add native guarded `hitch_send_media` with authenticated bridge startup attestation, sanitized results, and failure-only status visibility.
+- [x] Reject guarded media startup without its session bridge and keep bridge variables out of guarded workers that do not enable media.
+- [x] Add direct guard, real installed-Pi/Bubblewrap, media snapshot, retry/final-message, path-confusion, and credential-command regressions.
+
+Residual boundary: provider credentials still exist in Pi's controller process/config mount. This containment prevents model-facing tools from reaching them; it does not replace a provider broker or protect against a compromised Pi/controller runtime.
 
 ## Next Iteration: Unified Session Dispatch
 
@@ -53,7 +75,7 @@ Goal: make principal ownership and filesystem boundaries enforceable before expa
 - [x] Preserve the sandboxed `hitch.send_media` bridge and explicit writable media export mounts.
 - [x] Verify installed Pi extensions, descendant cleanup, unsafe-policy tightening, and two-principal route/mount isolation.
 
-Rollout note (updated 2026-07-16): the live WeChat-backed Hitch deployment now enforces required Bubblewrap for Pi workers. The writable-system-config rollout migrated 22 exact trusted `/agent-config` plans from read-only to read/write without quarantining any session, and a controlled prompt through the installed Pi configuration/extensions returned `BUBBLEWRAP_OK`. Continue the media/final-message soak through normal chat use.
+Rollout note (updated 2026-07-16): the earlier live Bubblewrap acceptance used the installed Pi extensions and proved mount/process isolation, but that profile is superseded by required credential isolation. The new restricted profile deliberately disables those extensions, narrows the workspace to one exact cwd, exposes only guarded file/media tools, and requires a fresh Pi session for the next media/final-message soak.
 
 ## Completed Iteration: Runtime Reliability
 

@@ -71,6 +71,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `media.outbound_roots`: existing directories Hitch may explicitly send media from with `!send` or `hitch.send_media`; roots are canonicalized at startup
 - `media.auto_discovery`: `false` by default; set `true` only to enable legacy path scanning from Pi final text
 - `agents.pi.config_scope`: under sandboxed execution, `system` mounts one normal Pi config read/write for a single principal, while `hitch` gives every principal isolated writable Pi config/state under `data_dir`
+- `agents.pi.credential_isolation`: `required` loads Hitch's fail-closed Pi guard, requires Bubblewrap, disables caller-supplied extensions/resources and shell, and restricts tools to workspace `read`/`write`/`edit`/`ls` plus optional `hitch_send_media`; system scope defaults to `required`, while Hitch scope must opt in explicitly
 - `agents.pi.system_config_root`: optional system-scope Pi config directory; defaults to `~/.pi/agent` and may not be the home directory itself
 - `agents.pi.execution_policy`: filesystem mounts, Pi tool allowlist, `bash`/process capability, network namespace mode, and required sandbox mode; the remote default is workspace write with non-shell built-ins only
 - `agents.pi.env_allowlist`: optional environment variable names Pi needs for provider authentication; channel credentials, host-control sockets, loader injection variables, and `HITCH_*` names are rejected
@@ -159,11 +160,12 @@ Media behavior:
 - Cached images are passed to Pi through native RPC image attachments when possible; cached non-image files are passed as local path references appended to the prompt
 - Inbound and outbound media byte limits are configured under `media`
 - Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
-- Agent tool bridge: active Pi workers receive `HITCH_TOOL_*` environment variables for a session-scoped media-send bridge; its outbox pump stays active for the worker lifetime
+- Guarded Pi tool: credential-isolated workers expose native `hitch_send_media`, which accepts only an existing file inside the active workspace/mount plan and uses an authenticated session-scoped bridge; the model cannot access the bridge token or files through its allowed tools
+- Agent tool bridge: unguarded Pi workers, and guarded workers with `hitch_send_media` enabled, receive session-scoped internal bridge variables; the outbox pump stays active for the worker lifetime
 - MCP bridge: `npm run mcp:session` exposes `hitch.send_media` and the `hitch.outbound_media` prompt over stdio for agents that can launch a session-scoped MCP server
 - MCP-capable agents should load the `hitch.outbound_media` prompt so generated images/files are sent explicitly instead of only mentioned by path
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
-- Target design: Pi or another agent explicitly calls a hub-owned `hitch.send_media` tool, with MCP as the long-term transport
+- Target design: Pi or another agent explicitly calls a hub-owned media tool; guarded Pi now uses the native adapter, while MCP remains available for backends with a stable MCP client surface
 - Outbound artifact delivery attempts are recorded in the audit log and durable delivery ledger with session/turn correlation when initiated by an active turn
 
 Tool output behavior:
@@ -294,23 +296,28 @@ Pi config behavior:
 - Workers receive a small runtime/proxy environment allowlist. Provider API-key variables must be named explicitly under `agents.pi.env_allowlist`; Telegram credentials and host-control sockets are never inherited.
 - Sandboxed Pi workers use Bubblewrap on Linux and fail closed when it is unavailable. Restricted `sandbox: preferred` policies do not fall back to direct execution because direct mode cannot enforce them.
 - Under sandboxed execution, `config_scope: system` mounts only the configured Pi directory at `/agent-config` read/write, uses separate principal-owned session storage at `/agent-sessions`, and is rejected unless exactly one principal is configured without `unsafe_allow_all`. The directory must be host-writable because Pi creates settings/trust lock directories during normal RPC startup.
-- Writable system scope deliberately lets Pi persist changes to that mounted identity, including credentials, settings, trust decisions, packages, extensions, and any legacy sessions stored beneath the configured root. Those changes can affect later Pi runs, but unmounted home directories and projects remain hidden by Bubblewrap. Explicit unsafe direct execution has unrestricted host access and does not enforce mount boundaries.
+- `credential_isolation: required` is the recommended remote profile. It requires a workspace-only Bubblewrap policy, `process: false`, and only `read`, `write`, `edit`, `ls`, and optional `hitch_send_media`. Hitch disables caller-supplied Pi extensions, skills, prompt templates, themes, approval flags, and command-backed credentials; it attests the trusted guard and optional media tool before accepting startup.
+- The credential guard validates both the raw tool path and the normalization behavior tested against Pi 0.80.6 (including `@`, tilde, `file://`, and Unicode-space handling), follows symlinks for authorization, and rejects config, session, runtime, proc, and unmounted host paths. Workspace write remains enabled by default inside the mounted cwd; Pi upgrades need the compatibility test/pin updated first.
+- Required isolation is a same-process containment layer, not a provider credential broker. Pi's controller still reads provider credentials from the writable config mount or explicit provider environment, so the controller and trusted guard remain in the credential boundary. A host-side provider broker/scoped-token design is still required before claiming that the agent process never possesses provider credentials.
+- With credential isolation disabled, writable system scope deliberately lets Pi and its trusted extensions persist changes to credentials, settings, trust decisions, packages, extensions, and legacy sessions beneath the configured root. Explicit unsafe direct execution has unrestricted host access and does not enforce mount boundaries.
 - `config_scope: hitch` stores Pi config/session state in principal-private directories under `data_dir` and defaults `PI_OFFLINE=1` unless already set.
 - Each principal receives private Pi agent/session directories, and each Hitch session receives private worker/tool state under `data_dir/session-state/...`. `/hitch/results` is overlaid read-only to the worker and the sandbox receives an empty private home plus ephemeral `/tmp`.
 - The workspace is mounted at `/workspace` and at its canonical host path so trusted Pi/MCP configuration containing an absolute project cwd continues to work; both aliases have the same policy-selected read/write mode.
 - If `data_dir` is beneath the workspace, persisted tmpfs masks hide it through both aliases so workers cannot read Hitch's database, audit log, credentials, or other principals' state. Policy mounts and external Pi config roots may not re-expose that directory.
 - Explicit policy mounts can expose additional principal-approved paths. For example, a media extension that writes `/tmp/pi-paint-outputs` needs that exact directory as a writable policy mount and as a `media.outbound_roots` entry.
 - `execution_policy.tools` is translated into Hitch-owned Pi `--tools`/`--no-tools` arguments. `process: true` must include `bash` (or the sole `"*"` wildcard); `process: false` rejects it. Tool-control flags are not accepted in `default_args`.
-- Pi extensions are trusted code inside the namespace and may launch their own helper processes even when the model-facing `bash` tool is disabled. Their processes still share the sandbox mounts, environment, namespaces, and cleanup boundary.
+- When credential isolation is disabled, Pi extensions are trusted code inside the namespace and may launch their own helper processes even when the model-facing `bash` tool is disabled. Required isolation disables those caller-supplied extensions and loads only Hitch's provisioned guard.
 - Execution policy and mount plans are persisted with the session; missing legacy metadata is initialized, while partial, modified, escaped, or no-longer-authorized metadata is quarantined instead of silently regenerated.
 - Tightening an old explicit unsafe/direct policy to a sandboxed policy is one-way: the old immutable session is quarantined and must be recreated rather than silently continuing with host access.
+- Enabling required credential isolation or otherwise tightening a persisted policy may quarantine incompatible old sessions. Back up state first, then create a new Pi session instead of resuming a transcript that was produced outside the new boundary.
 - On the first `config_scope: hitch` upgrade, old shared `data_dir/pi` state stops startup until it is backed up and explicitly assigned with `agents.pi.legacy_state_principal`. Old `data_dir/tools/<session-id>` state is moved into the matching private session state.
 - Model/provider flags can still be passed through `agents.pi.default_args`, for example `--model openai/gpt-4o`.
 - Hitch starts Pi with a stable `--session-id` based on the Hitch session unless `agents.pi.default_args` already includes an explicit Pi session mode such as `--no-session`, `--session`, `--session-id`, `--continue`, `--resume`, or `--fork`.
 
 ## Roadmap
 
-- Live WeChat soak testing through the required Bubblewrap boundary
+- Live WeChat soak testing through the required credential guard and exact read/write workspace boundary
+- Pin or compatibility-test Pi path normalization, then use guarded Hitch-scoped identities before adding a second principal
 - One internal owned/re-authorized session-dispatch service for chat and future triggers
 - Durable generic trigger inbox, initially without unattended producers
 - Resource, temporary-storage, output, credential, network, and unattended-extension safeguards before enabling schedules
