@@ -26,7 +26,7 @@ The current implementation has useful routing guardrails but no execution sandbo
 - Absolute paths accepted by Pi tools can reach anything the Hitch OS user can access.
 - The cwd allowlist check is lexical and does not currently canonicalize the selected cwd with `realpath`, so symlink escape must be fixed.
 - All configured users' roots are currently flattened into one global root list.
-- `agents.pi.default_policy` is parsed but is not an enforcement boundary for built-in Pi tool calls.
+- Legacy `agents.pi.default_policy` is accepted only for configuration compatibility; the typed `ExecutionPolicy` contract replaces it.
 - Extension UI approvals are useful interaction plumbing, but they are not a filesystem, process, or network sandbox.
 
 Therefore `direct` execution must be described as unsandboxed even when its cwd passed an allowlist check.
@@ -120,7 +120,7 @@ Channel-health diagnostics and retention can continue in parallel, but proactive
 - Replace full environment inheritance with an explicit allowlist.
 - Never expose Telegram/WeChat credentials, Docker sockets, or SSH agent sockets to workers by default.
 - Mark direct launch as `unsafe` and fail closed when a required sandbox is unavailable.
-- Decide whether `default_policy` is migrated into the new policy model or removed.
+- Keep `default_policy` as a deprecated parser-only compatibility field and enforce the new `execution_policy` model.
 
 ### 2. Implement per-principal authorization and session ownership
 

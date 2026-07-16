@@ -1,9 +1,17 @@
 import { z } from "zod";
+import { executionPolicySchema } from "../security/policy.js";
 
 const userSchema = z.object({
   telegram_ids: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
   wechat_ids: z.array(z.string()).default([]),
   allowed_roots: z.array(z.string()).min(1),
+  allowed_chat_ids: z
+    .object({
+      telegram: z.array(z.union([z.string(), z.number()]).pipe(z.coerce.string())).default([]),
+      wechat: z.array(z.string()).default([]),
+    })
+    .optional(),
+  capabilities: z.array(z.string().min(1)).optional(),
 });
 
 const fakeChannelSchema = z.object({
@@ -29,8 +37,11 @@ const wechatChannelSchema = z.object({
 const piAgentSchema = z.object({
   command: z.string().default("pi"),
   default_args: z.array(z.string()).default(["--mode", "rpc"]),
-  default_policy: z.enum(["ask", "deny", "allow"]).default("ask"),
+  // Accepted only for configuration compatibility. ExecutionPolicy replaces
+  // this formerly security-looking but unenforced field.
+  default_policy: z.enum(["ask", "deny", "allow"]).optional(),
   config_scope: z.enum(["hitch", "system"]).default("hitch"),
+  execution_policy: executionPolicySchema.optional(),
 });
 
 const mediaSchema = z.object({
@@ -119,7 +130,6 @@ export const configSchema = z.object({
       pi: piAgentSchema.default({
         command: "pi",
         default_args: ["--mode", "rpc"],
-        default_policy: "ask",
         config_scope: "hitch",
       }),
     })
@@ -127,7 +137,6 @@ export const configSchema = z.object({
       pi: {
         command: "pi",
         default_args: ["--mode", "rpc"],
-        default_policy: "ask",
         config_scope: "hitch",
       },
     }),
