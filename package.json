@@ -13,6 +13,7 @@
     "smoke:interaction-flow": "node --use-env-proxy --import tsx src/smoke/interaction-flow.ts",
     "smoke:reliability-flow": "node --use-env-proxy --import tsx src/smoke/reliability-flow.ts",
     "smoke:multi-channel": "node --use-env-proxy --import tsx src/smoke/multi-channel.ts",
+    "smoke:multi-user-sandbox": "node --use-env-proxy --import tsx src/smoke/multi-user-sandbox.ts",
     "smoke:wechat-reliability": "node --use-env-proxy --import tsx src/smoke/wechat-reliability.ts",
     "mcp:session": "node --import tsx src/mcp/session-server.ts",
     "smoke:pi-rpc": "node --use-env-proxy --import tsx src/smoke/pi-rpc-state.ts --config examples/config.smoke.yaml",
