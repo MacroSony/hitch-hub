@@ -81,6 +81,7 @@ export type AuthorizationContext = {
   target: ChatTarget;
   allowedRoots: string[];
   executionPolicy: ExecutionPolicy;
+  authorizationMode: "configured" | "unsafe_allow_all";
 };
 
 export type SandboxCapability =

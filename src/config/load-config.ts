@@ -33,9 +33,13 @@ export function loadConfig(configPath: string): HubConfig {
   const configDir = path.dirname(resolvedConfigPath);
   const dataDir = resolvePath(config.data_dir, configDir);
 
-  const allowedRoots = Object.values(config.users).flatMap((user) =>
-    user.allowed_roots.map((root) => resolvePath(root, configDir)),
+  const principalRoots = Object.fromEntries(
+    Object.entries(config.users).map(([principalId, user]) => [
+      principalId,
+      user.allowed_roots.map((root) => resolvePath(root, configDir)),
+    ]),
   );
+  const allowedRoots = Object.values(principalRoots).flat();
   const outboundRoots = config.media.outbound_roots.map((root) => resolvePath(root, configDir));
   const defaultCwd = config.default_cwd ? resolvePath(config.default_cwd, configDir) : allowedRoots[0];
 
@@ -45,6 +49,7 @@ export function loadConfig(configPath: string): HubConfig {
     ...(defaultCwd ? { defaultCwd } : {}),
     allowedRoots,
     outboundRoots,
+    principalRoots,
   };
 }
 

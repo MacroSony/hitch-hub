@@ -147,6 +147,7 @@ async function runScenario(extensionPath: string, decision: Decision): Promise<v
     },
     audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [path.resolve(".")],
+    principalRoots: { smoke: [path.resolve(".")] },
     outboundRoots: [],
     users: {
       smoke: {

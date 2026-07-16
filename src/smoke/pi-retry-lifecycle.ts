@@ -185,6 +185,7 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
     },
     audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd, dataDir],
+    principalRoots: { smoke: [cwd, dataDir] },
     outboundRoots: [dataDir],
     users: {
       smoke: {

@@ -89,7 +89,15 @@ export const configSchema = z.object({
     max_bytes: 10 * 1024 * 1024,
     max_files: 5,
   }),
-  users: z.record(z.string(), userSchema).default({}),
+  users: z
+    .record(
+      z
+        .string()
+        .min(1)
+        .refine((value) => !value.startsWith("__hitch_unsafe__:"), "Principal ID uses a reserved Hitch prefix."),
+      userSchema,
+    )
+    .default({}),
   channels: z
     .object({
       fake: fakeChannelSchema.default({ enabled: true }),
@@ -148,4 +156,5 @@ export type HubConfig = z.output<typeof configSchema> & {
   defaultCwd?: string;
   allowedRoots: string[];
   outboundRoots: string[];
+  principalRoots: Record<string, string[]>;
 };

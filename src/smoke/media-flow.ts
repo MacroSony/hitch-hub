@@ -499,6 +499,7 @@ function mediaFlowConfig(dataDir: string, fullToolOutput: boolean, autoDiscovery
     },
     audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd, dataDir],
+    principalRoots: { media: [cwd, dataDir] },
     outboundRoots: [dataDir],
     users: {
       media: {

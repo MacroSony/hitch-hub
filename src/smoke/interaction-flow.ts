@@ -288,6 +288,7 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
     },
     audit: { max_bytes: 10 * 1024 * 1024, max_files: 5 },
     allowedRoots: [cwd],
+    principalRoots: { smoke: [cwd] },
     outboundRoots: [],
     users: {
       smoke: {
