@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 async function main(): Promise<void> {
+  const serverPath = process.env.HITCH_MCP_SERVER_PATH ?? path.resolve("packages/session-mcp/dist/server.js");
+  const serverCwd = process.env.HITCH_MCP_SERVER_CWD ?? path.resolve(".");
   const dataDir = path.resolve("examples/.remote-agent-hub-mcp-smoke");
   rmSync(dataDir, { force: true, recursive: true });
   mkdirSync(dataDir, { recursive: true });
@@ -23,13 +25,13 @@ async function main(): Promise<void> {
   const client = new Client({ name: "hitch-mcp-smoke", version: "0.1.0" }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["--import", "tsx", "src/mcp/session-server.ts"],
-    cwd: path.resolve("."),
+    args: [serverPath],
+    cwd: serverCwd,
     env: {
       HITCH_TOOL_TOKEN: token,
       HITCH_TOOL_OUTBOX: outboxPath,
       HITCH_TOOL_RESULT_DIR: resultDir,
-      HITCH_TOOL_TIMEOUT_MS: "5000",
+      HITCH_TOOL_TIMEOUT_MS: process.env.HITCH_MCP_TOOL_TIMEOUT_MS ?? "1000",
     },
     stderr: "pipe",
   });
@@ -90,7 +92,7 @@ async function main(): Promise<void> {
       name: "hitch.send_media",
       arguments: { path: mediaPath, kind: "image" },
     });
-    const failedRequest = await waitForOutboxRequest(outboxPath, request.id);
+    const failedRequest = await waitForOutboxRequest(outboxPath, [request.id]);
     writeFileSync(
       path.join(resultDir, `${failedRequest.id}.json`),
       `${JSON.stringify({
@@ -107,6 +109,50 @@ async function main(): Promise<void> {
     if (!failedResult.isError || failedStructured?.status !== "failed" || failedStructured.message !== "rejected by hub") {
       throw new Error(`Failed media delivery was not returned as an MCP error: ${JSON.stringify(failedResult)}`);
     }
+
+    const malformedCall = client.callTool({
+      name: "hitch.send_media",
+      arguments: { path: mediaPath, kind: "image" },
+    });
+    const malformedRequest = await waitForOutboxRequest(outboxPath, [request.id, failedRequest.id]);
+    writeFileSync(path.join(resultDir, `${malformedRequest.id}.json`), "{malformed", "utf8");
+    const malformedResult = await malformedCall;
+    if (!malformedResult.isError) {
+      throw new Error(`Malformed Hitch result was accepted: ${JSON.stringify(malformedResult)}`);
+    }
+
+    const timeoutCall = client.callTool({
+      name: "hitch.send_media",
+      arguments: { path: mediaPath, kind: "image" },
+    }, undefined, { timeout: 5_000 });
+    const timeoutRequest = await waitForOutboxRequest(outboxPath, [request.id, failedRequest.id, malformedRequest.id]);
+    const timeoutResult = await timeoutCall;
+    const timeoutStructured = timeoutResult.structuredContent as { status?: unknown; message?: unknown } | undefined;
+    if (!timeoutResult.isError || timeoutStructured?.status !== "failed" || !String(timeoutStructured.message).includes("Timed out")) {
+      throw new Error(`MCP result timeout was not reported cleanly: ${JSON.stringify(timeoutResult)}`);
+    }
+
+    const controller = new AbortController();
+    const cancelledCall = client.callTool(
+      { name: "hitch.send_media", arguments: { path: mediaPath, kind: "image" } },
+      undefined,
+      { signal: controller.signal, timeout: 5_000 },
+    );
+    await waitForOutboxRequest(outboxPath, [request.id, failedRequest.id, malformedRequest.id, timeoutRequest.id]);
+    const cancellationStartedAt = Date.now();
+    controller.abort();
+    let cancelled = false;
+    let cancellationDetail = "resolved";
+    try {
+      const result = await cancelledCall;
+      cancellationDetail = `resolved: ${JSON.stringify(result)}`;
+    } catch (error) {
+      cancelled = true;
+      cancellationDetail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    }
+    if (!cancelled || Date.now() - cancellationStartedAt > 500) {
+      throw new Error(`Cancelled MCP media request did not reject promptly: ${cancellationDetail}`);
+    }
   } finally {
     await client.close();
   }
@@ -114,7 +160,10 @@ async function main(): Promise<void> {
   process.stdout.write("MCP session smoke ok\n");
 }
 
-async function waitForOutboxRequest(outboxPath: string, excludeId?: string): Promise<Record<string, string>> {
+type OutboxRequest = Record<string, string> & { id: string };
+
+async function waitForOutboxRequest(outboxPath: string, excludeIds: readonly string[] = []): Promise<OutboxRequest> {
+  const excluded = new Set(excludeIds);
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (existsSync(outboxPath)) {
@@ -122,8 +171,9 @@ async function waitForOutboxRequest(outboxPath: string, excludeId?: string): Pro
         .trim()
         .split(/\r?\n/)
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as Record<string, string>);
-      const request = requests.find((candidate) => !excludeId || candidate.id !== excludeId);
+        .map((line) => JSON.parse(line) as unknown)
+        .filter(isOutboxRequest);
+      const request = requests.find((candidate) => !excluded.has(candidate.id));
       if (request) {
         return request;
       }
@@ -131,6 +181,10 @@ async function waitForOutboxRequest(outboxPath: string, excludeId?: string): Pro
     await sleep(100);
   }
   throw new Error("Timed out waiting for MCP outbox request.");
+}
+
+function isOutboxRequest(value: unknown): value is OutboxRequest {
+  return value !== null && typeof value === "object" && typeof (value as Record<string, unknown>).id === "string";
 }
 
 main().catch((error: unknown) => {

@@ -169,7 +169,7 @@ Media behavior:
 - Explicit outbound send: `!send <absolute-path> [caption]` uploads a local image/file only when the path is under `media.outbound_roots` or the hub-managed outbound media directory
 - Guarded Pi tool: credential-isolated workers expose native `hitch_send_media`, which accepts only an existing file inside the active workspace/mount plan and uses an authenticated session-scoped bridge; the model cannot access the bridge token or files through its allowed tools
 - Agent tool bridge: unguarded Pi workers, and guarded workers with `hitch_send_media` enabled, receive session-scoped internal bridge variables; the outbox pump stays active for the worker lifetime
-- MCP bridge: `npm run mcp:session` exposes `hitch.send_media` and the `hitch.outbound_media` prompt over stdio for agents that can launch a session-scoped MCP server
+- MCP bridge: the standalone `@hitch-hub/session-mcp` package exposes `hitch.send_media` and the `hitch.outbound_media` prompt over stdio; install it in Pi's mounted package directory so sandboxed agents do not need the Hitch source tree
 - MCP-capable agents should load the `hitch.outbound_media` prompt so generated images/files are sent explicitly instead of only mentioned by path
 - Current prototype: when `media.auto_discovery: true`, Pi final text path scanning attempts to upload up to five de-duplicated artifacts per turn back to Telegram or WeChat
 - Target design: Pi or another agent explicitly calls a hub-owned media tool; guarded Pi now uses the native adapter, while MCP remains available for backends with a stable MCP client surface

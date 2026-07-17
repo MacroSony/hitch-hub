@@ -1,0 +1,29 @@
+{
+  "name": "@hitch-hub/session-mcp",
+  "version": "0.1.0",
+  "description": "Session-scoped Hitch media delivery tools over MCP stdio.",
+  "type": "module",
+  "bin": {
+    "hitch-session-mcp": "dist/server.js"
+  },
+  "exports": "./dist/server.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "typescript": "^5.9.3"
+  }
+}

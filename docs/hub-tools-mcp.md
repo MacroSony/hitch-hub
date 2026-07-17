@@ -234,12 +234,14 @@ HITCH_SESSION_ID=<session-id>
 HITCH_TOOL_TOKEN=<short-lived-token>
 HITCH_TOOL_OUTBOX=<data-dir>/tools/<session-id>/outbox.jsonl
 HITCH_TOOL_RESULT_DIR=<data-dir>/tools/<session-id>/results
-HITCH_TOOL_TIMEOUT_MS=<agent-turn-timeout-ms>
+HITCH_TOOL_TIMEOUT_MS=<agent-tool-timeout-ms>
 ```
 
 The hub starts a session-scoped outbox pump with each active worker, validates requests, sends media through the worker's fixed chat target, and writes one JSON result file per request. The pump remains active until worker shutdown so a retry or delayed tool request cannot become stranded between Hitch turn consumers.
 
-For MCP-capable agents, `npm run mcp:session` starts a stdio MCP server that exposes `hitch.send_media` and uses the same outbox/result protocol. The agent must launch it with the `HITCH_TOOL_*` environment variables inherited from the hub-started worker.
+For MCP-capable agents, the standalone `@hitch-hub/session-mcp` package starts a stdio server that exposes `hitch.send_media` and uses the same outbox/result protocol. Install the package below Pi's agent package directory and launch its compiled `dist/server.js` from the sandbox-visible `/agent-config/npm/node_modules` mount. The agent inherits the session-scoped `HITCH_TOOL_*` environment variables from its hub-started worker; the Hitch repository and channel credentials remain unmounted.
+
+The current attended rollout uses `config_scope: system`, so one installation under the configured Pi directory is shared by that single-principal profile. A future `config_scope: hitch` multi-user rollout must provision the MCP adapter, server package, and `mcp.json` separately in each principal-owned `/agent-config`. Credential-isolated Pi currently starts with extensions disabled, so that mode must continue using Hitch's native guarded media tool rather than this adapter until an isolated extension strategy exists.
 
 The same server also exposes the MCP prompt `hitch.outbound_media`. That prompt is the agent-facing guidance for generated media:
 

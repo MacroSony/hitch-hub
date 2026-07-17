@@ -7,19 +7,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 
-type SendMediaResult = {
-  deliveryId: string;
-  status: "sent" | "failed";
-  platform: string;
-  path: string;
-  kind?: "image" | "file";
-  size?: number;
-  message?: string;
+const sendMediaResultShape = {
+  deliveryId: z.string(),
+  status: z.enum(["sent", "failed"]),
+  platform: z.string(),
+  path: z.string(),
+  kind: z.enum(["image", "file"]).optional(),
+  size: z.number().optional(),
+  message: z.string().optional(),
 };
+const sendMediaResultSchema = z.object(sendMediaResultShape);
+type SendMediaResult = z.infer<typeof sendMediaResultSchema>;
+const MAX_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 const env = readToolEnv();
 const server = new McpServer({
-  name: "hitch-session-tools",
+  name: "hitch-session-mcp",
   version: "0.1.0",
 });
 
@@ -42,26 +45,18 @@ server.registerTool(
     title: "Send media to the active Hitch chat",
     description: "Send a local image or file through the active Hitch session. The chat target is chosen by Hitch.",
     inputSchema: {
-      path: z.string().min(1).describe("Absolute local path to the media file."),
-      caption: z.string().optional().describe("Optional caption to send with the media."),
+      path: z.string().min(1).max(4096).refine((value) => path.isAbsolute(value), "Path must be absolute.").describe("Absolute local path to the media file."),
+      caption: z.string().max(3900).optional().describe("Optional caption to send with the media."),
       kind: z.enum(["image", "file"]).optional().describe("Optional media kind. Hitch verifies this against detected file content."),
     },
-    outputSchema: {
-      deliveryId: z.string(),
-      status: z.enum(["sent", "failed"]),
-      platform: z.string(),
-      path: z.string(),
-      kind: z.enum(["image", "file"]).optional(),
-      size: z.number().optional(),
-      message: z.string().optional(),
-    },
+    outputSchema: sendMediaResultShape,
   },
-  async ({ path: mediaPath, caption, kind }) => {
+  async ({ path: mediaPath, caption, kind }, extra) => {
     const result = await requestSendMedia(env, {
       path: mediaPath,
       ...(caption ? { caption } : {}),
       ...(kind ? { kind } : {}),
-    });
+    }, extra.signal);
     return {
       isError: result.status === "failed",
       content: [
@@ -117,15 +112,25 @@ function readToolEnv(): ToolEnv {
     throw new Error("Hitch MCP server requires HITCH_TOOL_TOKEN, HITCH_TOOL_OUTBOX, and HITCH_TOOL_RESULT_DIR.");
   }
 
+  const timeoutMs = Number(process.env.HITCH_TOOL_TIMEOUT_MS ?? 300_000);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TOOL_TIMEOUT_MS) {
+    throw new Error(`HITCH_TOOL_TIMEOUT_MS must be a positive integer no greater than ${MAX_TOOL_TIMEOUT_MS}.`);
+  }
+
   return {
     token,
     outboxPath,
     resultDir,
-    timeoutMs: Number(process.env.HITCH_TOOL_TIMEOUT_MS ?? 300_000),
+    timeoutMs,
   };
 }
 
-async function requestSendMedia(env: ToolEnv, input: { path: string; caption?: string; kind?: "image" | "file" }): Promise<SendMediaResult> {
+async function requestSendMedia(
+  env: ToolEnv,
+  input: { path: string; caption?: string; kind?: "image" | "file" },
+  signal: AbortSignal,
+): Promise<SendMediaResult> {
+  signal.throwIfAborted();
   mkdirSync(path.dirname(env.outboxPath), { recursive: true });
   mkdirSync(env.resultDir, { recursive: true });
   const id = randomUUID();
@@ -143,10 +148,11 @@ async function requestSendMedia(env: ToolEnv, input: { path: string; caption?: s
   const resultPath = path.join(env.resultDir, `${id}.json`);
   const deadline = Date.now() + env.timeoutMs;
   while (Date.now() < deadline) {
+    signal.throwIfAborted();
     if (existsSync(resultPath)) {
-      return JSON.parse(readFileSync(resultPath, "utf8")) as SendMediaResult;
+      return sendMediaResultSchema.parse(JSON.parse(readFileSync(resultPath, "utf8")));
     }
-    await sleep(250);
+    await sleep(Math.min(250, deadline - Date.now()), undefined, { signal });
   }
 
   return {
