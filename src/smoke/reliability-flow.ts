@@ -224,6 +224,49 @@ class BufferedNormalFinalOnAbortBackend implements AgentBackend {
   }
 }
 
+class FailedBoundaryOnAbortBackend implements AgentBackend {
+  private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+
+  async start(): Promise<number | undefined> {
+    return 336;
+  }
+
+  async send(): Promise<void> {
+    this.eventsQueue.push({ type: "text_delta", text: "failed grace draft" });
+  }
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  isAlive(): boolean {
+    return true;
+  }
+
+  async abort(): Promise<void> {
+    this.eventsQueue.push({
+      type: "assistant_message_end",
+      messageId: "failed-grace-message",
+      text: "failed grace draft",
+      stopReason: "error",
+      hasToolCalls: false,
+    });
+    this.eventsQueue.push({
+      type: "retry",
+      state: "scheduled",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 10,
+      error: "fetch failed",
+    });
+    this.eventsQueue.push({ type: "final", text: "Pi completed.", interrupted: true });
+  }
+
+  async stop(): Promise<void> {
+    this.eventsQueue.close();
+  }
+}
+
 class ScheduledBackend implements AgentBackend {
   private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
@@ -293,6 +336,31 @@ class SlowTerminalChannel implements ChannelAdapter {
   async sendArtifact(): Promise<void> {
     await sleep(this.artifactDelayMs);
     this.artifactCount += 1;
+  }
+
+  private event(text: string): InboundChatEvent {
+    return { id: crypto.randomUUID(), target: this.target, text, receivedAt: new Date().toISOString() };
+  }
+}
+
+class CheckpointFailureChannel implements ChannelAdapter {
+  readonly successfulTexts: string[] = [];
+  checkpointAttempts = 0;
+  private readonly target: ChatTarget = { platform: "fake", chatId: "checkpoint-failure", userId: "smoke" };
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    yield this.event("!new pi");
+    yield this.event("retry a failed checkpoint delivery");
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    if (text === "resend after failed checkpoint") {
+      this.checkpointAttempts += 1;
+      if (this.checkpointAttempts === 1) {
+        throw new Error("synthetic checkpoint send failure");
+      }
+    }
+    this.successfulTexts.push(text);
   }
 
   private event(text: string): InboundChatEvent {
@@ -541,6 +609,77 @@ async function main(): Promise<void> {
   if (toolProgress.length !== 1 || toolProgress[0]?.type !== "tool_progress" || toolProgress[0].id !== "call-1") {
     throw new Error(`Pi tool progress mapping regression: ${JSON.stringify(toolProgress)}`);
   }
+  const checkpointMessage = {
+    role: "assistant",
+    stopReason: "toolUse",
+    timestamp: 123,
+    content: [
+      { type: "text", text: "checkpoint" },
+      { type: "toolCall", id: "checkpoint-tool", name: "read", arguments: {} },
+    ],
+  };
+  const checkpointEvent = mapPiEvent({ type: "message_end", message: checkpointMessage })[0];
+  const matchingFinal = mapPiEvent({ type: "agent_end", messages: [checkpointMessage] }).find(
+    (event): event is Extract<AgentEvent, { type: "final" }> => event.type === "final",
+  );
+  if (
+    checkpointEvent?.type !== "assistant_message_end" ||
+    !checkpointEvent.hasToolCalls ||
+    checkpointEvent.stopReason !== "toolUse" ||
+    checkpointEvent.messageId !== matchingFinal?.messageId
+  ) {
+    throw new Error(`Pi finalized-message identity mapping regression: ${JSON.stringify({ checkpointEvent, matchingFinal })}`);
+  }
+  const thinkingOnlyCheckpoint = mapPiEvent({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      stopReason: "toolUse",
+      timestamp: 124,
+      content: [
+        { type: "thinking", thinking: "hidden chain of thought" },
+        { type: "toolCall", id: "thinking-tool", name: "read", arguments: {} },
+      ],
+    },
+  })[0];
+  if (thinkingOnlyCheckpoint?.type !== "assistant_message_end" || thinkingOnlyCheckpoint.text !== "") {
+    throw new Error(`Finalized thinking leaked into checkpoint text: ${JSON.stringify(thinkingOnlyCheckpoint)}`);
+  }
+  const exhaustedRetry = mapPiEvent({
+    type: "agent_end",
+    messages: [
+      {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "fetch failed Authorization: Bearer sk-terminal-secret",
+        timestamp: 125,
+        content: [{ type: "text", text: "failed terminal draft" }],
+      },
+    ],
+  }).find((event): event is Extract<AgentEvent, { type: "final" }> => event.type === "final");
+  if (
+    !exhaustedRetry?.failed ||
+    !exhaustedRetry.text.startsWith("Pi failed: fetch failed") ||
+    exhaustedRetry.text.includes("failed terminal draft") ||
+    exhaustedRetry.text.includes("sk-terminal-secret")
+  ) {
+    throw new Error(`Exhausted retry failure mapping regression: ${JSON.stringify(exhaustedRetry)}`);
+  }
+  for (const rawFailure of [
+    { type: "response", success: false, error: "Authorization: Bearer rpc-response-secret" },
+    { type: "extension_error", error: `token=extension-secret ${"x".repeat(800)}` },
+  ]) {
+    const failure = mapPiEvent(rawFailure)[0];
+    if (
+      failure?.type !== "final" ||
+      !failure.failed ||
+      failure.text.includes("rpc-response-secret") ||
+      failure.text.includes("extension-secret") ||
+      failure.text.length > 530
+    ) {
+      throw new Error(`Raw Pi failure was not bounded and redacted: ${JSON.stringify(failure)}`);
+    }
+  }
 
   const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-flow");
   rmSync(dataDir, { force: true, recursive: true });
@@ -576,9 +715,9 @@ async function main(): Promise<void> {
   if (
     !status?.includes("status: error") ||
     !status.includes("turn: none") ||
-    !status.includes("last error: Text delivery")
+    !status.includes("worker: not loaded")
   ) {
-    throw new Error(`Expected health-aware status with recent delivery failure: ${status ?? "missing"}`);
+    throw new Error(`Expected released timed-out turn health: ${status ?? "missing"}`);
   }
   if (!channel.texts.includes("recovered response")) {
     throw new Error("Expected a new serialized turn to recover after the timed-out handler released ownership.");
@@ -621,7 +760,11 @@ async function main(): Promise<void> {
 
   await runTimeoutPartialScenario();
   await runBufferedPartialScenario();
+  await runFailedBoundaryPartialScenario();
   await runDynamicTimeoutScenarios();
+  await runCheckpointDedupScenario();
+  await runCheckpointFailureScenario();
+  await runFailedFinalScenario();
   await runInputTimeoutCleanupScenario();
   await runTerminalReceiptScenario();
   await runIdleEvictionScenario();
@@ -634,6 +777,91 @@ async function main(): Promise<void> {
   await runAuditRotationScenario();
 
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
+}
+
+async function runCheckpointDedupScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-dedup");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const artifactPath = path.join(dataDir, "checkpoint-artifact.txt");
+  writeFileSync(artifactPath, "checkpoint artifact", "utf8");
+  const checkpointText = `one visible checkpoint ${artifactPath}`;
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    {
+      afterMs: 5,
+      event: {
+        type: "assistant_message_end",
+        messageId: "same-message",
+        text: checkpointText,
+        stopReason: "toolUse",
+        hasToolCalls: true,
+      },
+    },
+    { afterMs: 5, event: { type: "final", messageId: "same-message", text: checkpointText } },
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.media.auto_discovery = true;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  if (channel.texts.filter((text) => text === checkpointText).length !== 1 || channel.artifactCount !== 1) {
+    throw new Error(`Checkpoint/final duplicate suppression regressed: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runCheckpointFailureScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-failure");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new CheckpointFailureChannel();
+  const backend = new ScheduledBackend([
+    {
+      afterMs: 5,
+      event: {
+        type: "assistant_message_end",
+        messageId: "failed-checkpoint",
+        text: "resend after failed checkpoint",
+        stopReason: "toolUse",
+        hasToolCalls: true,
+      },
+    },
+    {
+      afterMs: 20,
+      event: { type: "final", messageId: "failed-checkpoint", text: "resend after failed checkpoint" },
+    },
+  ]);
+  await new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => backend).run();
+  if (
+    channel.checkpointAttempts !== 2 ||
+    channel.successfulTexts.filter((text) => text === "resend after failed checkpoint").length !== 1
+  ) {
+    throw new Error(`Failed checkpoint delivery suppressed its terminal retry: ${JSON.stringify(channel.successfulTexts)}`);
+  }
+}
+
+async function runFailedFinalScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-failed-final");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new ScriptedChannel(["!new pi", "exhaust retries"]);
+  const backend = new ScheduledBackend([
+    {
+      afterMs: 5,
+      event: {
+        type: "final",
+        text: "Pi failed: fetch failed Authorization: Bearer audit-secret-value",
+        failed: true,
+      },
+    },
+  ]);
+  await new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => backend).run();
+  const audit = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+  if (
+    !channel.texts.includes("Pi failed: fetch failed Authorization: Bearer audit-secret-value") ||
+    !audit.includes('"type":"turn.failed"') ||
+    audit.includes('"type":"turn.completed"') ||
+    audit.includes("audit-secret-value") ||
+    !audit.includes('"failure":"agent_final"')
+  ) {
+    throw new Error(`Terminal provider failure was recorded as success: ${JSON.stringify(channel.texts)}`);
+  }
 }
 
 async function runBufferedPartialScenario(): Promise<void> {
@@ -649,6 +877,17 @@ async function runBufferedPartialScenario(): Promise<void> {
     backend.abortCount !== 1
   ) {
     throw new Error(`Buffered partial was discarded by a late normal final: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runFailedBoundaryPartialScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-failed-boundary");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new ScriptedChannel(["!new pi", "fail while cancellation drains"]);
+  await new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => new FailedBoundaryOnAbortBackend()).run();
+  const timeoutNotice = channel.texts.find((text) => text.includes("Agent turn timed out"));
+  if (!timeoutNotice || timeoutNotice.includes("Partial result") || timeoutNotice.includes("failed grace draft")) {
+    throw new Error(`Failed retry text leaked through timeout grace: ${JSON.stringify(channel.texts)}`);
   }
 }
 

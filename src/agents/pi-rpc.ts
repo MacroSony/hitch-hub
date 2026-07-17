@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
 import { resolveTurnTimeoutPolicy } from "../config/turn-timeout.js";
@@ -243,7 +243,7 @@ export class PiRpcBackend implements AgentBackend {
         }
       },
       (error) => {
-        this.eventsQueue.push({ type: "final", text: `Pi RPC parse error: ${error.message}` });
+        this.eventsQueue.push(failedPiEvent("Pi RPC parse error", error.message));
       },
     );
 
@@ -257,10 +257,12 @@ export class PiRpcBackend implements AgentBackend {
     this.proc.on("exit", (code, signal) => {
       if (code !== 0 && signal !== "SIGTERM") {
         const stderr = this.stderrTail.trim();
-        this.eventsQueue.push({
-          type: "final",
-          text: `Pi RPC process exited with code ${code ?? "unknown"}.${stderr ? `\n${stderr}` : ""}`,
-        });
+        this.eventsQueue.push(
+          failedPiEvent(
+            `Pi RPC process exited with code ${code ?? "unknown"}`,
+            stderr || "No process error details were provided.",
+          ),
+        );
       }
       this.eventsQueue.close();
     });
@@ -738,7 +740,7 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
 
   if (type === "response") {
     if (record.success === false) {
-      return [{ type: "final", text: String(record.error ?? "Pi RPC command failed.") }];
+      return [failedPiEvent("Pi RPC command failed", record.error)];
     }
     return [];
   }
@@ -775,6 +777,50 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
         return [{ type: "activity", kind: "stream" }];
       }
     }
+  }
+
+  if (type === "message_end") {
+    const message = record.message;
+    if (isRecord(message) && message.role === "assistant") {
+      const stopReason = assistantStopReason(message.stopReason);
+      return [
+        {
+          type: "assistant_message_end",
+          messageId: assistantMessageId(message),
+          text: extractAssistantText(message),
+          stopReason,
+          hasToolCalls: assistantHasToolCalls(message),
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (type === "auto_retry_start") {
+    const maxAttempts = positiveInteger(record.maxAttempts);
+    const delayMs = nonNegativeInteger(record.delayMs);
+    return [
+      {
+        type: "retry",
+        state: "scheduled",
+        attempt: positiveInteger(record.attempt) ?? 1,
+        ...(maxAttempts ? { maxAttempts } : {}),
+        ...(delayMs !== undefined ? { delayMs } : {}),
+        ...(typeof record.errorMessage === "string" ? { error: record.errorMessage } : {}),
+      },
+    ];
+  }
+
+  if (type === "auto_retry_end") {
+    return [
+      {
+        type: "retry",
+        state: "finished",
+        attempt: positiveInteger(record.attempt) ?? 1,
+        ...(typeof record.success === "boolean" ? { succeeded: record.success } : {}),
+        ...(typeof record.finalError === "string" ? { error: record.finalError } : {}),
+      },
+    ];
   }
 
   if (type === "tool_execution_start") {
@@ -836,7 +882,7 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
   }
 
   if (type === "extension_error") {
-    return [{ type: "final", text: String(record.error ?? "Pi extension error.") }];
+    return [failedPiEvent("Pi extension error", record.error)];
   }
 
   return [];
@@ -1037,16 +1083,16 @@ function extractFinalText(record: Record<string, unknown>): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message && typeof message === "object" && (message as Record<string, unknown>).role === "assistant") {
-      const text = extractAssistantText(message);
-      if (text.length > 0) {
-        return text;
-      }
       if (isRecord(message) && message.stopReason === "aborted") {
-        return "";
+        return extractAssistantText(message);
       }
       if (isRecord(message) && message.stopReason === "error") {
         const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "unknown error";
-        return `Pi failed: ${errorMessage}`;
+        return `Pi failed: ${sanitizePiFailure(errorMessage)}`;
+      }
+      const text = extractAssistantText(message);
+      if (text.length > 0) {
+        return text;
       }
     }
   }
@@ -1054,13 +1100,88 @@ function extractFinalText(record: Record<string, unknown>): string {
   return "Pi finished without a final response.";
 }
 
+function sanitizePiFailure(value: string): string {
+  return value
+    .replace(/(authorization\s*[:=]?\s*bearer)\s+[^\s,;]+/gi, "$1 [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/((?:api[_-]?key|token|secret)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500) || "unknown error";
+}
+
+function failedPiEvent(
+  label: string,
+  error: unknown,
+): Extract<AgentEvent, { type: "final" }> {
+  return {
+    type: "final",
+    text: `${label}: ${sanitizePiFailure(String(error ?? "unknown error"))}`,
+    failed: true,
+  };
+}
+
 function finalEventFromPiAgentEnd(record: Record<string, unknown>): Extract<AgentEvent, { type: "final" }> {
   const interrupted = finalMessageWasInterrupted(record);
+  const message = lastAssistantMessage(record);
+  const failed = message?.stopReason === "error";
   return {
     type: "final",
     text: extractFinalText(record),
+    ...(message ? { messageId: assistantMessageId(message) } : {}),
     ...(interrupted ? { interrupted: true } : {}),
+    ...(failed ? { failed: true } : {}),
   };
+}
+
+function lastAssistantMessage(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const messages = record.messages;
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (isRecord(message) && message.role === "assistant") {
+      return message;
+    }
+  }
+  return undefined;
+}
+
+function assistantMessageId(message: Record<string, unknown>): string {
+  const toolCallIds = Array.isArray(message.content)
+    ? message.content
+        .filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "toolCall")
+        .map((part) => (typeof part.id === "string" ? part.id : ""))
+    : [];
+  const identity = JSON.stringify({
+    responseId: typeof message.responseId === "string" ? message.responseId : undefined,
+    timestamp: typeof message.timestamp === "number" ? message.timestamp : undefined,
+    stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+    text: extractAssistantText(message),
+    toolCallIds,
+  });
+  return `pi-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+}
+
+function assistantStopReason(
+  value: unknown,
+): Extract<AgentEvent, { type: "assistant_message_end" }>["stopReason"] {
+  return value === "stop" || value === "length" || value === "toolUse" || value === "error" || value === "aborted"
+    ? value
+    : "unknown";
+}
+
+function assistantHasToolCalls(message: Record<string, unknown>): boolean {
+  return Array.isArray(message.content) && message.content.some((part) => isRecord(part) && part.type === "toolCall");
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function finalMessageWasInterrupted(record: Record<string, unknown>): boolean {

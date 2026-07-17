@@ -123,20 +123,58 @@ async function main(): Promise<void> {
   if (channel.texts.filter((text) => text === "retry recovered").length !== 1) {
     throw new Error(`Expected exactly one recovered final response: ${JSON.stringify(channel.texts)}`);
   }
+  const retryNotice = "Pi request hit a transient network error (fetch failed). Retrying 1/3 in 50ms.";
+  const checkpoint = "I’ll resend the media now.";
+  const retryIndex = channel.texts.indexOf(retryNotice);
+  const checkpointIndex = channel.texts.indexOf(checkpoint);
+  const toolStartIndex = channel.texts.findIndex((text) => text.includes("Tool started: hitch.send_media"));
+  const finalIndex = channel.texts.indexOf("retry recovered");
+  if (
+    retryIndex < 0 ||
+    checkpointIndex <= retryIndex ||
+    toolStartIndex <= checkpointIndex ||
+    finalIndex <= toolStartIndex ||
+    channel.texts.filter((text) => text === checkpoint).length !== 1
+  ) {
+    throw new Error(`Retry/checkpoint/tool/final delivery order regressed: ${JSON.stringify(channel.texts)}`);
+  }
   if (channel.texts.some((text) => text === "Pi completed." || text === "Pi finished without a final response.")) {
     throw new Error(`An empty-completion placeholder escaped into chat: ${JSON.stringify(channel.texts)}`);
   }
-  if (!channel.texts.includes("Tool started: hitch.send_media")) {
+  if (channel.texts.some((text) => text.includes("failed attempt draft"))) {
+    throw new Error(`Text from a failed retry attempt escaped into chat: ${JSON.stringify(channel.texts)}`);
+  }
+  if (channel.texts.some((text) => text.includes("sk-live-retry-secret"))) {
+    throw new Error(`Raw retry error leaked into chat: ${JSON.stringify(channel.texts)}`);
+  }
+  if (!channel.texts.some((text) => text.includes("Tool started: hitch.send_media"))) {
     throw new Error(`Expected targeted media tool-start visibility in failures mode: ${JSON.stringify(channel.texts)}`);
   }
-  if (!channel.texts.includes("Tool finished: hitch.send_media (succeeded)")) {
+  if (!channel.texts.some((text) => text.includes("Tool finished: hitch.send_media (succeeded)"))) {
     throw new Error(`Expected targeted media tool-result visibility in failures mode: ${JSON.stringify(channel.texts)}`);
   }
 
-  const auditRows = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8")
+  const auditLogText = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+  if (auditLogText.includes("sk-live-retry-secret")) {
+    throw new Error("Raw retry error leaked into the audit log.");
+  }
+  const auditRows = auditLogText
     .trim()
     .split(/\r?\n/)
-    .map((line) => JSON.parse(line) as { type?: string; sessionId?: string; details?: { turnId?: string; status?: string } });
+    .map((line) => JSON.parse(line) as {
+      type?: string;
+      sessionId?: string;
+      details?: { turnId?: string; status?: string; state?: string; messageId?: string };
+    });
+  if (!auditRows.some((row) => row.type === "turn.checkpoint_queued" && row.details?.messageId)) {
+    throw new Error("Intermediate assistant checkpoint enqueue was not audited.");
+  }
+  if (
+    !auditRows.some((row) => row.type === "turn.retry" && row.details?.state === "scheduled") ||
+    !auditRows.some((row) => row.type === "turn.retry" && row.details?.state === "finished")
+  ) {
+    throw new Error("Retry lifecycle start/end was not audited.");
+  }
   const artifactAudit = auditRows.find((row) => row.type === "artifact.delivery") as
     | { sessionId?: string; details?: { deliveryId?: string; turnId?: string; status?: string } }
     | undefined;
@@ -187,7 +225,7 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
     delivery: {
       full_tool_output: false,
       tool_status_mode: "failures",
-      tool_status_batch_ms: 0,
+      tool_status_batch_ms: 20,
       send_timeout_ms: 2_000,
       queue_ttl_ms: 5_000,
       retention_ms: 30 * 24 * 60 * 60 * 1000,
@@ -290,17 +328,44 @@ rl.on("line", (line) => {
   }
 
   send({ type: "agent_start" });
+  const failedMessage = {
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: "fetch failed",
+    timestamp: 50,
+    content: [{ type: "text", text: "failed attempt draft" }]
+  };
+  send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "failed attempt draft" } });
+  send({ type: "message_end", message: failedMessage });
   send({
     type: "agent_end",
     willRetry: true,
-    messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed", content: [] }]
+    messages: [failedMessage]
+  });
+  send({
+    type: "auto_retry_start",
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 50,
+    errorMessage: "fetch failed Authorization: Bearer sk-live-retry-secret"
   });
 
   setTimeout(() => {
     send({ type: "agent_start" });
     const requestId = "retry-media";
     const args = { path: artifactRequestPath, caption: "retry bridge", kind: "image" };
-    send({ type: "tool_execution_start", toolName: "hitch_send_media", args });
+    const checkpointMessage = {
+      role: "assistant",
+      stopReason: "toolUse",
+      timestamp: 100,
+      content: [
+        { type: "text", text: "I’ll resend the media now." },
+        { type: "toolCall", id: "retry-tool", name: "hitch_send_media", arguments: args }
+      ]
+    };
+    send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "I’ll resend the media now." } });
+    send({ type: "message_end", message: checkpointMessage });
+    send({ type: "tool_execution_start", toolCallId: "retry-tool", toolName: "hitch_send_media", args });
     appendFileSync(process.env.HITCH_TOOL_OUTBOX, JSON.stringify({
       id: requestId,
       type: "send_media",
@@ -317,15 +382,24 @@ rl.on("line", (line) => {
       const result = JSON.parse(readFileSync(resultPath, "utf8"));
       send({
         type: "tool_execution_end",
+        toolCallId: "retry-tool",
         toolName: "hitch_send_media",
         isError: result.status !== "sent",
         result: { content: [{ type: "text", text: "Media sent to fake: retry.png" }] }
       });
       send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "retry recovered" } });
+      const finalMessage = {
+        role: "assistant",
+        stopReason: "stop",
+        timestamp: 200,
+        content: [{ type: "text", text: "retry recovered" }]
+      };
+      send({ type: "message_end", message: finalMessage });
+      send({ type: "auto_retry_end", success: true, attempt: 1 });
       send({
         type: "agent_end",
         willRetry: false,
-        messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "retry recovered" }] }]
+        messages: [finalMessage]
       });
       setTimeout(() => {
         writeFileSync(settledMarker, "settled\\n", "utf8");

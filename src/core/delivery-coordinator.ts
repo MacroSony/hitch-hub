@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ChannelAdapter, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { AuditLog } from "./audit-log.js";
-import type { DeliveryStore, DeliverySummary } from "./delivery-store.js";
+import type { DeliveryRecord, DeliveryStore, DeliverySummary } from "./delivery-store.js";
 import type { ChatTarget } from "./types.js";
 
 export type DeliveryHealth = {
@@ -39,6 +39,7 @@ type DeliveryState = Omit<DeliveryHealth, "durable"> & {
 
 export class DeliveryCoordinator {
   private readonly states = new Map<string, DeliveryState>();
+  private readonly textCompletions = new Map<string, Promise<void>>();
 
   constructor(
     private readonly channel: ChannelAdapter,
@@ -131,8 +132,20 @@ export class DeliveryCoordinator {
       }
     });
 
-    state.tail = run.catch(() => undefined);
+    const completion = run.catch(() => undefined);
+    this.textCompletions.set(deliveryId, completion);
+    state.tail = completion;
+    void completion.finally(() => {
+      if (this.textCompletions.get(deliveryId) === completion) {
+        this.textCompletions.delete(deliveryId);
+      }
+    });
     return deliveryId;
+  }
+
+  async waitForTextDelivery(deliveryId: string): Promise<DeliveryRecord | undefined> {
+    await this.textCompletions.get(deliveryId);
+    return this.options.store.get(deliveryId);
   }
 
   async sendArtifact(

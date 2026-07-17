@@ -43,6 +43,7 @@ type ActiveTurn = {
   toolCallCount: number;
   toolSequence: number;
   inFlightTools: Map<string, { name: string; lastProgressActiveMs: number }>;
+  assistantMessageDeliveries: Map<string, string[]>;
   timeoutPolicy: TurnTimeoutPolicy;
   deadlineController?: TurnDeadlineController;
 };
@@ -1294,9 +1295,9 @@ export class RemoteAgentHub {
     const deliveredArtifactPaths = new Set<string>();
     const target = targetForSession(session);
     const deliveryContext: DeliveryContext = { sessionId: session.id, turnId: turn.id };
-    const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, (text) =>
-      this.sendChunkedText(target, text, deliveryContext),
-    );
+    const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, async (text) => {
+      await this.sendChunkedText(target, text, deliveryContext);
+    });
     const deadline = turnDeadline(turn);
     turn.deadlineController = deadline;
     const iterator = backend.events()[Symbol.asyncIterator]();
@@ -1341,6 +1342,7 @@ export class RemoteAgentHub {
           deadline.cancel();
         }
         this.recordTurnActivity(turn, agentEvent);
+        streamedText = transitionStreamedText(streamedText, agentEvent);
         const handled = await Promise.race([
           this.handleAgentEvent(
             session,
@@ -1367,15 +1369,18 @@ export class RemoteAgentHub {
           );
           return;
         }
-        if (agentEvent.type === "text_delta") {
-          streamedText += agentEvent.text;
-        }
         if (handled.finished) {
-          this.updateStatusForTurn(turn, "idle");
+          this.updateStatusForTurn(turn, agentEvent.type === "final" && agentEvent.failed ? "error" : "idle");
           await this.audit.write({
-            type: "turn.completed",
+            type: agentEvent.type === "final" && agentEvent.failed ? "turn.failed" : "turn.completed",
             sessionId: session.id,
-            details: { turnId: turn.id, streamedTextLength: streamedText.length },
+            details: {
+              turnId: turn.id,
+              streamedTextLength: streamedText.length,
+              ...(agentEvent.type === "final" && agentEvent.failed
+                ? { failure: "agent_final", errorLength: agentEvent.text.length }
+                : {}),
+            },
           });
           return;
         }
@@ -1431,11 +1436,69 @@ export class RemoteAgentHub {
       case "activity":
       case "tool_progress":
         return false;
+      case "assistant_message_end":
+        if (
+          event.stopReason !== "toolUse" ||
+          !event.hasToolCalls ||
+          event.text.trim().length === 0 ||
+          turn.assistantMessageDeliveries.has(event.messageId)
+        ) {
+          return false;
+        }
+        await toolMessages.flush();
+        if (!this.canContinueTurnHandler(turn)) {
+          return false;
+        }
+        const deliveryIds = await this.sendChunkedText(target, event.text, deliveryContext);
+        if (!this.canContinueTurnHandler(turn)) {
+          return false;
+        }
+        turn.assistantMessageDeliveries.set(event.messageId, deliveryIds);
+        await this.audit.write({
+          type: "turn.checkpoint_queued",
+          sessionId: session.id,
+          target,
+          details: { turnId: turn.id, messageId: event.messageId, deliveryIds, length: event.text.length },
+        });
+        return false;
+      case "retry":
+        if (event.state === "scheduled") {
+          await toolMessages.flush();
+          if (!this.canContinueTurnHandler(turn)) {
+            return false;
+          }
+          await this.sendChunkedText(target, formatRetryNotice(event), deliveryContext);
+          if (!this.canContinueTurnHandler(turn)) {
+            return false;
+          }
+        }
+        await this.audit.write({
+          type: "turn.retry",
+          sessionId: session.id,
+          target,
+          details: {
+            turnId: turn.id,
+            state: event.state,
+            attempt: event.attempt,
+            ...(event.maxAttempts === undefined ? {} : { maxAttempts: event.maxAttempts }),
+            ...(event.delayMs === undefined ? {} : { delayMs: event.delayMs }),
+            ...(event.succeeded === undefined ? {} : { succeeded: event.succeeded }),
+          },
+        });
+        return false;
       case "final": {
         const finalText = streamedText.length > 0 && isEmptyFinalFallback(event.text) ? streamedText : event.text;
         await toolMessages.flush();
-        if (finalText.length > 0) {
+        const checkpointDeliveryIds = event.messageId
+          ? turn.assistantMessageDeliveries.get(event.messageId)
+          : undefined;
+        const checkpointWasSent = checkpointDeliveryIds
+          ? await checkpointDeliveriesSent(this.delivery, checkpointDeliveryIds)
+          : false;
+        if (finalText.length > 0 && !checkpointWasSent) {
           await this.sendChunkedText(target, finalText, deliveryContext);
+        }
+        if (finalText.length > 0) {
           await this.sendArtifactsMentionedInText(
             target,
             finalText,
@@ -1538,16 +1601,26 @@ export class RemoteAgentHub {
     target: InboundChatEvent["target"],
     text: string,
     deliveryContext?: DeliveryContext,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const maxLength = 3900;
     if (text.length <= maxLength) {
-      await this.safeSendText(target, text, undefined, deliveryContext);
-      return;
+      const deliveryId = await this.safeSendText(target, text, undefined, deliveryContext);
+      return deliveryId ? [deliveryId] : [];
     }
 
+    const deliveryIds: string[] = [];
     for (let start = 0; start < text.length; start += maxLength) {
-      await this.safeSendText(target, text.slice(start, start + maxLength), undefined, deliveryContext);
+      const deliveryId = await this.safeSendText(
+        target,
+        text.slice(start, start + maxLength),
+        undefined,
+        deliveryContext,
+      );
+      if (deliveryId) {
+        deliveryIds.push(deliveryId);
+      }
     }
+    return deliveryIds;
   }
 
   private beginTurn(sessionId: string): ActiveTurn {
@@ -1567,6 +1640,7 @@ export class RemoteAgentHub {
       toolCallCount: 0,
       toolSequence: 0,
       inFlightTools: new Map(),
+      assistantMessageDeliveries: new Map(),
       timeoutPolicy: resolveTurnTimeoutPolicy(this.config),
     };
     this.activeTurns.set(sessionId, turn);
@@ -1591,6 +1665,10 @@ export class RemoteAgentHub {
 
   private isTurnCurrent(turn: ActiveTurn): boolean {
     return this.activeTurns.get(turn.sessionId)?.id === turn.id;
+  }
+
+  private canContinueTurnHandler(turn: ActiveTurn): boolean {
+    return this.isTurnCurrent(turn) && turn.phase !== "timed_out";
   }
 
   private recordTurnActivity(turn: ActiveTurn, event: AgentEvent): void {
@@ -1763,8 +1841,8 @@ export class RemoteAgentHub {
     text: string,
     opts?: Parameters<ChannelAdapter["sendText"]>[2],
     deliveryContext?: DeliveryContext,
-  ): Promise<void> {
-    this.delivery.enqueueText(target, text, opts, deliveryContext ?? this.deliveryContextFor(target));
+  ): Promise<string | undefined> {
+    return this.delivery.enqueueText(target, text, opts, deliveryContext ?? this.deliveryContextFor(target));
   }
 
   private deliveryContextFor(target: ChatTarget): DeliveryContext {
@@ -1992,6 +2070,58 @@ function formatTurnTimeoutNotice(turn: ActiveTurn, reason: TurnTimeoutReason): s
   }
 }
 
+function formatRetryNotice(event: Extract<AgentEvent, { type: "retry" }>): string {
+  const attempt = event.maxAttempts ? `${event.attempt}/${event.maxAttempts}` : String(event.attempt);
+  const delay = event.delayMs === undefined ? "shortly" : `in ${formatDuration(event.delayMs)}`;
+  return `Pi request hit a transient ${retryReason(event.error)}. Retrying ${attempt} ${delay}.`;
+}
+
+function retryReason(error: string | undefined): string {
+  if (!error) {
+    return "provider error";
+  }
+  if (/fetch failed/i.test(error)) {
+    return "network error (fetch failed)";
+  }
+  if (/network|socket|connection|timed?\s*out/i.test(error)) {
+    return "network error";
+  }
+  if (/rate.?limit|\b429\b/i.test(error)) {
+    return "rate-limit error";
+  }
+  if (/overload|\b529\b/i.test(error)) {
+    return "provider overload";
+  }
+  if (/\b50[0234]\b|server error/i.test(error)) {
+    return "provider server error";
+  }
+  return "provider error";
+}
+
+function transitionStreamedText(current: string, event: AgentEvent): string {
+  if (event.type === "text_delta") {
+    return current + event.text;
+  }
+  if (event.type === "assistant_message_end") {
+    return event.stopReason === "stop" || event.stopReason === "length" ? event.text : "";
+  }
+  if (event.type === "retry" && event.state === "scheduled") {
+    return "";
+  }
+  return current;
+}
+
+async function checkpointDeliveriesSent(
+  delivery: DeliveryCoordinator,
+  deliveryIds: string[],
+): Promise<boolean> {
+  if (deliveryIds.length === 0) {
+    return false;
+  }
+  const records = await Promise.all(deliveryIds.map((deliveryId) => delivery.waitForTextDelivery(deliveryId)));
+  return records.every((record) => record?.status === "sent");
+}
+
 async function interruptedFinalAfterTimeout(
   iterator: AsyncIterator<AgentEvent>,
   pendingNext: Promise<IteratorResult<AgentEvent>> | undefined,
@@ -2008,9 +2138,7 @@ async function interruptedFinalAfterTimeout(
       return accumulatedText.length > 0 ? accumulatedText : undefined;
     }
     const event = result.value;
-    if (event.type === "text_delta") {
-      accumulatedText += event.text;
-    } else if (event.type === "final") {
+    if (event.type === "final") {
       if (!event.interrupted) {
         return accumulatedText.length > 0 ? accumulatedText : undefined;
       }
@@ -2019,6 +2147,7 @@ async function interruptedFinalAfterTimeout(
       }
       return event.text.length > 0 ? event.text : undefined;
     }
+    accumulatedText = transitionStreamedText(accumulatedText, event);
     next = iterator.next();
   }
   return accumulatedText.length > 0 ? accumulatedText : undefined;

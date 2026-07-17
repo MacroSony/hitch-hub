@@ -78,6 +78,8 @@ Edit `examples/config.example.yaml` for your machine:
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress ordinary successful tool chatter while still showing explicit `hitch.send_media` progress, or `none` for no tool-status messages
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
+- Finalized assistant text emitted before a tool call is forwarded immediately as an intermediate checkpoint; thinking and failed/aborted attempt text are not checkpointed (a visible aborted partial may still be returned after a turn timeout)
+- Pi transient retries emit a short sanitized notice (for example, network, rate-limit, overload, or provider-server error) before the retry delay
 - `delivery.send_timeout_ms`: maximum time for one outbound text/media send attempt after it reaches the front of its queue
 - `delivery.queue_ttl_ms`: maximum time an accepted delivery may wait for its send attempt to begin
 - `delivery.retention_ms`: how long terminal delivery-ledger rows remain in SQLite; `0` disables pruning

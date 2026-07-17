@@ -38,11 +38,27 @@ export type AgentCommandResult = {
 
 export type AgentEvent =
   | { type: "text_delta"; text: string }
-  | { type: "final"; text: string; interrupted?: boolean }
+  | { type: "final"; text: string; messageId?: string; interrupted?: boolean; failed?: boolean }
+  | {
+      type: "assistant_message_end";
+      messageId: string;
+      text: string;
+      stopReason: "stop" | "length" | "toolUse" | "error" | "aborted" | "unknown";
+      hasToolCalls: boolean;
+    }
   | { type: "tool_call"; id?: string; name: string; preview?: string }
   | { type: "tool_progress"; id?: string; name: string }
   | { type: "tool_result"; id?: string; name: string; text?: string; succeeded?: boolean }
   | { type: "activity"; kind: "thinking" | "retry" | "stream" }
+  | {
+      type: "retry";
+      state: "scheduled" | "finished";
+      attempt: number;
+      maxAttempts?: number;
+      delayMs?: number;
+      error?: string;
+      succeeded?: boolean;
+    }
   | { type: "notification"; text: string; level?: string; completesTurn?: boolean }
   | { type: "approval_request"; raw: unknown }
   | { type: "interaction_request"; interaction: AgentInteraction; raw?: unknown }
