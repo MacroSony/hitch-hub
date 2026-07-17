@@ -103,6 +103,11 @@ Checklist:
 - [x] Keep the agent media outbox pump alive for the worker lifetime so retry continuations and delayed MCP calls cannot be stranded between turn consumers.
 - [x] Surface explicit `hitch.send_media` start/result status in failure-only mode and correlate artifact audit rows with their session/turn.
 - [x] Add a retry/media regression using `error -> willRetry -> send_media -> successful agent_end -> agent_settled`.
+- [x] Replace one fixed wall-clock turn deadline with a base active-work budget, one-minute per-tool extensions, a hard cap, and separate stall/tool/approval/input clocks.
+- [x] Forward finalized visible assistant text before tool calls, but never thinking or failed-attempt drafts; emit sanitized retry notices and de-duplicate a matching final only after confirmed delivery.
+- [x] Package the session MCP server independently of the Hitch source tree, install it under the sandbox-visible Pi package mount, and verify packed execution plus the real Bubblewrap boundary.
+
+Rollout note (2026-07-17): commits `be1c69c`, `75b8450`, `da40ebd`, and `b1e9f5a` are live in tmux `hitch:0.0` for attended WeChat testing. The active profile uses a five-minute base, one minute per tool up to thirty minutes, five-minute stall/input/approval deadlines, a ten-minute tool deadline, summarized status for every tool, and four-second status batching. The standalone MCP server runs from `/agent-config/npm` with no Hitch repository mount. This remains a single-principal, unguarded-extension soak profile rather than the future multi-user credential-isolated profile.
 
 ## Completed Iteration: Operability and Delivery Evidence
 
@@ -163,7 +168,7 @@ Checklist:
 - [x] Add active session/turn scoping for agent-initiated media sends.
 - [x] Add hub MCP transport exposing only the session-scoped `hitch.send_media` tool for the first MCP milestone.
 - [x] Expose MCP prompt guidance through `hitch.outbound_media` so MCP-capable agents can learn when to call `hitch.send_media`.
-- [ ] Add Pi-native MCP server list wiring when Pi exposes a stable MCP client configuration surface, or add a small Pi extension adapter if needed.
+- [x] Add Pi MCP adapter wiring and a standalone server package that loads from the sandbox-visible agent package directory without mounting Hitch source.
 - [x] Gate current final-text path scanner behind `media.auto_discovery`.
 - [x] Default auto-discovery to off.
 - [x] Add smoke tests for:
@@ -177,11 +182,11 @@ Checklist:
 
 ## Open Decisions
 
-- [!] MCP process shape: one hub MCP server with short-lived session tokens, or one per-session MCP server/process.
+- [x] MCP process shape: one lazy stdio server launched by the Pi MCP adapter for a worker, using Hitch's short-lived session token and fixed-target bridge.
 - [x] Transport for first bridge: session-scoped JSONL outbox and result file.
 - [x] Agent-initiated `send_media` is processed by a session-scoped pump for the lifetime of the active worker.
 - [!] Whether Pi will consume MCP prompts automatically from a native MCP server list, or whether Hitch needs a Pi extension adapter to fetch/apply the prompt.
-- [!] Whether non-image file sends should be supported by the first `send_media` tool or require a stronger opt-in than images.
+- [x] The first `send_media` tool supports both detected images and ordinary files under the same host path/size/target policy.
 
 ## Design Decision: Agent Config Ownership
 

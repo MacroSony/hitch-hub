@@ -24,6 +24,7 @@ This file archives completed implementation checkpoints so
 | 15 | Principal ownership and private runtime state | Done |
 | 16 | Fail-closed Bubblewrap and multi-user isolation | Done |
 | 17 | Credential guard and session-scoped native media | Done |
+| 18 | Dynamic turn budgets, visible progress, and packaged sandbox MCP | Done |
 
 ## Implemented Capabilities
 
@@ -84,6 +85,9 @@ This file archives completed implementation checkpoints so
 - Adversarial two-principal Telegram route and mount isolation coverage.
 - Fail-closed Pi credential isolation with workspace-only file tools, Pi 0.80.6-normalization compatibility checks, startup attestation, command-backed credential rejection, and disabled caller resources.
 - Native guarded `hitch_send_media` backed by the authenticated session bridge, active mount/export intersection, immutable private delivery snapshots, sanitized results, and post-media retry/final-message coverage.
+- Progress-aware turn budgets with a base active window, per-tool extensions, a hard cap, and separate stall/tool/approval/input deadlines.
+- Finalized visible pre-tool assistant checkpoints, sanitized retry notices, delivery-aware terminal de-duplication, and failed-turn audit categorization without raw error bodies.
+- Standalone `@hitch-hub/session-mcp` packaging with bounded/cancellable media calls, packed-install coverage, and real Bubblewrap execution without a Hitch source mount.
 - Smoke tests for fake flow, media cache, media flow, interaction flow, Pi RPC, Pi approval, Pi UI selection, Telegram health checks, and multi-channel routing.
 
 ## Verification Snapshot
@@ -110,14 +114,18 @@ Latest local verification from the review pass:
 - `npm run smoke:reliability-flow`: passed.
 - `npm run smoke:wechat-reliability`: passed.
 - `npm run smoke:mcp-session`: passed.
+- `npm run smoke:mcp-package`: passed, including packed install and real Bubblewrap execution with the active Node runtime.
 - `npm audit --omit=dev`: passed with zero reported vulnerabilities.
 - Controlled live Bubblewrap acceptance with the installed Pi configuration/extensions: returned `BUBBLEWRAP_OK`; 22 trusted system-config plans migrated from read-only to read/write with zero quarantines.
+- 2026-07-17 attended WeChat rollout: installed `@hitch-hub/session-mcp@0.1.0`, verified the package and `mcp` Forge allowlist inside the live mount plan, confirmed Hitch source invisibility and read-only tool results, restarted tmux `hitch:0.0`, and observed WeChat `starting -> healthy`.
 
 ## Lessons Carried Forward
 
 The outbound artifact prototype proved that channel upload plumbing works, but final-text path scanning can miss generated images and can also upload unrelated files when an agent mentions paths under broad allowed roots.
 
 Artifact delivery now uses the explicit, session-scoped `hitch.send_media` hub tool path as the primary design, with legacy path scanning disabled by default. See [hub-tools-mcp.md](hub-tools-mcp.md).
+
+The current attended rollout deliberately uses one writable system Pi config with credential isolation disabled so trusted Pi extensions and the MCP adapter can load. This is not the final multi-user profile: Hitch-scoped multi-user operation needs per-principal package/config provisioning, and credential-isolated Pi currently disables the MCP adapter and continues to use the native guarded media tool.
 
 ## Historical Commit Notes
 
