@@ -612,6 +612,13 @@ export class SessionRegistry {
     return result.changes > 0;
   }
 
+  expirePendingApprovalsForSession(sessionId: string): number {
+    const result = this.db
+      .prepare("UPDATE approval_requests SET status = 'expired', updated_at = ? WHERE session_id = ? AND status = 'pending'")
+      .run(new Date().toISOString(), sessionId);
+    return Number(result.changes);
+  }
+
   getPendingApproval(id: string): PendingApproval | undefined {
     const row = this.db
       .prepare("SELECT * FROM approval_requests WHERE id = ? AND status = 'pending'")
@@ -723,6 +730,13 @@ export class SessionRegistry {
     this.db
       .prepare("DELETE FROM pending_interactions WHERE id = ? AND owner_principal_id = ?")
       .run(id, ownerPrincipalId);
+  }
+
+  deletePendingInteractionsForSession(sessionId: string): number {
+    const result = this.db
+      .prepare("DELETE FROM pending_interactions WHERE session_id = ? AND owner = 'agent'")
+      .run(sessionId);
+    return Number(result.changes);
   }
 
   private deletePendingInteractionForTarget(target: ChatTarget, ownerPrincipalId: string): void {

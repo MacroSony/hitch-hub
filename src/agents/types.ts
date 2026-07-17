@@ -42,7 +42,7 @@ export type AgentEvent =
   | { type: "tool_call"; id?: string; name: string; preview?: string }
   | { type: "tool_progress"; id?: string; name: string }
   | { type: "tool_result"; id?: string; name: string; text?: string; succeeded?: boolean }
-  | { type: "activity"; kind: "thinking" | "retry" }
+  | { type: "activity"; kind: "thinking" | "retry" | "stream" }
   | { type: "notification"; text: string; level?: string; completesTurn?: boolean }
   | { type: "approval_request"; raw: unknown }
   | { type: "interaction_request"; interaction: AgentInteraction; raw?: unknown }

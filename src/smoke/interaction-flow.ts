@@ -158,9 +158,14 @@ class InteractionSmokeChannel implements ChannelAdapter {
 
 class InteractionSmokeBackend implements AgentBackend {
   private livePromptReceived = false;
+  private delayNextStart = false;
   private readonly liveSelection = deferred<void>();
 
   async start(_session: HubSession): Promise<number | undefined> {
+    if (this.delayNextStart) {
+      this.delayNextStart = false;
+      await sleep(700);
+    }
     return process.pid;
   }
 
@@ -215,6 +220,7 @@ class InteractionSmokeBackend implements AgentBackend {
     }
 
     yield { type: "status", state: "running" };
+    this.delayNextStart = true;
     yield {
       type: "interaction_request",
       interaction: {
@@ -239,6 +245,73 @@ class InteractionSmokeBackend implements AgentBackend {
   async stop(): Promise<void> {}
 }
 
+class ApprovalRaceChannel implements ChannelAdapter {
+  readonly sentTexts: string[] = [];
+  private readonly target: ChatTarget = { platform: "fake", chatId: "approval-race", userId: "interaction-user" };
+  private readonly approvalShown = deferred<string>();
+  private readonly finalSeen = deferred<void>();
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    yield this.event("!new pi");
+    yield this.event("request slow approval response");
+    const approvalId = await withTimeout(this.approvalShown.promise, 5_000, "Timed out waiting for approval menu");
+    yield this.event(`!approve ${approvalId}`);
+    await withTimeout(this.finalSeen.promise, 5_000, "Timed out waiting for slow approval response");
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    this.sentTexts.push(text);
+    const approvalId = /^Approval requested: ([0-9a-f-]+)/m.exec(text)?.[1];
+    if (approvalId) {
+      this.approvalShown.resolve(approvalId);
+    }
+    if (text === "approval response survived") {
+      this.finalSeen.resolve();
+    }
+  }
+
+  private event(text: string): InboundChatEvent {
+    return { id: crypto.randomUUID(), target: this.target, text, receivedAt: new Date().toISOString() };
+  }
+}
+
+class ApprovalRaceBackend implements AgentBackend {
+  private readonly promptReceived = deferred<void>();
+  private readonly approvalDelivered = deferred<void>();
+  abortCount = 0;
+
+  async start(): Promise<number | undefined> {
+    return process.pid;
+  }
+
+  async send(): Promise<void> {
+    this.promptReceived.resolve();
+  }
+
+  async *events(): AsyncIterable<AgentEvent> {
+    await this.promptReceived.promise;
+    yield { type: "approval_request", raw: { type: "extension_ui_request", id: "slow-approval", method: "confirm" } };
+    await this.approvalDelivered.promise;
+    yield { type: "final", text: "approval response survived" };
+  }
+
+  isAlive(): boolean {
+    return true;
+  }
+
+  async respondToApproval(): Promise<void> {
+    await sleep(700);
+    this.approvalDelivered.resolve();
+  }
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+    this.approvalDelivered.resolve();
+  }
+
+  async stop(): Promise<void> {}
+}
+
 async function main(): Promise<void> {
   const dataDir = path.resolve("examples/.remote-agent-hub-smoke", "interaction-flow");
   rmSync(dataDir, { force: true, recursive: true });
@@ -258,8 +331,34 @@ async function main(): Promise<void> {
   if (!channel.sentTexts.includes("Live choice selected: red")) {
     throw new Error("Live agent selection was not resolved.");
   }
+  if (channel.sentTexts.some((text) => text.includes("input request timed out"))) {
+    throw new Error(`An accepted input lost a race to its deadline: ${JSON.stringify(channel.sentTexts)}`);
+  }
+
+  await runApprovalResponseRaceScenario();
 
   process.stdout.write("Interaction flow smoke ok\n");
+}
+
+async function runApprovalResponseRaceScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke", "interaction-approval-race");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const config = interactionSmokeConfig(dataDir);
+  config.agent_turn_timeout_ms = 5_000;
+  config.agent_turn_max_timeout_ms = 5_000;
+  config.agent_turn_stall_timeout_ms = 5_000;
+  config.approval_timeout_ms = 500;
+  const channel = new ApprovalRaceChannel();
+  const backend = new ApprovalRaceBackend();
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  if (
+    !channel.sentTexts.includes("approval response survived") ||
+    channel.sentTexts.some((text) => text.includes("approval request timed out")) ||
+    backend.abortCount !== 0
+  ) {
+    throw new Error(`An accepted approval lost a race to its deadline: ${JSON.stringify(channel.sentTexts)}`);
+  }
 }
 
 function interactionSmokeConfig(dataDir: string): HubConfig {
@@ -270,6 +369,7 @@ function interactionSmokeConfig(dataDir: string): HubConfig {
     default_cwd: cwd,
     defaultCwd: cwd,
     agent_turn_timeout_ms: 20_000,
+    agent_input_timeout_ms: 500,
     worker_idle_timeout_ms: 30 * 60 * 1000,
     approval_timeout_ms: 20_000,
     media: {
@@ -346,6 +446,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 main().catch((error: unknown) => {

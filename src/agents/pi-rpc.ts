@@ -771,6 +771,9 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
       if (delta.type === "thinking_delta") {
         return [{ type: "activity", kind: "thinking" }];
       }
+      if (delta.type === "toolcall_start" || delta.type === "toolcall_delta" || delta.type === "toolcall_end") {
+        return [{ type: "activity", kind: "stream" }];
+      }
     }
   }
 

@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { AgentBackend, AgentEvent, AgentInput } from "../agents/types.js";
 import { mapPiEvent } from "../agents/pi-rpc.js";
 import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { HubConfig } from "../config/schema.js";
+import { configSchema } from "../config/schema.js";
 import { RemoteAgentHub } from "../core/hub.js";
 import type { ChatTarget, HubSession } from "../core/types.js";
 import { AuditLog } from "../core/audit-log.js";
@@ -192,6 +194,36 @@ class PartialOnAbortBackend implements AgentBackend {
   }
 }
 
+class BufferedNormalFinalOnAbortBackend implements AgentBackend {
+  private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
+  abortCount = 0;
+
+  async start(): Promise<number | undefined> {
+    return 335;
+  }
+
+  async send(): Promise<void> {
+    this.eventsQueue.push({ type: "text_delta", text: "Buffered visible partial" });
+  }
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.eventsQueue.iterate();
+  }
+
+  isAlive(): boolean {
+    return true;
+  }
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+    this.eventsQueue.push({ type: "final", text: "late normal final" });
+  }
+
+  async stop(): Promise<void> {
+    this.eventsQueue.close();
+  }
+}
+
 class ScheduledBackend implements AgentBackend {
   private readonly eventsQueue = new AsyncEventQueue<AgentEvent>();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
@@ -228,6 +260,7 @@ class ScheduledBackend implements AgentBackend {
 
   async abort(): Promise<void> {
     this.abortCount += 1;
+    this.eventsQueue.close();
   }
 
   async stop(): Promise<void> {
@@ -238,6 +271,32 @@ class ScheduledBackend implements AgentBackend {
     }
     this.timers.clear();
     this.eventsQueue.close();
+  }
+}
+
+class SlowTerminalChannel implements ChannelAdapter {
+  readonly texts: string[] = [];
+  artifactCount = 0;
+  private readonly target: ChatTarget = { platform: "fake", chatId: "slow-terminal", userId: "smoke" };
+
+  constructor(private readonly artifactDelayMs: number) {}
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    yield this.event("!new pi");
+    yield this.event("finish near the deadline");
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    this.texts.push(text);
+  }
+
+  async sendArtifact(): Promise<void> {
+    await sleep(this.artifactDelayMs);
+    this.artifactCount += 1;
+  }
+
+  private event(text: string): InboundChatEvent {
+    return { id: crypto.randomUUID(), target: this.target, text, receivedAt: new Date().toISOString() };
   }
 }
 
@@ -442,6 +501,10 @@ class SlowQueueChannel implements ChannelAdapter {
 }
 
 async function main(): Promise<void> {
+  const invalidCap = configSchema.safeParse({ agent_turn_timeout_ms: 100, agent_turn_max_timeout_ms: 99 });
+  if (invalidCap.success) {
+    throw new Error("Config accepted an agent_turn_max_timeout_ms below the base active budget.");
+  }
   const interrupted = mapPiEvent({
     type: "agent_end",
     messages: [
@@ -462,6 +525,17 @@ async function main(): Promise<void> {
   });
   if (thinking.length !== 1 || thinking[0]?.type !== "activity" || thinking[0].kind !== "thinking") {
     throw new Error(`Pi thinking activity mapping regression: ${JSON.stringify(thinking)}`);
+  }
+  const toolArgumentStream = mapPiEvent({
+    type: "message_update",
+    assistantMessageEvent: { type: "toolcall_delta", delta: "hidden arguments" },
+  });
+  if (
+    toolArgumentStream.length !== 1 ||
+    toolArgumentStream[0]?.type !== "activity" ||
+    toolArgumentStream[0].kind !== "stream"
+  ) {
+    throw new Error(`Pi tool-call stream activity mapping regression: ${JSON.stringify(toolArgumentStream)}`);
   }
   const toolProgress = mapPiEvent({ type: "tool_execution_update", toolCallId: "call-1", toolName: "bash" });
   if (toolProgress.length !== 1 || toolProgress[0]?.type !== "tool_progress" || toolProgress[0].id !== "call-1") {
@@ -546,7 +620,10 @@ async function main(): Promise<void> {
   }
 
   await runTimeoutPartialScenario();
+  await runBufferedPartialScenario();
   await runDynamicTimeoutScenarios();
+  await runInputTimeoutCleanupScenario();
+  await runTerminalReceiptScenario();
   await runIdleEvictionScenario();
   await runGracefulShutdownScenario();
   await runMediaTimeoutScenario();
@@ -559,20 +636,97 @@ async function main(): Promise<void> {
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
 }
 
+async function runBufferedPartialScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-buffered-partial");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new ScriptedChannel(["!new pi", "stream then cross the deadline"]);
+  const backend = new BufferedNormalFinalOnAbortBackend();
+  await new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => backend).run();
+  const response = channel.texts.find((text) => text.includes("Partial result from the cancelled turn"));
+  if (
+    !response?.includes("Buffered visible partial") ||
+    response.includes("late normal final") ||
+    backend.abortCount !== 1
+  ) {
+    throw new Error(`Buffered partial was discarded by a late normal final: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runInputTimeoutCleanupScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-input-timeout");
+  rmSync(dataDir, { force: true, recursive: true });
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  config.agent_input_timeout_ms = 35;
+  const channel = new ScriptedChannel(["!new pi", "request input and wait"]);
+  const backend = new ScheduledBackend([
+    {
+      afterMs: 5,
+      event: {
+        type: "interaction_request",
+        interaction: {
+          kind: "smoke.choice",
+          title: "Pick one",
+          options: [{ label: "one", value: 1 }],
+        },
+      },
+    },
+  ]);
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  if (!channel.texts.includes("Agent input request timed out after 35ms.")) {
+    throw new Error(`Configured input timeout was not enforced: ${JSON.stringify(channel.texts)}`);
+  }
+  const db = new DatabaseSync(path.join(dataDir, "hub.sqlite"));
+  const pending = db.prepare("SELECT COUNT(*) AS count FROM pending_interactions WHERE owner = 'agent'").get() as
+    | { count?: number }
+    | undefined;
+  db.close();
+  if ((pending?.count ?? 0) !== 0) {
+    throw new Error(`Input timeout left ${pending?.count ?? 0} stale agent interaction(s).`);
+  }
+}
+
+async function runTerminalReceiptScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-terminal-receipt");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const artifactPath = path.join(dataDir, "terminal.txt");
+  writeFileSync(artifactPath, "terminal artifact", "utf8");
+  const config = reliabilityConfig(dataDir);
+  config.media.auto_discovery = true;
+  config.agent_turn_timeout_ms = 150;
+  config.agent_turn_max_timeout_ms = 150;
+  config.delivery.send_timeout_ms = 300;
+  const channel = new SlowTerminalChannel(120);
+  const backend = new ScheduledBackend([
+    { afterMs: 100, event: { type: "final", text: `Finished with ${artifactPath}` } },
+  ]);
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  if (
+    !channel.texts.includes(`Finished with ${artifactPath}`) ||
+    channel.artifactCount !== 1 ||
+    channel.texts.some((text) => text.includes("timed out")) ||
+    backend.abortCount !== 0
+  ) {
+    throw new Error(`A received final lost a race to the agent deadline: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
 async function runDynamicTimeoutScenarios(): Promise<void> {
   const extensionDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-extension");
   rmSync(extensionDir, { force: true, recursive: true });
   const extensionConfig = reliabilityConfig(extensionDir);
-  extensionConfig.agent_turn_timeout_ms = 40;
-  extensionConfig.agent_turn_tool_extension_ms = 80;
-  extensionConfig.agent_turn_max_timeout_ms = 160;
-  extensionConfig.agent_turn_stall_timeout_ms = 100;
-  extensionConfig.agent_tool_timeout_ms = 100;
+  extensionConfig.agent_turn_timeout_ms = 100;
+  extensionConfig.agent_turn_tool_extension_ms = 200;
+  extensionConfig.agent_turn_max_timeout_ms = 400;
+  extensionConfig.agent_turn_stall_timeout_ms = 250;
+  extensionConfig.agent_tool_timeout_ms = 250;
   const extensionChannel = new ScriptedChannel(["!new pi", "extend for one tool"]);
   const extensionBackend = new ScheduledBackend([
     { afterMs: 20, event: { type: "tool_call", id: "extend-1", name: "read" } },
-    { afterMs: 10, event: { type: "tool_result", id: "extend-1", name: "read", succeeded: true } },
-    { afterMs: 45, event: { type: "final", text: "completed inside extended budget" } },
+    { afterMs: 20, event: { type: "tool_result", id: "extend-1", name: "read", succeeded: true } },
+    { afterMs: 120, event: { type: "final", text: "completed inside extended budget" } },
   ]);
   await new RemoteAgentHub(extensionConfig, extensionChannel, () => extensionBackend).run();
   if (!extensionChannel.texts.includes("completed inside extended budget") || extensionBackend.abortCount !== 0) {
@@ -582,40 +736,69 @@ async function runDynamicTimeoutScenarios(): Promise<void> {
   const progressDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-progress");
   rmSync(progressDir, { force: true, recursive: true });
   const progressConfig = reliabilityConfig(progressDir);
-  progressConfig.agent_turn_timeout_ms = 150;
-  progressConfig.agent_turn_max_timeout_ms = 150;
-  progressConfig.agent_turn_stall_timeout_ms = 35;
-  progressConfig.agent_tool_timeout_ms = 35;
+  progressConfig.agent_turn_timeout_ms = 400;
+  progressConfig.agent_turn_max_timeout_ms = 400;
+  progressConfig.agent_turn_stall_timeout_ms = 100;
+  progressConfig.agent_tool_timeout_ms = 100;
   const progressChannel = new ScriptedChannel(["!new pi", "keep reporting progress"]);
   const progressBackend = new ScheduledBackend([
     { afterMs: 5, event: { type: "tool_call", id: "progress-1", name: "bash" } },
-    { afterMs: 25, event: { type: "tool_progress", id: "progress-1", name: "bash" } },
-    { afterMs: 25, event: { type: "tool_result", id: "progress-1", name: "bash", succeeded: true } },
-    { afterMs: 25, event: { type: "activity", kind: "thinking" } },
-    { afterMs: 25, event: { type: "final", text: "progress kept the turn alive" } },
+    { afterMs: 60, event: { type: "tool_progress", id: "progress-1", name: "bash" } },
+    { afterMs: 60, event: { type: "tool_result", id: "progress-1", name: "bash", succeeded: true } },
+    { afterMs: 60, event: { type: "activity", kind: "thinking" } },
+    { afterMs: 60, event: { type: "final", text: "progress kept the turn alive" } },
   ]);
   await new RemoteAgentHub(progressConfig, progressChannel, () => progressBackend).run();
   if (!progressChannel.texts.includes("progress kept the turn alive") || progressBackend.abortCount !== 0) {
     throw new Error(`Tool/thinking progress did not renew the activity timers: ${JSON.stringify(progressChannel.texts)}`);
   }
 
+  const refreshDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-input-refresh");
+  rmSync(refreshDir, { force: true, recursive: true });
+  const refreshConfig = reliabilityConfig(refreshDir);
+  refreshConfig.agent_turn_timeout_ms = 400;
+  refreshConfig.agent_turn_max_timeout_ms = 400;
+  refreshConfig.agent_input_timeout_ms = 100;
+  const refreshChannel = new ScriptedChannel(["!new pi", "replace an input request"]);
+  const refreshBackend = new ScheduledBackend([
+    {
+      afterMs: 10,
+      event: {
+        type: "interaction_request",
+        interaction: { kind: "first", title: "First", options: [{ label: "one", value: 1 }] },
+      },
+    },
+    {
+      afterMs: 70,
+      event: {
+        type: "interaction_request",
+        interaction: { kind: "second", title: "Second", options: [{ label: "two", value: 2 }] },
+      },
+    },
+    { afterMs: 60, event: { type: "final", text: "replacement request refreshed the wait" } },
+  ]);
+  await new RemoteAgentHub(refreshConfig, refreshChannel, () => refreshBackend).run();
+  if (!refreshChannel.texts.includes("replacement request refreshed the wait") || refreshBackend.abortCount !== 0) {
+    throw new Error(`Replacement input did not refresh its wait deadline: ${JSON.stringify(refreshChannel.texts)}`);
+  }
+
   const capDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-cap");
   rmSync(capDir, { force: true, recursive: true });
   const capConfig = reliabilityConfig(capDir);
-  capConfig.agent_turn_timeout_ms = 30;
-  capConfig.agent_turn_tool_extension_ms = 50;
-  capConfig.agent_turn_max_timeout_ms = 70;
+  capConfig.agent_turn_timeout_ms = 100;
+  capConfig.agent_turn_tool_extension_ms = 150;
+  capConfig.agent_turn_max_timeout_ms = 180;
   capConfig.agent_turn_stall_timeout_ms = 500;
   capConfig.agent_tool_timeout_ms = 500;
   const capChannel = new ScriptedChannel(["!new pi", "hit the extension cap"]);
   const capBackend = new ScheduledBackend([
-    { afterMs: 10, event: { type: "tool_call", id: "cap-1", name: "read" } },
-    { afterMs: 5, event: { type: "tool_result", id: "cap-1", name: "read", succeeded: true } },
-    { afterMs: 10, event: { type: "tool_call", id: "cap-2", name: "read" } },
-    { afterMs: 5, event: { type: "tool_result", id: "cap-2", name: "read", succeeded: true } },
+    { afterMs: 20, event: { type: "tool_call", id: "cap-1", name: "read" } },
+    { afterMs: 10, event: { type: "tool_result", id: "cap-1", name: "read", succeeded: true } },
+    { afterMs: 20, event: { type: "tool_call", id: "cap-2", name: "read" } },
+    { afterMs: 10, event: { type: "tool_result", id: "cap-2", name: "read", succeeded: true } },
   ]);
   await new RemoteAgentHub(capConfig, capChannel, () => capBackend).run();
-  if (!capChannel.texts.includes("Agent turn timed out after 70ms of active work.") || capBackend.abortCount !== 1) {
+  if (!capChannel.texts.includes("Agent turn timed out after 180ms of active work.") || capBackend.abortCount !== 1) {
     throw new Error(`Dynamic timeout cap was not enforced: ${JSON.stringify(capChannel.texts)}`);
   }
 
@@ -639,14 +822,31 @@ async function runDynamicTimeoutScenarios(): Promise<void> {
   toolConfig.agent_turn_timeout_ms = 500;
   toolConfig.agent_turn_max_timeout_ms = 500;
   toolConfig.agent_turn_stall_timeout_ms = 100;
-  toolConfig.agent_tool_timeout_ms = 35;
+  toolConfig.agent_tool_timeout_ms = 80;
   const toolChannel = new ScriptedChannel(["!new pi", "let the tool stall"]);
   const toolBackend = new ScheduledBackend([
-    { afterMs: 5, event: { type: "tool_call", id: "stalled-tool", name: "bash" } },
+    { afterMs: 10, event: { type: "tool_call", id: "stalled-tool", name: "bash" } },
   ]);
   await new RemoteAgentHub(toolConfig, toolChannel, () => toolBackend).run();
-  if (!toolChannel.texts.includes("Agent tool made no progress for 35ms.") || toolBackend.abortCount !== 1) {
+  if (!toolChannel.texts.includes("Agent tool made no progress for 80ms.") || toolBackend.abortCount !== 1) {
     throw new Error(`In-flight tool timeout was not enforced: ${JSON.stringify(toolChannel.texts)}`);
+  }
+
+  const correlationDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-timeout-tool-correlation");
+  rmSync(correlationDir, { force: true, recursive: true });
+  const correlationConfig = reliabilityConfig(correlationDir);
+  correlationConfig.agent_turn_timeout_ms = 500;
+  correlationConfig.agent_turn_max_timeout_ms = 500;
+  correlationConfig.agent_turn_stall_timeout_ms = 100;
+  correlationConfig.agent_tool_timeout_ms = 80;
+  const correlationChannel = new ScriptedChannel(["!new pi", "keep exact tool identity"]);
+  const correlationBackend = new ScheduledBackend([
+    { afterMs: 10, event: { type: "tool_call", id: "real-tool", name: "bash" } },
+    { afterMs: 30, event: { type: "tool_result", id: "unknown-tool", name: "bash", succeeded: true } },
+  ]);
+  await new RemoteAgentHub(correlationConfig, correlationChannel, () => correlationBackend).run();
+  if (!correlationChannel.texts.includes("Agent tool made no progress for 80ms.")) {
+    throw new Error(`An unknown tool ID incorrectly completed another tool: ${JSON.stringify(correlationChannel.texts)}`);
   }
 }
 

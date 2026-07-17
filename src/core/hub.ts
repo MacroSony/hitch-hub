@@ -754,10 +754,12 @@ export class RemoteAgentHub {
         await this.sendChunkedText(event.target, `Approval ${approvalId} could not be delivered because the agent is not running.`);
         return;
       }
-      await backend.respondToApproval(approval.raw, decision);
     }
 
-    this.sessions.updateApprovalStatus(approvalId, decision);
+    if (!this.sessions.updateApprovalStatus(approvalId, decision)) {
+      await this.sendChunkedText(event.target, `No pending approval found for ${approvalId}.`);
+      return;
+    }
     if (this.sessions.countPendingApprovalsForSession(approval.sessionId) === 0) {
       const current = this.sessions.getById(approval.sessionId);
       if (current?.status === "waiting_approval") {
@@ -766,6 +768,17 @@ export class RemoteAgentHub {
         if (turn && backend?.respondToApproval) {
           this.setTurnPhase(turn, "running");
         }
+      }
+    }
+    if (backend?.respondToApproval) {
+      try {
+        await backend.respondToApproval(approval.raw, decision);
+      } catch (error) {
+        const turn = this.activeTurns.get(approval.sessionId);
+        if (turn) {
+          this.updateStatusForTurn(turn, "error");
+        }
+        throw error;
       }
     }
     await this.audit.write({
@@ -853,18 +866,19 @@ export class RemoteAgentHub {
       return;
     }
 
+    if (this.sessions.getById(session.id)?.status === "waiting_input") {
+      this.updateStatusUnlessStopped(session.id, "running");
+      const activeTurn = this.activeTurns.get(session.id);
+      if (activeTurn) {
+        this.setTurnPhase(activeTurn, "running");
+      }
+    }
+
     try {
       this.assertSessionCwdAuthorized(session);
       const processId = await backend.start(session, this.toolBridge.contextFor(session));
       await this.ensureToolPump(session, backend);
       this.sessions.setBackendProcess(session.id, processId);
-      if (this.sessions.getById(session.id)?.status === "waiting_input") {
-        this.updateStatusUnlessStopped(session.id, "running");
-        const activeTurn = this.activeTurns.get(session.id);
-        if (activeTurn) {
-          this.setTurnPhase(activeTurn, "running");
-        }
-      }
       const result = await backend.executeSelection({
         kind: interaction.kind,
         label: option.label,
@@ -951,6 +965,7 @@ export class RemoteAgentHub {
         title: result.interaction.title,
         options: result.interaction.options,
         ...(result.interaction.pageSize ? { pageSize: result.interaction.pageSize } : {}),
+        ...(turn ? { timeoutMs: turn.timeoutPolicy.inputMs } : {}),
       });
     }
     if (result.consumesEvents) {
@@ -983,6 +998,7 @@ export class RemoteAgentHub {
       sessionId?: string;
       pageSize?: number;
       deliveryContext?: DeliveryContext;
+      timeoutMs?: number;
     },
   ): Promise<void> {
     if (input.options.length === 0) {
@@ -990,7 +1006,24 @@ export class RemoteAgentHub {
       return;
     }
 
-    const interaction = this.sessions.createPendingInteraction(target, {
+    const interaction = this.createInteraction(target, input);
+    await this.sendInteractionMenu(target, interaction, input.deliveryContext);
+  }
+
+  private createInteraction(
+    target: ChatTarget,
+    input: {
+      ownerPrincipalId: string;
+      owner: "hub" | "agent";
+      kind: string;
+      title: string;
+      options: PendingInteractionOption[];
+      sessionId?: string;
+      pageSize?: number;
+      timeoutMs?: number;
+    },
+  ): PendingInteraction {
+    return this.sessions.createPendingInteraction(target, {
       ownerPrincipalId: input.ownerPrincipalId,
       owner: input.owner,
       kind: input.kind,
@@ -998,9 +1031,10 @@ export class RemoteAgentHub {
       options: input.options,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.pageSize ? { pageSize: input.pageSize } : {}),
-      expiresAt: new Date(Date.now() + INTERACTION_TTL_MS).toISOString(),
+      expiresAt: new Date(
+        Date.now() + (input.timeoutMs ?? INTERACTION_TTL_MS),
+      ).toISOString(),
     });
-    await this.sendInteractionMenu(target, interaction, input.deliveryContext);
   }
 
   private async sendInteractionMenu(
@@ -1298,6 +1332,14 @@ export class RemoteAgentHub {
         if (this.sessions.getById(session.id)?.status === "stopped") {
           return;
         }
+        if (isTerminalAgentEvent(agentEvent)) {
+          if (turn.phase === "waiting_input") {
+            this.sessions.deletePendingInteractionsForSession(session.id);
+          } else if (turn.phase === "waiting_approval") {
+            this.sessions.expirePendingApprovalsForSession(session.id);
+          }
+          deadline.cancel();
+        }
         this.recordTurnActivity(turn, agentEvent);
         const handled = await Promise.race([
           this.handleAgentEvent(
@@ -1429,7 +1471,6 @@ export class RemoteAgentHub {
         await this.sendChunkedText(target, this.formatNotification(event), deliveryContext);
         return event.completesTurn === true;
       case "approval_request": {
-        await toolMessages.flush();
         const method = piUiMethod(event.raw);
         const expiresAt = new Date(Date.now() + this.config.approval_timeout_ms).toISOString();
         const approvalId = this.sessions.createApproval({
@@ -1443,8 +1484,12 @@ export class RemoteAgentHub {
           raw: event.raw,
           expiresAt,
         });
-        this.setTurnPhase(turn, "waiting_approval");
+        this.setTurnPhase(turn, "waiting_approval", true);
         this.updateStatusForTurn(turn, "waiting_approval");
+        await toolMessages.flush();
+        if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_approval") {
+          return false;
+        }
         await this.safeSendText(
           target,
           `Approval requested: ${approvalId}\nexpires: ${expiresAt}\n\nFallback commands:\n!approve ${approvalId}\n!deny ${approvalId}`,
@@ -1458,11 +1503,10 @@ export class RemoteAgentHub {
         );
         return false;
       }
-      case "interaction_request":
-        await toolMessages.flush();
-        this.setTurnPhase(turn, "waiting_input");
+      case "interaction_request": {
+        this.setTurnPhase(turn, "waiting_input", true);
         this.updateStatusForTurn(turn, "waiting_input");
-        await this.createAndSendInteraction(target, {
+        const interaction = this.createInteraction(target, {
           ownerPrincipalId: session.ownerPrincipalId,
           owner: "agent",
           sessionId: session.id,
@@ -1470,9 +1514,15 @@ export class RemoteAgentHub {
           title: event.interaction.title,
           options: event.interaction.options,
           ...(event.interaction.pageSize ? { pageSize: event.interaction.pageSize } : {}),
-          deliveryContext,
+          timeoutMs: turn.timeoutPolicy.inputMs,
         });
+        await toolMessages.flush();
+        if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_input") {
+          return false;
+        }
+        await this.sendInteractionMenu(target, interaction, deliveryContext);
         return false;
+      }
       case "status":
         if (event.state === "running") {
           this.setTurnPhase(turn, "running");
@@ -1572,8 +1622,8 @@ export class RemoteAgentHub {
     turn.deadlineController?.reschedule();
   }
 
-  private setTurnPhase(turn: ActiveTurn, phase: ActiveTurn["phase"]): void {
-    if (!this.isTurnCurrent(turn) || turn.phase === phase) {
+  private setTurnPhase(turn: ActiveTurn, phase: ActiveTurn["phase"], refresh = false): void {
+    if (!this.isTurnCurrent(turn) || (turn.phase === phase && !refresh)) {
       return;
     }
     const nowMs = Date.now();
@@ -1614,6 +1664,10 @@ export class RemoteAgentHub {
     }
     this.setTurnPhase(turn, "timed_out");
     this.updateStatusForTurn(turn, "error");
+    // Clean both kinds regardless of the winning reason. A UI request can be
+    // dequeued in the same tick as an already-settled hard/stall deadline.
+    const expiredApprovalCount = this.sessions.expirePendingApprovalsForSession(session.id);
+    const deletedInteractionCount = this.sessions.deletePendingInteractionsForSession(session.id);
     await backend.abort().catch((error: unknown) => {
       process.stderr.write(`[hitch] Agent abort after timeout failed: ${formatError(error)}\n`);
     });
@@ -1633,6 +1687,8 @@ export class RemoteAgentHub {
         toolTimeoutMs: turn.timeoutPolicy.toolMs,
         toolCallCount: turn.toolCallCount,
         inFlightToolCount: turn.inFlightTools.size,
+        expiredApprovalCount,
+        deletedInteractionCount,
         partialResultLength: partialText?.length ?? 0,
       },
     });
@@ -1911,6 +1967,7 @@ function findInFlightTool(
     if (exact) {
       return { id, value: exact };
     }
+    return undefined;
   }
   for (const [candidateId, candidate] of turn.inFlightTools) {
     if (candidate.name === name) {
@@ -1955,7 +2012,7 @@ async function interruptedFinalAfterTimeout(
       accumulatedText += event.text;
     } else if (event.type === "final") {
       if (!event.interrupted) {
-        return undefined;
+        return accumulatedText.length > 0 ? accumulatedText : undefined;
       }
       if (isEmptyFinalFallback(event.text)) {
         return accumulatedText.length > 0 ? accumulatedText : undefined;
@@ -1969,6 +2026,10 @@ async function interruptedFinalAfterTimeout(
 
 function isEmptyFinalFallback(text: string): boolean {
   return text.length === 0 || text === "Pi completed." || text === "Pi finished without a final response.";
+}
+
+function isTerminalAgentEvent(event: AgentEvent): boolean {
+  return event.type === "final" || (event.type === "notification" && event.completesTurn === true);
 }
 
 async function settleIteratorBefore<T>(
