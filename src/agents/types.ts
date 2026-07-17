@@ -39,8 +39,10 @@ export type AgentCommandResult = {
 export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "final"; text: string; interrupted?: boolean }
-  | { type: "tool_call"; name: string; preview?: string }
-  | { type: "tool_result"; name: string; text?: string; succeeded?: boolean }
+  | { type: "tool_call"; id?: string; name: string; preview?: string }
+  | { type: "tool_progress"; id?: string; name: string }
+  | { type: "tool_result"; id?: string; name: string; text?: string; succeeded?: boolean }
+  | { type: "activity"; kind: "thinking" | "retry" }
   | { type: "notification"; text: string; level?: string; completesTurn?: boolean }
   | { type: "approval_request"; raw: unknown }
   | { type: "interaction_request"; interaction: AgentInteraction; raw?: unknown }

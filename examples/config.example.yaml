@@ -1,6 +1,14 @@
 data_dir: .remote-agent-hub
 default_cwd: ..
 agent_turn_timeout_ms: 300000
+# Each distinct tool call extends the active-work budget by one minute, up to
+# the maximum. Approval/input waits pause active-work accounting and use their
+# own limits. Silent agents and tools that stop reporting progress fail early.
+agent_turn_tool_extension_ms: 60000
+agent_turn_max_timeout_ms: 1800000
+agent_turn_stall_timeout_ms: 300000
+agent_tool_timeout_ms: 600000
+agent_input_timeout_ms: 300000
 worker_idle_timeout_ms: 1800000
 approval_timeout_ms: 300000
 

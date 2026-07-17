@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { HubConfig } from "../config/schema.js";
+import { resolveTurnTimeoutPolicy } from "../config/turn-timeout.js";
 import type { HubSession } from "../core/types.js";
 import type { AgentToolContext } from "../core/tool-bridge.js";
 import { FailClosedLauncherSelector, type LauncherSelector } from "../sandbox/launcher-selector.js";
@@ -184,7 +185,7 @@ export class PiRpcBackend implements AgentBackend {
       overrides.HITCH_TOOL_TOKEN = toolContext.token;
       overrides.HITCH_TOOL_OUTBOX = sandboxed ? "/hitch/outbox.jsonl" : toolContext.outboxPath;
       overrides.HITCH_TOOL_RESULT_DIR = sandboxed ? "/hitch/results" : toolContext.resultDir;
-      overrides.HITCH_TOOL_TIMEOUT_MS = String(this.config.agent_turn_timeout_ms);
+      overrides.HITCH_TOOL_TIMEOUT_MS = String(resolveTurnTimeoutPolicy(this.config).toolMs);
     }
     const env = buildWorkerEnvironment({
       ...(piConfig.env_allowlist ? { allowlist: piConfig.env_allowlist } : {}),
@@ -767,6 +768,9 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
       if (delta.type === "text_delta" && typeof delta.delta === "string") {
         return [{ type: "text_delta", text: delta.delta }];
       }
+      if (delta.type === "thinking_delta") {
+        return [{ type: "activity", kind: "thinking" }];
+      }
     }
   }
 
@@ -774,8 +778,19 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
     return [
       {
         type: "tool_call",
+        ...(typeof record.toolCallId === "string" ? { id: record.toolCallId } : {}),
         name: String(record.toolName ?? "tool"),
         preview: JSON.stringify(record.args ?? {}),
+      },
+    ];
+  }
+
+  if (type === "tool_execution_update") {
+    return [
+      {
+        type: "tool_progress",
+        ...(typeof record.toolCallId === "string" ? { id: record.toolCallId } : {}),
+        name: String(record.toolName ?? "tool"),
       },
     ];
   }
@@ -786,6 +801,7 @@ export function mapPiEvent(value: unknown): AgentEvent[] {
     return [
       {
         type: "tool_result",
+        ...(typeof record.toolCallId === "string" ? { id: record.toolCallId } : {}),
         name: String(record.toolName ?? "tool"),
         ...(succeeded === undefined ? {} : { succeeded }),
         ...(text ? { text } : {}),

@@ -80,6 +80,11 @@ export const configSchema = z.object({
   data_dir: z.string().default(".remote-agent-hub"),
   default_cwd: z.string().optional(),
   agent_turn_timeout_ms: z.number().int().positive().default(300_000),
+  agent_turn_tool_extension_ms: z.number().int().min(0).optional(),
+  agent_turn_max_timeout_ms: z.number().int().positive().optional(),
+  agent_turn_stall_timeout_ms: z.number().int().positive().optional(),
+  agent_tool_timeout_ms: z.number().int().positive().optional(),
+  agent_input_timeout_ms: z.number().int().positive().optional(),
   worker_idle_timeout_ms: z.number().int().min(0).default(30 * 60 * 1000),
   approval_timeout_ms: z.number().int().positive().default(300_000),
   media: mediaSchema.default({
@@ -161,6 +166,17 @@ export const configSchema = z.object({
         credential_isolation: "disabled",
       },
     }),
+}).superRefine((config, context) => {
+  if (
+    config.agent_turn_max_timeout_ms !== undefined &&
+    config.agent_turn_max_timeout_ms < config.agent_turn_timeout_ms
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agent_turn_max_timeout_ms"],
+      message: "agent_turn_max_timeout_ms must be greater than or equal to agent_turn_timeout_ms.",
+    });
+  }
 });
 
 export type HubConfigInput = z.input<typeof configSchema>;

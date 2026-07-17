@@ -82,7 +82,12 @@ Edit `examples/config.example.yaml` for your machine:
 - `delivery.queue_ttl_ms`: maximum time an accepted delivery may wait for its send attempt to begin
 - `delivery.retention_ms`: how long terminal delivery-ledger rows remain in SQLite; `0` disables pruning
 - `audit.max_bytes` and `audit.max_files`: size and retained-file limits for the rotating JSONL audit log
-- `agent_turn_timeout_ms`: authoritative wall-clock turn limit; interrupted Pi output received during bounded cancellation is returned as a labeled partial result
+- `agent_turn_timeout_ms`: initial active-work budget for a turn; interrupted Pi output received during bounded cancellation is returned as a labeled partial result
+- `agent_turn_tool_extension_ms`: active-work time added for each distinct tool call; defaults to `60000`
+- `agent_turn_max_timeout_ms`: hard cap for the dynamically extended active-work budget; defaults to at least 30 minutes and may not be lower than the initial budget
+- `agent_turn_stall_timeout_ms`: stop a running agent that emits no activity while no tool is in flight; defaults to 5 minutes
+- `agent_tool_timeout_ms`: stop an in-flight tool that emits no start/update/result progress; defaults to 10 minutes and also controls the Hitch tool bridge wait
+- `agent_input_timeout_ms`: maximum wait for an agent interaction response; approval requests continue to use `approval_timeout_ms`; both waits pause active-work accounting
 - `worker_idle_timeout_ms`: how long an idle agent worker remains loaded before Hitch stops it; `0` disables idle eviction
 - `channels.wechat.send_min_interval_ms`: minimum gap between WeChat API sends; `4000` is the conservative default for mixed text/media bursts
 - `channels.wechat.failure_cooldown_ms`: cooldown after a failed WeChat send; remaining items fail quickly until the cooldown expires or a fresh inbound message arrives

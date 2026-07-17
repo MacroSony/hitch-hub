@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import type { HubConfig } from "../config/schema.js";
+import { resolveTurnTimeoutPolicy, type TurnTimeoutPolicy } from "../config/turn-timeout.js";
 import type { ChannelAdapter, ChannelHealth, InboundChatEvent } from "../channels/types.js";
 import { parseCommand } from "../commands/parser.js";
 import { PiRpcBackend } from "../agents/pi-rpc.js";
@@ -32,9 +33,26 @@ type ActiveTurn = {
   id: string;
   sessionId: string;
   startedAt: string;
-  deadlineAt: string;
+  startedAtMs: number;
+  lastActivityAtMs: number;
   lastEventAt?: string;
   phase: "running" | "waiting_approval" | "waiting_input" | "timed_out";
+  phaseStartedAtMs: number;
+  pausedAtMs?: number;
+  pausedWorkMs: number;
+  toolCallCount: number;
+  toolSequence: number;
+  inFlightTools: Map<string, { name: string; lastProgressActiveMs: number }>;
+  timeoutPolicy: TurnTimeoutPolicy;
+  deadlineController?: TurnDeadlineController;
+};
+
+type TurnTimeoutReason = "hard_cap" | "stall" | "tool" | "approval" | "input";
+
+type TurnDeadlineController = {
+  promise: Promise<{ type: "timeout"; reason: TurnTimeoutReason }>;
+  reschedule: () => void;
+  cancel: () => void;
 };
 
 type SessionToolPump = {
@@ -842,6 +860,10 @@ export class RemoteAgentHub {
       this.sessions.setBackendProcess(session.id, processId);
       if (this.sessions.getById(session.id)?.status === "waiting_input") {
         this.updateStatusUnlessStopped(session.id, "running");
+        const activeTurn = this.activeTurns.get(session.id);
+        if (activeTurn) {
+          this.setTurnPhase(activeTurn, "running");
+        }
       }
       const result = await backend.executeSelection({
         kind: interaction.kind,
@@ -1242,6 +1264,7 @@ export class RemoteAgentHub {
       this.sendChunkedText(target, text, deliveryContext),
     );
     const deadline = turnDeadline(turn);
+    turn.deadlineController = deadline;
     const iterator = backend.events()[Symbol.asyncIterator]();
 
     try {
@@ -1264,6 +1287,7 @@ export class RemoteAgentHub {
             iterator,
             pendingNext,
             streamedText,
+            next.reason,
           );
           return;
         }
@@ -1274,7 +1298,7 @@ export class RemoteAgentHub {
         if (this.sessions.getById(session.id)?.status === "stopped") {
           return;
         }
-        this.touchTurn(turn);
+        this.recordTurnActivity(turn, agentEvent);
         const handled = await Promise.race([
           this.handleAgentEvent(
             session,
@@ -1288,7 +1312,17 @@ export class RemoteAgentHub {
           deadline.promise,
         ]);
         if (handled.type === "timeout") {
-          await this.handleTurnTimeout(session, backend, turn, target, toolMessages, iterator, undefined, streamedText);
+          await this.handleTurnTimeout(
+            session,
+            backend,
+            turn,
+            target,
+            toolMessages,
+            iterator,
+            undefined,
+            streamedText,
+            handled.reason,
+          );
           return;
         }
         if (agentEvent.type === "text_delta") {
@@ -1306,6 +1340,9 @@ export class RemoteAgentHub {
       }
     } finally {
       deadline.cancel();
+      if (turn.deadlineController === deadline) {
+        delete turn.deadlineController;
+      }
       toolMessages.cancelTimer();
       await this.drainToolPump(session.id);
     }
@@ -1348,6 +1385,9 @@ export class RemoteAgentHub {
 
     switch (event.type) {
       case "text_delta":
+        return false;
+      case "activity":
+      case "tool_progress":
         return false;
       case "final": {
         const finalText = streamedText.length > 0 && isEmptyFinalFallback(event.text) ? streamedText : event.text;
@@ -1469,8 +1509,15 @@ export class RemoteAgentHub {
       id: crypto.randomUUID(),
       sessionId,
       startedAt: new Date(startedAtMs).toISOString(),
-      deadlineAt: new Date(startedAtMs + this.config.agent_turn_timeout_ms).toISOString(),
+      startedAtMs,
+      lastActivityAtMs: startedAtMs,
       phase: "running",
+      phaseStartedAtMs: startedAtMs,
+      pausedWorkMs: 0,
+      toolCallCount: 0,
+      toolSequence: 0,
+      inFlightTools: new Map(),
+      timeoutPolicy: resolveTurnTimeoutPolicy(this.config),
     };
     this.activeTurns.set(sessionId, turn);
     return turn;
@@ -1496,16 +1543,53 @@ export class RemoteAgentHub {
     return this.activeTurns.get(turn.sessionId)?.id === turn.id;
   }
 
-  private touchTurn(turn: ActiveTurn): void {
-    if (this.isTurnCurrent(turn)) {
-      turn.lastEventAt = new Date().toISOString();
+  private recordTurnActivity(turn: ActiveTurn, event: AgentEvent): void {
+    if (!this.isTurnCurrent(turn)) {
+      return;
     }
+    const nowMs = Date.now();
+    turn.lastActivityAtMs = nowMs;
+    turn.lastEventAt = new Date(nowMs).toISOString();
+    const activeMs = turnActiveElapsedMs(turn, nowMs);
+
+    if (event.type === "tool_call") {
+      const id = event.id ?? `tool-${++turn.toolSequence}`;
+      if (!turn.inFlightTools.has(id)) {
+        turn.toolCallCount += 1;
+      }
+      turn.inFlightTools.set(id, { name: event.name, lastProgressActiveMs: activeMs });
+    } else if (event.type === "tool_progress") {
+      const entry = findInFlightTool(turn, event.id, event.name);
+      if (entry) {
+        entry.value.lastProgressActiveMs = activeMs;
+      }
+    } else if (event.type === "tool_result") {
+      const entry = findInFlightTool(turn, event.id, event.name);
+      if (entry) {
+        turn.inFlightTools.delete(entry.id);
+      }
+    }
+    turn.deadlineController?.reschedule();
   }
 
   private setTurnPhase(turn: ActiveTurn, phase: ActiveTurn["phase"]): void {
-    if (this.isTurnCurrent(turn)) {
-      turn.phase = phase;
+    if (!this.isTurnCurrent(turn) || turn.phase === phase) {
+      return;
     }
+    const nowMs = Date.now();
+    const wasPaused = turn.phase === "waiting_approval" || turn.phase === "waiting_input";
+    const willPause = phase === "waiting_approval" || phase === "waiting_input";
+    if (!wasPaused && willPause) {
+      turn.pausedAtMs = nowMs;
+    } else if (wasPaused && !willPause && turn.pausedAtMs !== undefined) {
+      turn.pausedWorkMs += nowMs - turn.pausedAtMs;
+      delete turn.pausedAtMs;
+      turn.lastActivityAtMs = nowMs;
+      turn.lastEventAt = new Date(nowMs).toISOString();
+    }
+    turn.phase = phase;
+    turn.phaseStartedAtMs = nowMs;
+    turn.deadlineController?.reschedule();
   }
 
   private updateStatusForTurn(turn: ActiveTurn, status: HubSession["status"]): void {
@@ -1523,6 +1607,7 @@ export class RemoteAgentHub {
     iterator: AsyncIterator<AgentEvent>,
     pendingNext: Promise<IteratorResult<AgentEvent>> | undefined,
     streamedText: string,
+    reason: TurnTimeoutReason,
   ): Promise<void> {
     if (!this.isTurnCurrent(turn)) {
       return;
@@ -1540,12 +1625,19 @@ export class RemoteAgentHub {
       target,
       details: {
         turnId: turn.id,
-        timeoutMs: this.config.agent_turn_timeout_ms,
+        reason,
+        baseActiveMs: turn.timeoutPolicy.baseActiveMs,
+        activeBudgetMs: turnActiveBudgetMs(turn),
+        activeElapsedMs: turnActiveElapsedMs(turn),
+        stallTimeoutMs: turn.timeoutPolicy.stallMs,
+        toolTimeoutMs: turn.timeoutPolicy.toolMs,
+        toolCallCount: turn.toolCallCount,
+        inFlightToolCount: turn.inFlightTools.size,
         partialResultLength: partialText?.length ?? 0,
       },
     });
     await toolMessages.flush();
-    const notice = `Agent turn timed out after ${this.config.agent_turn_timeout_ms}ms.`;
+    const notice = formatTurnTimeoutNotice(turn, reason);
     await this.sendChunkedText(
       target,
       partialText ? `${notice}\n\nPartial result from the cancelled turn:\n${partialText}` : notice,
@@ -1718,24 +1810,129 @@ class ToolStatusBatcher {
   }
 }
 
-function turnDeadline(turn: ActiveTurn): {
-  promise: Promise<{ type: "timeout" }>;
-  cancel: () => void;
-} {
+function turnDeadline(turn: ActiveTurn): TurnDeadlineController {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const remainingMs = Math.max(0, Date.parse(turn.deadlineAt) - Date.now());
-  const promise = new Promise<{ type: "timeout" }>((resolve) => {
-    timer = setTimeout(() => resolve({ type: "timeout" }), remainingMs);
+  let resolveTimeout: ((value: { type: "timeout"; reason: TurnTimeoutReason }) => void) | undefined;
+  let settled = false;
+  const promise = new Promise<{ type: "timeout"; reason: TurnTimeoutReason }>((resolve) => {
+    resolveTimeout = resolve;
   });
+
+  const reschedule = () => {
+    if (settled) {
+      return;
+    }
+    if (timer) {
+      clearTimeout(timer);
+    }
+    const next = nextTurnTimeout(turn);
+    if (next.remainingMs <= 0) {
+      settled = true;
+      resolveTimeout?.({ type: "timeout", reason: next.reason });
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      reschedule();
+    }, next.remainingMs);
+  };
+
+  reschedule();
   return {
     promise,
+    reschedule,
     cancel: () => {
+      settled = true;
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
       }
     },
   };
+}
+
+function nextTurnTimeout(
+  turn: ActiveTurn,
+  nowMs = Date.now(),
+): { reason: TurnTimeoutReason; remainingMs: number } {
+  if (turn.phase === "waiting_approval") {
+    return {
+      reason: "approval",
+      remainingMs: turn.phaseStartedAtMs + turn.timeoutPolicy.approvalMs - nowMs,
+    };
+  }
+  if (turn.phase === "waiting_input") {
+    return {
+      reason: "input",
+      remainingMs: turn.phaseStartedAtMs + turn.timeoutPolicy.inputMs - nowMs,
+    };
+  }
+
+  const activeElapsedMs = turnActiveElapsedMs(turn, nowMs);
+  const candidates: Array<{ reason: TurnTimeoutReason; remainingMs: number }> = [
+    { reason: "hard_cap", remainingMs: turnActiveBudgetMs(turn) - activeElapsedMs },
+  ];
+  if (turn.inFlightTools.size > 0) {
+    let toolRemainingMs = Number.POSITIVE_INFINITY;
+    for (const tool of turn.inFlightTools.values()) {
+      toolRemainingMs = Math.min(
+        toolRemainingMs,
+        turn.timeoutPolicy.toolMs - (activeElapsedMs - tool.lastProgressActiveMs),
+      );
+    }
+    candidates.push({ reason: "tool", remainingMs: toolRemainingMs });
+  } else {
+    candidates.push({ reason: "stall", remainingMs: turn.timeoutPolicy.stallMs - (nowMs - turn.lastActivityAtMs) });
+  }
+  return candidates.reduce((earliest, candidate) =>
+    candidate.remainingMs < earliest.remainingMs ? candidate : earliest,
+  );
+}
+
+function turnActiveElapsedMs(turn: ActiveTurn, nowMs = Date.now()): number {
+  const currentPauseMs = turn.pausedAtMs === undefined ? 0 : nowMs - turn.pausedAtMs;
+  return Math.max(0, nowMs - turn.startedAtMs - turn.pausedWorkMs - currentPauseMs);
+}
+
+function turnActiveBudgetMs(turn: ActiveTurn): number {
+  return Math.min(
+    turn.timeoutPolicy.maxActiveMs,
+    turn.timeoutPolicy.baseActiveMs + turn.toolCallCount * turn.timeoutPolicy.toolExtensionMs,
+  );
+}
+
+function findInFlightTool(
+  turn: ActiveTurn,
+  id: string | undefined,
+  name: string,
+): { id: string; value: { name: string; lastProgressActiveMs: number } } | undefined {
+  if (id) {
+    const exact = turn.inFlightTools.get(id);
+    if (exact) {
+      return { id, value: exact };
+    }
+  }
+  for (const [candidateId, candidate] of turn.inFlightTools) {
+    if (candidate.name === name) {
+      return { id: candidateId, value: candidate };
+    }
+  }
+  return undefined;
+}
+
+function formatTurnTimeoutNotice(turn: ActiveTurn, reason: TurnTimeoutReason): string {
+  switch (reason) {
+    case "hard_cap":
+      return `Agent turn timed out after ${turnActiveBudgetMs(turn)}ms of active work.`;
+    case "stall":
+      return `Agent turn stalled after ${turn.timeoutPolicy.stallMs}ms without activity.`;
+    case "tool":
+      return `Agent tool made no progress for ${turn.timeoutPolicy.toolMs}ms.`;
+    case "approval":
+      return `Agent approval request timed out after ${turn.timeoutPolicy.approvalMs}ms.`;
+    case "input":
+      return `Agent input request timed out after ${turn.timeoutPolicy.inputMs}ms.`;
+  }
 }
 
 async function interruptedFinalAfterTimeout(
@@ -1751,7 +1948,7 @@ async function interruptedFinalAfterTimeout(
   while (Date.now() < deadlineAt) {
     const result = await settleIteratorBefore(next, deadlineAt - Date.now());
     if (!result || result.done) {
-      return undefined;
+      return accumulatedText.length > 0 ? accumulatedText : undefined;
     }
     const event = result.value;
     if (event.type === "text_delta") {
@@ -1767,7 +1964,7 @@ async function interruptedFinalAfterTimeout(
     }
     next = iterator.next();
   }
-  return undefined;
+  return accumulatedText.length > 0 ? accumulatedText : undefined;
 }
 
 function isEmptyFinalFallback(text: string): boolean {
@@ -1799,9 +1996,11 @@ function formatTurnHealth(turn: ActiveTurn | undefined, persistedStatus: HubSess
       ? "stale (no active in-memory turn)"
       : "none";
   }
-  const ageMs = Math.max(0, Date.now() - Date.parse(turn.startedAt));
-  const remainingMs = Math.max(0, Date.parse(turn.deadlineAt) - Date.now());
-  return `${turn.phase}; active ${formatDuration(ageMs)}; deadline in ${formatDuration(remainingMs)}${
+  const nowMs = Date.now();
+  const ageMs = Math.max(0, nowMs - turn.startedAtMs);
+  const activeMs = turnActiveElapsedMs(turn, nowMs);
+  const next = nextTurnTimeout(turn, nowMs);
+  return `${turn.phase}; elapsed ${formatDuration(ageMs)}; active ${formatDuration(activeMs)}; ${next.reason} in ${formatDuration(Math.max(0, next.remainingMs))}; tools ${turn.toolCallCount} (${turn.inFlightTools.size} active)${
     turn.lastEventAt ? `; last event ${formatDuration(Math.max(0, Date.now() - Date.parse(turn.lastEventAt)))} ago` : "; no agent events yet"
   }`;
 }
