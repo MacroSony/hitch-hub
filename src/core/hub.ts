@@ -43,7 +43,7 @@ type ActiveTurn = {
   toolCallCount: number;
   toolSequence: number;
   inFlightTools: Map<string, { name: string; lastProgressActiveMs: number }>;
-  assistantMessageDeliveries: Map<string, string[]>;
+  assistantCheckpointMessageIds: Set<string>;
   timeoutPolicy: TurnTimeoutPolicy;
   deadlineController?: TurnDeadlineController;
 };
@@ -1298,6 +1298,35 @@ export class RemoteAgentHub {
     const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, async (text) => {
       await this.sendChunkedText(target, text, deliveryContext);
     });
+    const checkpointMessages = new CheckpointDigestBatcher(
+      {
+        quietMs: this.config.delivery.checkpoint_batch_ms,
+        maxWaitMs: this.config.delivery.checkpoint_max_wait_ms,
+        maxDigests: this.config.delivery.checkpoint_max_digests_per_turn,
+        maxChars: this.config.delivery.checkpoint_max_chars,
+      },
+      async (digest) => {
+        if (!this.canContinueTurnHandler(turn)) {
+          return;
+        }
+        const deliveryIds = await this.sendChunkedText(target, digest.text, deliveryContext);
+        await this.audit.write({
+          type: "turn.checkpoint_queued",
+          sessionId: session.id,
+          target,
+          details: {
+            turnId: turn.id,
+            ...(digest.checkpoints.length === 1 ? { messageId: digest.checkpoints[0]?.messageId } : {}),
+            messageIds: digest.checkpoints.map((checkpoint) => checkpoint.messageId),
+            deliveryIds,
+            length: digest.text.length,
+            checkpointCount: digest.checkpoints.length,
+            digestNumber: digest.number,
+            trigger: digest.trigger,
+          },
+        });
+      },
+    );
     const deadline = turnDeadline(turn);
     turn.deadlineController = deadline;
     const iterator = backend.events()[Symbol.asyncIterator]();
@@ -1319,6 +1348,7 @@ export class RemoteAgentHub {
             turn,
             target,
             toolMessages,
+            checkpointMessages,
             iterator,
             pendingNext,
             streamedText,
@@ -1351,6 +1381,7 @@ export class RemoteAgentHub {
             streamedText,
             deliveredArtifactPaths,
             toolMessages,
+            checkpointMessages,
             deliveryContext,
           ).then((finished) => ({ type: "handled" as const, finished })),
           deadline.promise,
@@ -1362,6 +1393,7 @@ export class RemoteAgentHub {
             turn,
             target,
             toolMessages,
+            checkpointMessages,
             iterator,
             undefined,
             streamedText,
@@ -1391,6 +1423,7 @@ export class RemoteAgentHub {
         delete turn.deadlineController;
       }
       toolMessages.cancelTimer();
+      await checkpointMessages.close();
       await this.drainToolPump(session.id);
     }
 
@@ -1422,6 +1455,7 @@ export class RemoteAgentHub {
     streamedText: string,
     deliveredArtifactPaths: Set<string>,
     toolMessages: ToolStatusBatcher,
+    checkpointMessages: CheckpointDigestBatcher,
     deliveryContext: DeliveryContext,
   ): Promise<boolean> {
     if (this.shuttingDown || !this.isTurnCurrent(turn) || this.sessions.getById(session.id)?.status === "stopped") {
@@ -1441,28 +1475,31 @@ export class RemoteAgentHub {
           event.stopReason !== "toolUse" ||
           !event.hasToolCalls ||
           event.text.trim().length === 0 ||
-          turn.assistantMessageDeliveries.has(event.messageId)
+          turn.assistantCheckpointMessageIds.has(event.messageId)
         ) {
           return false;
         }
-        await toolMessages.flush();
-        if (!this.canContinueTurnHandler(turn)) {
-          return false;
-        }
-        const deliveryIds = await this.sendChunkedText(target, event.text, deliveryContext);
-        if (!this.canContinueTurnHandler(turn)) {
-          return false;
-        }
-        turn.assistantMessageDeliveries.set(event.messageId, deliveryIds);
+        turn.assistantCheckpointMessageIds.add(event.messageId);
+        const checkpointResult = await checkpointMessages.add({
+          messageId: event.messageId,
+          text: event.text,
+          createdAtMs: Date.now(),
+        });
         await this.audit.write({
-          type: "turn.checkpoint_queued",
+          type: "turn.checkpoint_collected",
           sessionId: session.id,
           target,
-          details: { turnId: turn.id, messageId: event.messageId, deliveryIds, length: event.text.length },
+          details: {
+            turnId: turn.id,
+            messageId: event.messageId,
+            length: event.text.length,
+            result: checkpointResult,
+          },
         });
         return false;
       case "retry":
         if (event.state === "scheduled") {
+          checkpointMessages.discardPending();
           await toolMessages.flush();
           if (!this.canContinueTurnHandler(turn)) {
             return false;
@@ -1488,14 +1525,9 @@ export class RemoteAgentHub {
         return false;
       case "final": {
         const finalText = streamedText.length > 0 && isEmptyFinalFallback(event.text) ? streamedText : event.text;
+        await checkpointMessages.close();
         await toolMessages.flush();
-        const checkpointDeliveryIds = event.messageId
-          ? turn.assistantMessageDeliveries.get(event.messageId)
-          : undefined;
-        const checkpointWasSent = checkpointDeliveryIds
-          ? await checkpointDeliveriesSent(this.delivery, checkpointDeliveryIds)
-          : false;
-        if (finalText.length > 0 && !checkpointWasSent) {
+        if (finalText.length > 0) {
           await this.sendChunkedText(target, finalText, deliveryContext);
         }
         if (finalText.length > 0) {
@@ -1530,6 +1562,7 @@ export class RemoteAgentHub {
         if (event.completesTurn) {
           this.updateStatusForTurn(turn, "idle");
         }
+        checkpointMessages.discardPending();
         await toolMessages.flush();
         await this.sendChunkedText(target, this.formatNotification(event), deliveryContext);
         return event.completesTurn === true;
@@ -1549,6 +1582,7 @@ export class RemoteAgentHub {
         });
         this.setTurnPhase(turn, "waiting_approval", true);
         this.updateStatusForTurn(turn, "waiting_approval");
+        checkpointMessages.discardPending();
         await toolMessages.flush();
         if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_approval") {
           return false;
@@ -1579,6 +1613,7 @@ export class RemoteAgentHub {
           ...(event.interaction.pageSize ? { pageSize: event.interaction.pageSize } : {}),
           timeoutMs: turn.timeoutPolicy.inputMs,
         });
+        checkpointMessages.discardPending();
         await toolMessages.flush();
         if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_input") {
           return false;
@@ -1640,7 +1675,7 @@ export class RemoteAgentHub {
       toolCallCount: 0,
       toolSequence: 0,
       inFlightTools: new Map(),
-      assistantMessageDeliveries: new Map(),
+      assistantCheckpointMessageIds: new Set(),
       timeoutPolicy: resolveTurnTimeoutPolicy(this.config),
     };
     this.activeTurns.set(sessionId, turn);
@@ -1732,6 +1767,7 @@ export class RemoteAgentHub {
     turn: ActiveTurn,
     target: ChatTarget,
     toolMessages: ToolStatusBatcher,
+    checkpointMessages: CheckpointDigestBatcher,
     iterator: AsyncIterator<AgentEvent>,
     pendingNext: Promise<IteratorResult<AgentEvent>> | undefined,
     streamedText: string,
@@ -1742,6 +1778,7 @@ export class RemoteAgentHub {
     }
     this.setTurnPhase(turn, "timed_out");
     this.updateStatusForTurn(turn, "error");
+    await checkpointMessages.close();
     // Clean both kinds regardless of the winning reason. A UI request can be
     // dequeued in the same tick as an already-settled hard/stall deadline.
     const expiredApprovalCount = this.sessions.expirePendingApprovalsForSession(session.id);
@@ -1900,6 +1937,203 @@ function sessionRuntimeOptions(config: HubConfig): SessionRuntimeOptions {
       ? { credentialGuard: { hostPath: config.piCredentialGuardPath } }
       : {}),
   };
+}
+
+type CheckpointDigestTrigger = "immediate" | "quiet" | "max_wait";
+
+type CheckpointRecord = {
+  messageId: string;
+  text: string;
+  createdAtMs: number;
+};
+
+type CheckpointDigest = {
+  text: string;
+  checkpoints: CheckpointRecord[];
+  number: number;
+  trigger: CheckpointDigestTrigger;
+};
+
+type QueuedCheckpointDigest = {
+  checkpoints: CheckpointRecord[];
+  generation: number;
+  trigger: CheckpointDigestTrigger;
+  state: "queued" | "sending" | "cancelled";
+};
+
+export class CheckpointDigestBatcher {
+  private readonly pending: CheckpointRecord[] = [];
+  private readonly seenTexts = new Set<string>();
+  private readonly queuedDigests = new Set<QueuedCheckpointDigest>();
+  private quietTimer: ReturnType<typeof setTimeout> | undefined;
+  private maxWaitTimer: ReturnType<typeof setTimeout> | undefined;
+  private sendQueue = Promise.resolve();
+  private digestCount = 0;
+  private reservedDigestCount = 0;
+  private generation = 0;
+  private closed = false;
+
+  constructor(
+    private readonly options: {
+      quietMs: number;
+      maxWaitMs: number;
+      maxDigests: number;
+      maxChars: number;
+    },
+    private readonly send: (digest: CheckpointDigest) => Promise<void>,
+  ) {}
+
+  async add(checkpoint: CheckpointRecord): Promise<"queued" | "duplicate" | "limit_reached" | "closed"> {
+    if (this.closed) {
+      return "closed";
+    }
+    if (this.digestCount + this.reservedDigestCount >= this.options.maxDigests) {
+      return "limit_reached";
+    }
+
+    const text = normalizeCheckpointText(checkpoint.text);
+    if (this.seenTexts.has(text)) {
+      return "duplicate";
+    }
+    this.seenTexts.add(text);
+    this.pending.push({ ...checkpoint, text });
+
+    if (this.options.quietMs <= 0) {
+      await this.flush("immediate");
+      return "queued";
+    }
+
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+    }
+    this.quietTimer = setTimeout(() => {
+      void this.flush("quiet");
+    }, this.options.quietMs);
+    if (!this.maxWaitTimer && this.options.maxWaitMs > 0) {
+      this.maxWaitTimer = setTimeout(() => {
+        void this.flush("max_wait");
+      }, this.options.maxWaitMs);
+    }
+    return "queued";
+  }
+
+  discardPending(): void {
+    this.generation += 1;
+    this.cancelTimers();
+    for (const checkpoint of this.pending) {
+      this.seenTexts.delete(checkpoint.text);
+    }
+    this.pending.splice(0);
+    for (const digest of this.queuedDigests) {
+      this.cancelQueuedDigest(digest);
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.discardPending();
+    await this.sendQueue;
+  }
+
+  private async flush(trigger: CheckpointDigestTrigger): Promise<void> {
+    this.cancelTimers();
+    if (this.closed || this.pending.length === 0) {
+      this.releasePending();
+      return;
+    }
+    if (this.digestCount + this.reservedDigestCount >= this.options.maxDigests) {
+      this.releasePending();
+      return;
+    }
+
+    const queued: QueuedCheckpointDigest = {
+      checkpoints: this.pending.splice(0),
+      generation: this.generation,
+      trigger,
+      state: "queued",
+    };
+    this.queuedDigests.add(queued);
+    this.reservedDigestCount += 1;
+    this.sendQueue = this.sendQueue
+      .then(async () => {
+        if (queued.state === "cancelled" || this.closed || queued.generation !== this.generation) {
+          this.cancelQueuedDigest(queued);
+          return;
+        }
+        queued.state = "sending";
+        this.reservedDigestCount -= 1;
+        const number = ++this.digestCount;
+        const digest: CheckpointDigest = {
+          text: formatCheckpointDigest(queued.checkpoints, Date.now(), this.options.maxChars),
+          checkpoints: queued.checkpoints,
+          number,
+          trigger: queued.trigger,
+        };
+        try {
+          await this.send(digest);
+        } finally {
+          this.queuedDigests.delete(queued);
+        }
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`[hitch] Checkpoint digest enqueue failed: ${formatError(error)}\n`);
+      });
+    await this.sendQueue;
+  }
+
+  private releasePending(): void {
+    for (const checkpoint of this.pending) {
+      this.seenTexts.delete(checkpoint.text);
+    }
+    this.pending.splice(0);
+  }
+
+  private cancelQueuedDigest(digest: QueuedCheckpointDigest): void {
+    if (digest.state !== "queued") {
+      return;
+    }
+    digest.state = "cancelled";
+    this.reservedDigestCount -= 1;
+    for (const checkpoint of digest.checkpoints) {
+      this.seenTexts.delete(checkpoint.text);
+    }
+    this.queuedDigests.delete(digest);
+  }
+
+  private cancelTimers(): void {
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+      this.quietTimer = undefined;
+    }
+    if (this.maxWaitTimer) {
+      clearTimeout(this.maxWaitTimer);
+      this.maxWaitTimer = undefined;
+    }
+  }
+}
+
+function normalizeCheckpointText(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+function formatCheckpointDigest(checkpoints: CheckpointRecord[], sentAtMs: number, maxChars: number): string {
+  const visible = checkpoints.slice(-5);
+  const omitted = checkpoints.length - visible.length;
+  const lines = [`Progress update · ${formatClockTime(sentAtMs)}`];
+  if (omitted > 0) {
+    lines.push(`- ${omitted} earlier checkpoint${omitted === 1 ? "" : "s"} combined`);
+  }
+  lines.push(...visible.map((checkpoint) => `- ${formatClockTime(checkpoint.createdAtMs)} — ${checkpoint.text}`));
+  return truncateWithEllipsis(lines.join("\n"), maxChars);
+}
+
+function formatClockTime(timestampMs: number): string {
+  const value = new Date(timestampMs);
+  return [value.getHours(), value.getMinutes(), value.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function truncateWithEllipsis(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 class ToolStatusBatcher {
@@ -2109,17 +2343,6 @@ function transitionStreamedText(current: string, event: AgentEvent): string {
     return "";
   }
   return current;
-}
-
-async function checkpointDeliveriesSent(
-  delivery: DeliveryCoordinator,
-  deliveryIds: string[],
-): Promise<boolean> {
-  if (deliveryIds.length === 0) {
-    return false;
-  }
-  const records = await Promise.all(deliveryIds.map((deliveryId) => delivery.waitForTextDelivery(deliveryId)));
-  return records.every((record) => record?.status === "sent");
 }
 
 async function interruptedFinalAfterTimeout(

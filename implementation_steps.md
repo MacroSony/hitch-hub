@@ -107,7 +107,19 @@ Checklist:
 - [x] Forward finalized visible assistant text before tool calls, but never thinking or failed-attempt drafts; emit sanitized retry notices and de-duplicate a matching final only after confirmed delivery.
 - [x] Package the session MCP server independently of the Hitch source tree, install it under the sandbox-visible Pi package mount, and verify packed execution plus the real Bubblewrap boundary.
 
-Rollout note (updated 2026-07-18): commits `be1c69c`, `75b8450`, `da40ebd`, and `b1e9f5a` are live in tmux `hitch:0.0` for attended WeChat testing. The active profile uses a five-minute base, one minute per tool up to thirty minutes, five-minute stall/input/approval deadlines, and a ten-minute tool deadline. WeChat receives intermediate assistant checkpoints, failed tool results, and explicit `hitch.send_media` progress; ordinary successful tool chatter is suppressed, with a ten-second batch window retained for the remaining statuses. The standalone MCP server runs from `/agent-config/npm` with no Hitch repository mount. This remains a single-principal, unguarded-extension soak profile rather than the future multi-user credential-isolated profile.
+Rollout note (updated 2026-07-18): commits `be1c69c`, `75b8450`, `da40ebd`, and `b1e9f5a` are live in tmux `hitch:0.0` for attended WeChat testing. The active profile uses a five-minute base, one minute per tool up to thirty minutes, five-minute stall/input/approval deadlines, and a ten-minute tool deadline. WeChat receives timestamped intermediate checkpoint digests, failed tool results, and explicit `hitch.send_media` progress; ordinary successful tool chatter is suppressed, with a ten-second batch window retained for the remaining statuses. Checkpoint digests use ten seconds of quiet, a thirty-second maximum wait during continuous activity, and a three-digest turn cap. The standalone MCP server runs from `/agent-config/npm` with no Hitch repository mount. This remains a single-principal, unguarded-extension soak profile rather than the future multi-user credential-isolated profile.
+
+## Completed Iteration: Checkpoint Digest Delivery
+
+Goal: preserve useful intermediate agent updates without exhausting WeChat delivery capacity or suppressing the final answer.
+
+- [x] Collect finalized pre-tool assistant messages into one timestamped progress digest.
+- [x] Reset a ten-second quiet timer for each new checkpoint and force a digest after thirty seconds of continuous checkpoint activity.
+- [x] De-duplicate checkpoint text, cap each digest at 1,000 characters, and cap progress at three digests per turn.
+- [x] Drop pending progress when a final, retry, timeout, approval, input request, or notification takes priority.
+- [x] Always enqueue the authoritative final response even when its text appeared in an earlier progress digest.
+- [x] Audit checkpoint collection and digest enqueue trigger/count/delivery correlation.
+- [x] Cover quiet batching, maximum-wait flushing, duplicate removal, turn caps, retry/timeout cleanup, failed delivery, and final-message behavior in smoke tests.
 
 ## Completed Iteration: Operability and Delivery Evidence
 

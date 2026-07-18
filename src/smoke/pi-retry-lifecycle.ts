@@ -126,7 +126,9 @@ async function main(): Promise<void> {
   const retryNotice = "Pi request hit a transient network error (fetch failed). Retrying 1/3 in 50ms.";
   const checkpoint = "I’ll resend the media now.";
   const retryIndex = channel.texts.indexOf(retryNotice);
-  const checkpointIndex = channel.texts.indexOf(checkpoint);
+  const checkpointIndex = channel.texts.findIndex(
+    (text) => text.startsWith("Progress update ·") && text.includes(checkpoint),
+  );
   const toolStartIndex = channel.texts.findIndex((text) => text.includes("Tool started: hitch.send_media"));
   const finalIndex = channel.texts.indexOf("retry recovered");
   if (
@@ -134,7 +136,7 @@ async function main(): Promise<void> {
     checkpointIndex <= retryIndex ||
     toolStartIndex <= checkpointIndex ||
     finalIndex <= toolStartIndex ||
-    channel.texts.filter((text) => text === checkpoint).length !== 1
+    channel.texts.filter((text) => text.startsWith("Progress update ·") && text.includes(checkpoint)).length !== 1
   ) {
     throw new Error(`Retry/checkpoint/tool/final delivery order regressed: ${JSON.stringify(channel.texts)}`);
   }
@@ -226,6 +228,10 @@ function retryConfig(dataDir: string, artifactPath: string, settledMarker: strin
       full_tool_output: false,
       tool_status_mode: "failures",
       tool_status_batch_ms: 20,
+      checkpoint_batch_ms: 20,
+      checkpoint_max_wait_ms: 60,
+      checkpoint_max_digests_per_turn: 3,
+      checkpoint_max_chars: 1_000,
       send_timeout_ms: 2_000,
       queue_ttl_ms: 5_000,
       retention_ms: 30 * 24 * 60 * 60 * 1000,

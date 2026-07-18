@@ -6,7 +6,7 @@ import { mapPiEvent } from "../agents/pi-rpc.js";
 import type { ChannelAdapter, ChannelHealth, InboundChatEvent, OutboundArtifact, SendOptions } from "../channels/types.js";
 import type { HubConfig } from "../config/schema.js";
 import { configSchema } from "../config/schema.js";
-import { RemoteAgentHub } from "../core/hub.js";
+import { CheckpointDigestBatcher, RemoteAgentHub } from "../core/hub.js";
 import type { ChatTarget, HubSession } from "../core/types.js";
 import { AuditLog } from "../core/audit-log.js";
 import { DeliveryCoordinator } from "../core/delivery-coordinator.js";
@@ -345,7 +345,7 @@ class SlowTerminalChannel implements ChannelAdapter {
 
 class CheckpointFailureChannel implements ChannelAdapter {
   readonly successfulTexts: string[] = [];
-  checkpointAttempts = 0;
+  digestAttempts = 0;
   private readonly target: ChatTarget = { platform: "fake", chatId: "checkpoint-failure", userId: "smoke" };
 
   async *receive(): AsyncIterable<InboundChatEvent> {
@@ -354,11 +354,9 @@ class CheckpointFailureChannel implements ChannelAdapter {
   }
 
   async sendText(_target: ChatTarget, text: string): Promise<void> {
-    if (text === "resend after failed checkpoint") {
-      this.checkpointAttempts += 1;
-      if (this.checkpointAttempts === 1) {
-        throw new Error("synthetic checkpoint send failure");
-      }
+    if (text.startsWith("Progress update ·")) {
+      this.digestAttempts += 1;
+      throw new Error("synthetic checkpoint digest send failure");
     }
     this.successfulTexts.push(text);
   }
@@ -762,7 +760,13 @@ async function main(): Promise<void> {
   await runBufferedPartialScenario();
   await runFailedBoundaryPartialScenario();
   await runDynamicTimeoutScenarios();
+  await runCheckpointDigestScenario();
+  await runCheckpointMaxWaitScenario();
+  await runCheckpointDigestLimitScenario();
+  await runCheckpointQueuedCancellationScenario();
   await runCheckpointDedupScenario();
+  await runCheckpointRetryDiscardScenario();
+  await runCheckpointTimeoutDiscardScenario();
   await runCheckpointFailureScenario();
   await runFailedFinalScenario();
   await runInputTimeoutCleanupScenario();
@@ -777,6 +781,151 @@ async function main(): Promise<void> {
   await runAuditRotationScenario();
 
   process.stdout.write(`Reliability flow smoke ok: elapsed=${elapsedMs}ms\n`);
+}
+
+async function runCheckpointDigestScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-digest");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    checkpointAfter(2, "digest-a", "Inspecting the session logs."),
+    checkpointAfter(2, "digest-b", "Comparing delivery failures."),
+    checkpointAfter(2, "digest-a-duplicate", "Inspecting the session logs."),
+    checkpointAfter(2, "digest-c", "Checking the final-message path."),
+    { afterMs: 30, event: { type: "final", text: "Inspecting the session logs." } },
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  const digests = channel.texts.filter((text) => text.startsWith("Progress update ·"));
+  if (
+    digests.length !== 1 ||
+    !/^Progress update · \d{2}:\d{2}:\d{2}/.test(digests[0] ?? "") ||
+    !digests[0]?.match(/- \d{2}:\d{2}:\d{2} — Inspecting the session logs\./) ||
+    !digests[0]?.includes("Comparing delivery failures.") ||
+    !digests[0]?.includes("Checking the final-message path.") ||
+    (digests[0]?.match(/Inspecting the session logs\./g)?.length ?? 0) !== 1 ||
+    channel.texts.filter((text) => text === "Inspecting the session logs.").length !== 1
+  ) {
+    throw new Error(`Checkpoint digest formatting/dedup regressed: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runCheckpointMaxWaitScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-max-wait");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    checkpointAfter(2, "continuous-a", "Continuous checkpoint one."),
+    checkpointAfter(15, "continuous-b", "Continuous checkpoint two."),
+    checkpointAfter(15, "continuous-c", "Continuous checkpoint three."),
+    checkpointAfter(15, "continuous-d", "Continuous checkpoint four."),
+    { afterMs: 20, event: { type: "final", text: "Maximum-wait scenario complete." } },
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  config.delivery.checkpoint_batch_ms = 20;
+  config.delivery.checkpoint_max_wait_ms = 50;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  const auditRows = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+  const digests = channel.texts.filter((text) => text.startsWith("Progress update ·"));
+  if (
+    digests.length !== 1 ||
+    !digests[0]?.includes("Continuous checkpoint four.") ||
+    !auditRows.includes('"trigger":"max_wait"') ||
+    channel.texts.filter((text) => text === "Maximum-wait scenario complete.").length !== 1
+  ) {
+    throw new Error(`Checkpoint maximum-wait flush regressed: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runCheckpointDigestLimitScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-limit");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    checkpointAfter(2, "limit-a", "Progress one."),
+    checkpointAfter(50, "limit-b", "Progress two."),
+    checkpointAfter(50, "limit-c", "Progress three."),
+    checkpointAfter(50, "limit-d", "Progress four should be capped."),
+    { afterMs: 50, event: { type: "final", text: "Digest-limit scenario complete." } },
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 1_000;
+  config.agent_turn_max_timeout_ms = 1_000;
+  config.delivery.checkpoint_batch_ms = 10;
+  config.delivery.checkpoint_max_wait_ms = 30;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  const auditRows = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+  if (
+    channel.texts.filter((text) => text.startsWith("Progress update ·")).length !== 3 ||
+    !auditRows.includes('"result":"limit_reached"') ||
+    channel.texts.filter((text) => text === "Digest-limit scenario complete.").length !== 1
+  ) {
+    throw new Error(`Checkpoint digest cap regressed: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+function checkpointAfter(afterMs: number, messageId: string, text: string): { afterMs: number; event: AgentEvent } {
+  return {
+    afterMs,
+    event: { type: "assistant_message_end", messageId, text, stopReason: "toolUse", hasToolCalls: true },
+  };
+}
+
+async function runCheckpointQueuedCancellationScenario(): Promise<void> {
+  let releaseFirst: (() => void) | undefined;
+  let markFirstStarted: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const sent: string[] = [];
+  const sentMessageIds: string[][] = [];
+  const batcher = new CheckpointDigestBatcher(
+    { quietMs: 0, maxWaitMs: 0, maxDigests: 2, maxChars: 1_000 },
+    async (digest) => {
+      if (digest.number === 1) {
+        markFirstStarted?.();
+        await firstRelease;
+      }
+      sent.push(digest.text);
+      sentMessageIds.push(digest.checkpoints.map((checkpoint) => checkpoint.messageId));
+    },
+  );
+
+  const firstAdd = batcher.add({ messageId: "queued-first", text: "First digest.", createdAtMs: Date.now() });
+  await firstStarted;
+  const cancelledAdd = batcher.add({
+    messageId: "queued-cancelled",
+    text: "Repeated after retry.",
+    createdAtMs: Date.now(),
+  });
+  batcher.discardPending();
+  const recoveredAdd = batcher.add({
+    messageId: "queued-recovered",
+    text: "Repeated after retry.",
+    createdAtMs: Date.now(),
+  });
+  releaseFirst?.();
+  const [, , recoveredResult] = await Promise.all([firstAdd, cancelledAdd, recoveredAdd]);
+  await batcher.close();
+
+  if (
+    recoveredResult !== "queued" ||
+    sent.length !== 2 ||
+    sentMessageIds.flat().includes("queued-cancelled") ||
+    !sentMessageIds.flat().includes("queued-recovered") ||
+    !sent[1]?.includes("Repeated after retry.")
+  ) {
+    throw new Error(
+      `Queued checkpoint cancellation did not release dedupe/cap state: ${JSON.stringify({ sent, sentMessageIds, recoveredResult })}`,
+    );
+  }
 }
 
 async function runCheckpointDedupScenario(): Promise<void> {
@@ -802,6 +951,8 @@ async function runCheckpointDedupScenario(): Promise<void> {
   ]);
   const config = reliabilityConfig(dataDir);
   config.media.auto_discovery = true;
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
   await new RemoteAgentHub(config, channel, () => backend).run();
   if (channel.texts.filter((text) => text === checkpointText).length !== 1 || channel.artifactCount !== 1) {
     throw new Error(`Checkpoint/final duplicate suppression regressed: ${JSON.stringify(channel.texts)}`);
@@ -828,12 +979,66 @@ async function runCheckpointFailureScenario(): Promise<void> {
       event: { type: "final", messageId: "failed-checkpoint", text: "resend after failed checkpoint" },
     },
   ]);
-  await new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => backend).run();
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  config.delivery.checkpoint_batch_ms = 10;
+  config.delivery.checkpoint_max_wait_ms = 30;
+  await new RemoteAgentHub(config, channel, () => backend).run();
   if (
-    channel.checkpointAttempts !== 2 ||
+    channel.digestAttempts !== 1 ||
     channel.successfulTexts.filter((text) => text === "resend after failed checkpoint").length !== 1
   ) {
     throw new Error(`Failed checkpoint delivery suppressed its terminal retry: ${JSON.stringify(channel.successfulTexts)}`);
+  }
+}
+
+async function runCheckpointRetryDiscardScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-retry-discard");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    checkpointAfter(2, "retry-old-only", "Failed attempt progress must be discarded."),
+    checkpointAfter(2, "retry-old-repeat", "Repeated progress from both attempts."),
+    {
+      afterMs: 2,
+      event: { type: "retry", state: "scheduled", attempt: 1, maxAttempts: 3, delayMs: 5, error: "fetch failed" },
+    },
+    checkpointAfter(2, "retry-new-repeat", "Repeated progress from both attempts."),
+    checkpointAfter(2, "retry-new-only", "Recovered attempt progress."),
+    { afterMs: 80, event: { type: "final", text: "Retry-discard scenario complete." } },
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  const digest = channel.texts.find((text) => text.startsWith("Progress update ·"));
+  if (
+    !digest?.includes("Repeated progress from both attempts.") ||
+    !digest.includes("Recovered attempt progress.") ||
+    digest.includes("Failed attempt progress must be discarded.") ||
+    channel.texts.filter((text) => text === "Retry-discard scenario complete.").length !== 1
+  ) {
+    throw new Error(`Retry did not discard pending checkpoint progress: ${JSON.stringify(channel.texts)}`);
+  }
+}
+
+async function runCheckpointTimeoutDiscardScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-checkpoint-timeout-discard");
+  rmSync(dataDir, { force: true, recursive: true });
+  const channel = new SlowTerminalChannel(0);
+  const backend = new ScheduledBackend([
+    checkpointAfter(2, "timeout-pending", "Pending progress must not follow the timeout notice."),
+  ]);
+  const config = reliabilityConfig(dataDir);
+  config.delivery.checkpoint_batch_ms = 100;
+  config.delivery.checkpoint_max_wait_ms = 200;
+  await new RemoteAgentHub(config, channel, () => backend).run();
+  if (
+    channel.texts.some((text) => text.startsWith("Progress update ·")) ||
+    !channel.texts.some((text) => text.startsWith("Agent turn timed out"))
+  ) {
+    throw new Error(`Timeout did not discard pending checkpoint progress: ${JSON.stringify(channel.texts)}`);
   }
 }
 
@@ -1367,6 +1572,10 @@ function reliabilityConfig(dataDir: string): HubConfig {
       full_tool_output: false,
       tool_status_mode: "all",
       tool_status_batch_ms: 0,
+      checkpoint_batch_ms: 20,
+      checkpoint_max_wait_ms: 60,
+      checkpoint_max_digests_per_turn: 3,
+      checkpoint_max_chars: 1_000,
       send_timeout_ms: 30,
       queue_ttl_ms: 5 * 60 * 1000,
       retention_ms: 30 * 24 * 60 * 60 * 1000,

@@ -78,7 +78,11 @@ Edit `examples/config.example.yaml` for your machine:
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress ordinary successful tool chatter while still showing explicit `hitch.send_media` progress, or `none` for no tool-status messages
 - `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
-- Finalized assistant text emitted before a tool call is forwarded immediately as an intermediate checkpoint; thinking and failed/aborted attempt text are not checkpointed (a visible aborted partial may still be returned after a turn timeout)
+- `delivery.checkpoint_batch_ms`: trailing quiet window for combining finalized pre-tool assistant messages into one timestamped progress digest; each new checkpoint restarts this timer
+- `delivery.checkpoint_max_wait_ms`: maximum wait from the first unsent checkpoint before a digest is forced even if checkpoints keep arriving; `0` disables this maximum
+- `delivery.checkpoint_max_digests_per_turn`: progress-digest cap for a single turn; the final response is never counted or suppressed
+- `delivery.checkpoint_max_chars`: maximum formatted progress-digest length
+- Finalized assistant text emitted before a tool call is collected into timestamped intermediate progress; a final, retry, timeout, approval, or input request discards pending progress so the authoritative message takes priority
 - Pi transient retries emit a short sanitized notice (for example, network, rate-limit, overload, or provider-server error) before the retry delay
 - `delivery.send_timeout_ms`: maximum time for one outbound text/media send attempt after it reaches the front of its queue
 - `delivery.queue_ttl_ms`: maximum time an accepted delivery may wait for its send attempt to begin
@@ -180,6 +184,7 @@ Tool output behavior:
 - Tool calls show the tool name and completion status by default.
 - Full tool result text is hidden unless `delivery.full_tool_output: true` is configured.
 - Tool call/result status messages are sent immediately by default; set `delivery.tool_status_batch_ms` to batch bursts into one message and flush them before final agent text, notifications, approval prompts, or interaction prompts.
+- Intermediate checkpoints use a trailing quiet window and maximum-wait timer. The defaults send one digest after 10 seconds without a new checkpoint or after 30 seconds of continuous checkpoint activity, whichever happens first, with at most three digests per turn.
 - Hidden tool result text is not scanned for outbound artifact upload.
 
 Runtime health behavior:

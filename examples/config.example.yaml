@@ -24,6 +24,12 @@ delivery:
   full_tool_output: false
   tool_status_mode: all
   tool_status_batch_ms: 0
+  # Collect pre-tool assistant messages until 10s of quiet, but never make the
+  # first pending checkpoint wait more than 30s. Cap progress chat volume.
+  checkpoint_batch_ms: 10000
+  checkpoint_max_wait_ms: 30000
+  checkpoint_max_digests_per_turn: 3
+  checkpoint_max_chars: 1000
   send_timeout_ms: 30000
   queue_ttl_ms: 300000
   retention_ms: 2592000000
