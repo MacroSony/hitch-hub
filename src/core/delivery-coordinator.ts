@@ -20,6 +20,8 @@ export type DeliveryContext = {
   turnId?: string;
 };
 
+export type DeliveryPriority = "progress" | "normal" | "authoritative";
+
 export type DeliveryCoordinatorOptions = {
   sendTimeoutMs: number;
   queueTtlMs: number;
@@ -35,11 +37,14 @@ export type ArtifactDeliveryMetadata = {
 
 type DeliveryState = Omit<DeliveryHealth, "durable"> & {
   tail: Promise<void>;
+  progressGeneration: number;
+  cooldownWaiters: Set<() => void>;
 };
 
 export class DeliveryCoordinator {
   private readonly states = new Map<string, DeliveryState>();
   private readonly textCompletions = new Map<string, Promise<void>>();
+  private cooldownWaitsDisabled = false;
 
   constructor(
     private readonly channel: ChannelAdapter,
@@ -47,15 +52,26 @@ export class DeliveryCoordinator {
     private readonly options: DeliveryCoordinatorOptions,
   ) {}
 
-  enqueueText(target: ChatTarget, text: string, opts?: SendOptions, context: DeliveryContext = {}): string | undefined {
+  enqueueText(
+    target: ChatTarget,
+    text: string,
+    opts?: SendOptions,
+    context: DeliveryContext = {},
+    priority: DeliveryPriority = "normal",
+  ): string | undefined {
     if (text.length === 0) {
       return undefined;
     }
 
     const deliveryId = randomUUID();
     const state = this.stateFor(target);
+    if (priority === "authoritative") {
+      state.progressGeneration += 1;
+    }
+    const progressGeneration = state.progressGeneration;
     const enqueuedAtMs = Date.now();
     const queuedAt = new Date(enqueuedAtMs).toISOString();
+    const expiresAtMs = enqueuedAtMs + this.options.queueTtlMs;
     this.options.store.create({
       id: deliveryId,
       kind: "text",
@@ -64,7 +80,7 @@ export class DeliveryCoordinator {
       source: "hub_text",
       contentLength: text.length,
       queuedAt,
-      expiresAt: new Date(enqueuedAtMs + this.options.queueTtlMs).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
     });
     state.pending += 1;
     if (state.state !== "degraded") {
@@ -72,14 +88,51 @@ export class DeliveryCoordinator {
     }
 
     const run = state.tail.then(async () => {
-      const attemptedAt = new Date().toISOString();
       try {
+        if (priority === "progress" && progressGeneration !== state.progressGeneration) {
+          const supersededAt = new Date().toISOString();
+          const message = "Progress delivery superseded by an authoritative response";
+          this.options.store.markTerminal(deliveryId, "expired", supersededAt, {
+            code: "superseded",
+            message,
+          });
+          await this.writeTextAudit(target, context, {
+            deliveryId,
+            status: "expired",
+            priority,
+            length: text.length,
+            expiredAt: supersededAt,
+            queuedMs: Date.now() - enqueuedAtMs,
+            error: message,
+          });
+          return;
+        }
+        if (priority === "authoritative" && !(await this.waitForCooldown(target, state, expiresAtMs))) {
+          const stoppedAt = new Date().toISOString();
+          const message = "Delivery stopped before its send attempt started";
+          this.options.store.markTerminal(deliveryId, "expired", stoppedAt, {
+            code: "delivery_stopped",
+            message,
+          });
+          await this.writeTextAudit(target, context, {
+            deliveryId,
+            status: "expired",
+            priority,
+            length: text.length,
+            expiredAt: stoppedAt,
+            queuedMs: Date.now() - enqueuedAtMs,
+            error: message,
+          });
+          return;
+        }
+        const attemptedAt = new Date().toISOString();
         if (this.options.store.expireQueuedIfDue(deliveryId, attemptedAt)) {
           const message = "Text delivery expired before its send attempt started";
           this.markFailure(target, state, new DeliveryExpiredError(message), message);
           await this.writeTextAudit(target, context, {
             deliveryId,
             status: "expired",
+            priority,
             length: text.length,
             expiredAt: attemptedAt,
             queuedMs: Date.now() - enqueuedAtMs,
@@ -103,6 +156,7 @@ export class DeliveryCoordinator {
           await this.writeTextAudit(target, context, {
             deliveryId,
             status: "sent",
+            priority,
             length: text.length,
             attemptedAt,
             queuedMs: Date.parse(attemptedAt) - enqueuedAtMs,
@@ -117,6 +171,7 @@ export class DeliveryCoordinator {
           await this.writeTextAudit(target, context, {
             deliveryId,
             status: "failed",
+            priority,
             length: text.length,
             attemptedAt,
             queuedMs: Date.parse(attemptedAt) - enqueuedAtMs,
@@ -154,6 +209,7 @@ export class DeliveryCoordinator {
     opts?: SendOptions,
     context: DeliveryContext = {},
     metadata: ArtifactDeliveryMetadata = {},
+    priority: DeliveryPriority = "normal",
   ): Promise<string> {
     if (!this.channel.sendArtifact) {
       throw new Error(`Channel does not support artifact delivery: ${target.platform}`);
@@ -161,8 +217,12 @@ export class DeliveryCoordinator {
 
     const deliveryId = metadata.deliveryId ?? randomUUID();
     const state = this.stateFor(target);
+    if (priority === "authoritative") {
+      state.progressGeneration += 1;
+    }
     const enqueuedAtMs = Date.now();
     const queuedAt = new Date(enqueuedAtMs).toISOString();
+    const expiresAtMs = enqueuedAtMs + this.options.queueTtlMs;
     this.options.store.create({
       id: deliveryId,
       kind: "artifact",
@@ -171,7 +231,7 @@ export class DeliveryCoordinator {
       ...(metadata.source ? { source: metadata.source } : {}),
       ...(metadata.contentLength === undefined ? {} : { contentLength: metadata.contentLength }),
       queuedAt,
-      expiresAt: new Date(enqueuedAtMs + this.options.queueTtlMs).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
     });
     state.pending += 1;
     if (state.state !== "degraded") {
@@ -179,8 +239,16 @@ export class DeliveryCoordinator {
     }
 
     const run = state.tail.then(async () => {
-      const attemptedAt = new Date().toISOString();
       try {
+        if (priority === "authoritative" && !(await this.waitForCooldown(target, state, expiresAtMs))) {
+          const message = "Delivery stopped before its send attempt started";
+          this.options.store.markTerminal(deliveryId, "expired", new Date().toISOString(), {
+            code: "delivery_stopped",
+            message,
+          });
+          throw new DeliveryStoppedError(message);
+        }
+        const attemptedAt = new Date().toISOString();
         if (this.options.store.expireQueuedIfDue(deliveryId, attemptedAt)) {
           const message = "Media delivery expired before its send attempt started";
           this.markFailure(target, state, new DeliveryExpiredError(message), message);
@@ -225,6 +293,14 @@ export class DeliveryCoordinator {
     const state = this.states.get(targetKey(target));
     if (state) {
       delete state.cooldownUntil;
+      this.wakeCooldownWaiters(state);
+    }
+  }
+
+  stop(): void {
+    this.cooldownWaitsDisabled = true;
+    for (const state of this.states.values()) {
+      this.wakeCooldownWaiters(state);
     }
   }
 
@@ -259,6 +335,8 @@ export class DeliveryCoordinator {
       state: "healthy",
       pending: 0,
       tail: Promise.resolve(),
+      progressGeneration: 0,
+      cooldownWaiters: new Set(),
     };
     this.states.set(key, created);
     return created;
@@ -278,9 +356,46 @@ export class DeliveryCoordinator {
     );
   }
 
+  private async waitForCooldown(target: ChatTarget, state: DeliveryState, expiresAtMs: number): Promise<boolean> {
+    if (target.platform !== "wechat" || !state.cooldownUntil) {
+      return true;
+    }
+    while (!this.cooldownWaitsDisabled && state.cooldownUntil) {
+      const remainingMs = Date.parse(state.cooldownUntil) - Date.now();
+      if (remainingMs <= 0) {
+        delete state.cooldownUntil;
+        break;
+      }
+      const ttlRemainingMs = expiresAtMs - Date.now();
+      if (ttlRemainingMs <= 0) {
+        return true;
+      }
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const wake = () => {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          state.cooldownWaiters.delete(wake);
+          resolve();
+        };
+        state.cooldownWaiters.add(wake);
+        timer = setTimeout(wake, Math.min(remainingMs, ttlRemainingMs));
+      });
+    }
+    return !state.cooldownUntil;
+  }
+
+  private wakeCooldownWaiters(state: DeliveryState): void {
+    for (const wake of [...state.cooldownWaiters]) {
+      wake();
+    }
+  }
+
   private markSuccess(state: DeliveryState): void {
     state.lastSuccessAt = new Date().toISOString();
     delete state.cooldownUntil;
+    this.wakeCooldownWaiters(state);
     if (state.pending === 1) {
       state.state = "healthy";
     }
@@ -344,6 +459,13 @@ class DeliveryExpiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DeliveryExpiredError";
+  }
+}
+
+class DeliveryStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryStoppedError";
   }
 }
 

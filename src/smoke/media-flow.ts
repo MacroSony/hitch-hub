@@ -99,6 +99,7 @@ class AsyncEventQueue<T> {
 class MediaFlowBackend implements AgentBackend {
   readonly queue = new AsyncEventQueue<AgentEvent>();
   receivedInput: AgentInput | undefined;
+  private finalTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly artifactPath: string) {}
 
@@ -115,8 +116,11 @@ class MediaFlowBackend implements AgentBackend {
       succeeded: true,
       text: `hidden tool output marker: ${this.artifactPath}`,
     });
-    this.queue.push({ type: "final", text: `Generated artifact: "${this.artifactPath}"` });
-    this.queue.close();
+    this.finalTimer = setTimeout(() => {
+      this.finalTimer = undefined;
+      this.queue.push({ type: "final", text: `Generated artifact: "${this.artifactPath}"` });
+      this.queue.close();
+    }, 100);
   }
 
   async *events(): AsyncIterable<AgentEvent> {
@@ -130,6 +134,10 @@ class MediaFlowBackend implements AgentBackend {
   async abort(): Promise<void> {}
 
   async stop(): Promise<void> {
+    if (this.finalTimer) {
+      clearTimeout(this.finalTimer);
+      this.finalTimer = undefined;
+    }
     this.queue.close();
   }
 }
@@ -192,6 +200,7 @@ async function main(): Promise<void> {
   await runToolBridgeIsolationScenario();
   runMountResolutionScenario();
   await runImmutableSnapshotScenario();
+  await runStoppedMediaAuditScenario();
   process.stdout.write(`Media flow smoke ok: inbound=${summary.inbound} outbound=${summary.outbound}\n`);
 }
 
@@ -276,23 +285,18 @@ async function runScenario(fullToolOutput: boolean): Promise<{ inbound: number; 
   ) {
     throw new Error(`Expected outbound artifact delivery for ${artifactPath}`);
   }
-  const toolStarted = channel.texts.find((text) => text.startsWith("Tool started: read_file"));
-  if (!toolStarted) {
-    throw new Error("Expected summarized tool start message");
-  }
-  if (!fullToolOutput && toolStarted !== "Tool started: read_file") {
-    throw new Error("Default delivery should hide tool preview args");
-  }
-  if (!channel.texts.some((text) => text.startsWith("Tool finished: read_file (succeeded)"))) {
-    throw new Error("Expected summarized tool result message");
-  }
   const hasFullToolOutput = channel.texts.some((text) => text.includes("hidden tool output marker"));
   const hasToolPreview = channel.texts.some((text) => text.includes('{"path"'));
   if (!fullToolOutput && (hasFullToolOutput || hasToolPreview)) {
     throw new Error("Default delivery should hide tool preview args and full tool output");
   }
   if (fullToolOutput && (!hasFullToolOutput || !hasToolPreview)) {
-    throw new Error("Full tool-output delivery should include preview args and result text");
+    throw new Error("Full tool-output delivery should include preview args and result text when progress sends in time.");
+  }
+  if (
+    !channel.texts.some((text) => text.startsWith(`Generated artifact: "${artifactPath}"`))
+  ) {
+    throw new Error("Authoritative final response was not delivered.");
   }
 
   return { inbound: backend.receivedInput.attachments.length, outbound: channel.artifacts.length };
@@ -330,15 +334,9 @@ async function runToolStatusBatchScenario(): Promise<void> {
   const hub = new RemoteAgentHub(config, channel, () => backend);
   await hub.run();
 
-  const batchIndex = channel.texts.findIndex(
-    (text) => text.includes("Tool started: read_file") && text.includes("Tool finished: read_file (succeeded)"),
-  );
   const finalIndex = channel.texts.findIndex((text) => text.startsWith(`Generated artifact: "${artifactPath}"`));
-  if (batchIndex === -1) {
-    throw new Error(`Expected tool start/result to be batched into one message: ${JSON.stringify(channel.texts)}`);
-  }
-  if (finalIndex === -1 || batchIndex > finalIndex) {
-    throw new Error("Expected batched tool status message to be sent before final agent text.");
+  if (finalIndex === -1 || channel.texts.some((text) => text.startsWith("Tool started:") || text.startsWith("Tool finished:"))) {
+    throw new Error(`Authoritative final did not supersede the pending tool-status batch: ${JSON.stringify(channel.texts)}`);
   }
 }
 
@@ -670,6 +668,45 @@ async function runImmutableSnapshotScenario(): Promise<void> {
       existsSync(snapshotPath)
     ) {
       throw new Error(`Media delivery did not use and clean an immutable snapshot: ${JSON.stringify(result)}`);
+    }
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function runStoppedMediaAuditScenario(): Promise<void> {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "hitch-media-stopped-audit-"));
+  try {
+    const dataDir = path.join(tempRoot, "data");
+    const workspace = path.join(tempRoot, "workspace");
+    mkdirSync(dataDir);
+    mkdirSync(workspace);
+    const sourcePath = path.join(workspace, "stopped.png");
+    writeFileSync(sourcePath, PNG_1X1);
+    const config = mediaFlowConfig(dataDir, false, false);
+    config.outboundRoots = [workspace];
+    config.media.outbound_roots = [workspace];
+    const audit = new AuditLog(dataDir);
+    const tools = new HubToolService(
+      config,
+      new MediaFlowChannel([]),
+      audit,
+      async () => undefined,
+      async () => {
+        const error = new Error("Delivery stopped before its send attempt started");
+        error.name = "DeliveryStoppedError";
+        throw error;
+      },
+    );
+    const result = await tools.sendMedia(
+      { platform: "wechat", chatId: "stopped-audit", userId: "media-user" },
+      { path: sourcePath, kind: "image" },
+      { source: "agent_tool", requiredAllowedRoots: [workspace] },
+    );
+    await audit.drain();
+    const auditRows = readFileSync(path.join(dataDir, "logs", "audit.jsonl"), "utf8");
+    if (result.status !== "failed" || !auditRows.includes('"status":"expired"')) {
+      throw new Error(`Stopped media durable/audit status mismatch: ${auditRows}`);
     }
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });

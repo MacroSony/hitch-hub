@@ -124,7 +124,10 @@ export class HubToolService {
       return result;
     } catch (error) {
       const message = formatError(error);
-      const auditStatus = error instanceof Error && error.name === "DeliveryExpiredError" ? "expired" : "failed";
+      const auditStatus =
+        error instanceof Error && (error.name === "DeliveryExpiredError" || error.name === "DeliveryStoppedError")
+          ? "expired"
+          : "failed";
       const result: SendMediaResult = {
         deliveryId,
         status: "failed",

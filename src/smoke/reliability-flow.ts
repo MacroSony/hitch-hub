@@ -536,18 +536,54 @@ class OrderedMixedChannel implements ChannelAdapter {
 
 class CooldownChannel implements ChannelAdapter {
   attempts = 0;
+  textAttempts = 0;
 
   async *receive(): AsyncIterable<InboundChatEvent> {
     return;
   }
 
-  async sendText(): Promise<void> {}
+  async sendText(): Promise<void> {
+    this.textAttempts += 1;
+  }
 
   async sendArtifact(): Promise<void> {
     this.attempts += 1;
     if (this.attempts === 1) {
       throw new Error("WeChat sendMessage timed out after 30ms");
     }
+  }
+}
+
+class PriorityDeliveryChannel implements ChannelAdapter {
+  readonly attemptedTexts: string[] = [];
+  finalAttemptedAtMs: number | undefined;
+  private releaseProgress: (() => void) | undefined;
+  private markProgressStarted: (() => void) | undefined;
+  readonly progressStarted = new Promise<void>((resolve) => {
+    this.markProgressStarted = resolve;
+  });
+  private readonly progressRelease = new Promise<void>((resolve) => {
+    this.releaseProgress = resolve;
+  });
+
+  async *receive(): AsyncIterable<InboundChatEvent> {
+    return;
+  }
+
+  async sendText(_target: ChatTarget, text: string): Promise<void> {
+    this.attemptedTexts.push(text);
+    if (text === "progress in flight") {
+      this.markProgressStarted?.();
+      await this.progressRelease;
+      throw new Error("WeChat sendMessage failed: ret=-2 errcode=0 errmsg=prepare failed");
+    }
+    if (text === "authoritative final") {
+      this.finalAttemptedAtMs = Date.now();
+    }
+  }
+
+  releaseFailedProgress(): void {
+    this.releaseProgress?.();
   }
 }
 
@@ -776,6 +812,10 @@ async function main(): Promise<void> {
   await runMediaTimeoutScenario();
   await runUnifiedDeliveryScenario();
   await runWechatCooldownScenario();
+  await runAuthoritativeDeliveryScenario();
+  await runAuthoritativeInboundWakeScenario();
+  await runAuthoritativeArtifactStopScenario();
+  await runAuthoritativeCooldownTtlScenario();
   await runDurableDeliveryScenario();
   await runHealthDiagnosticsScenario();
   await runAuditRotationScenario();
@@ -1417,6 +1457,166 @@ async function runWechatCooldownScenario(): Promise<void> {
   if (Number(channel.attempts) !== 2) {
     throw new Error(`Fresh inbound did not reopen WeChat delivery: ${channel.attempts}`);
   }
+  store.close();
+}
+
+async function runAuthoritativeDeliveryScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-authoritative-delivery");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new PriorityDeliveryChannel();
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 200,
+    queueTtlMs: 5_000,
+    store,
+    wechatFailureCooldownMs: 40,
+  });
+  const target: ChatTarget = { platform: "wechat", chatId: "authoritative", userId: "smoke" };
+
+  const inFlightId = delivery.enqueueText(target, "progress in flight", undefined, {}, "progress");
+  await channel.progressStarted;
+  const supersededId = delivery.enqueueText(target, "queued progress", undefined, {}, "progress");
+  const finalQueuedAtMs = Date.now();
+  const finalId = delivery.enqueueText(target, "authoritative final", undefined, {}, "authoritative");
+  channel.releaseFailedProgress();
+  if (!inFlightId || !supersededId || !finalId) {
+    throw new Error("Authoritative delivery scenario did not create all delivery records.");
+  }
+  await Promise.all([
+    delivery.waitForTextDelivery(inFlightId),
+    delivery.waitForTextDelivery(supersededId),
+    delivery.waitForTextDelivery(finalId),
+  ]);
+
+  const inFlight = store.get(inFlightId);
+  const superseded = store.get(supersededId);
+  const final = store.get(finalId);
+  if (
+    channel.attemptedTexts.join(",") !== "progress in flight,authoritative final" ||
+    inFlight?.status !== "failed" ||
+    superseded?.status !== "expired" ||
+    superseded.errorCode !== "superseded" ||
+    final?.status !== "sent" ||
+    !channel.finalAttemptedAtMs ||
+    channel.finalAttemptedAtMs - finalQueuedAtMs < 25
+  ) {
+    throw new Error(
+      `Authoritative delivery did not supersede progress and wait through cooldown: ${JSON.stringify({
+        attempts: channel.attemptedTexts,
+        inFlight,
+        superseded,
+        final,
+        delayMs: channel.finalAttemptedAtMs ? channel.finalAttemptedAtMs - finalQueuedAtMs : undefined,
+      })}`,
+    );
+  }
+  await delivery.drain();
+  store.close();
+}
+
+async function runAuthoritativeInboundWakeScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-authoritative-inbound-wake");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new PriorityDeliveryChannel();
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 200,
+    queueTtlMs: 5_000,
+    store,
+    wechatFailureCooldownMs: 1_000,
+  });
+  const target: ChatTarget = { platform: "wechat", chatId: "authoritative-inbound", userId: "smoke" };
+  const progressId = delivery.enqueueText(target, "progress in flight", undefined, {}, "progress");
+  await channel.progressStarted;
+  const finalId = delivery.enqueueText(target, "authoritative final", undefined, {}, "authoritative");
+  const startedAtMs = Date.now();
+  channel.releaseFailedProgress();
+  if (!progressId || !finalId) {
+    throw new Error("Inbound wake scenario did not create both deliveries.");
+  }
+  await delivery.waitForTextDelivery(progressId);
+  await sleep(10);
+  delivery.noteInbound(target);
+  await delivery.waitForTextDelivery(finalId);
+  if (store.get(finalId)?.status !== "sent" || Date.now() - startedAtMs >= 500) {
+    throw new Error("Fresh inbound did not wake an authoritative cooldown wait.");
+  }
+  await delivery.drain();
+  store.close();
+}
+
+async function runAuthoritativeArtifactStopScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-authoritative-artifact-stop");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new CooldownChannel();
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 200,
+    queueTtlMs: 5_000,
+    store,
+    wechatFailureCooldownMs: 60_000,
+  });
+  const target: ChatTarget = { platform: "wechat", chatId: "authoritative-artifact-stop", userId: "smoke" };
+  const artifact: OutboundArtifact = { path: "/tmp/authoritative-stop.png", kind: "image" };
+  await delivery.sendArtifact(target, artifact).catch(() => undefined);
+  const deliveryId = crypto.randomUUID();
+  const startedAtMs = Date.now();
+  const authoritativeSend = delivery.sendArtifact(target, artifact, undefined, {}, { deliveryId }, "authoritative");
+  await sleep(10);
+  delivery.stop();
+  const error = await authoritativeSend.then(
+    () => "",
+    (reason: unknown) => (reason instanceof Error ? reason.name : String(reason)),
+  );
+  const record = store.get(deliveryId);
+  if (
+    error !== "DeliveryStoppedError" ||
+    record?.status !== "expired" ||
+    record.errorCode !== "delivery_stopped" ||
+    Date.now() - startedAtMs >= 500 ||
+    channel.attempts !== 1
+  ) {
+    throw new Error(`Stopping did not wake authoritative artifact cooldown: ${JSON.stringify({ error, record })}`);
+  }
+  await delivery.drain();
+  store.close();
+}
+
+async function runAuthoritativeCooldownTtlScenario(): Promise<void> {
+  const dataDir = path.resolve("examples/.remote-agent-hub-smoke/reliability-authoritative-cooldown-ttl");
+  rmSync(dataDir, { force: true, recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const channel = new CooldownChannel();
+  const store = new DeliveryStore(dataDir);
+  const delivery = new DeliveryCoordinator(channel, new AuditLog(dataDir), {
+    sendTimeoutMs: 200,
+    queueTtlMs: 50,
+    store,
+    wechatFailureCooldownMs: 60_000,
+  });
+  const target: ChatTarget = { platform: "wechat", chatId: "authoritative-cooldown-ttl", userId: "smoke" };
+  await delivery
+    .sendArtifact(target, { path: "/tmp/authoritative-ttl.png", kind: "image" })
+    .catch(() => undefined);
+  const startedAtMs = Date.now();
+  const finalId = delivery.enqueueText(target, "authoritative ttl final", undefined, {}, "authoritative");
+  if (!finalId) {
+    throw new Error("Cooldown TTL scenario did not create a final delivery.");
+  }
+  await delivery.waitForTextDelivery(finalId);
+  const record = store.get(finalId);
+  if (
+    record?.status !== "expired" ||
+    record.errorCode !== "queue_expired" ||
+    channel.textAttempts !== 0 ||
+    Date.now() - startedAtMs >= 500
+  ) {
+    throw new Error(`Authoritative cooldown ignored queue TTL: ${JSON.stringify({ record, textAttempts: channel.textAttempts })}`);
+  }
+  await delivery.drain();
   store.close();
 }
 

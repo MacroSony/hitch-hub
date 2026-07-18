@@ -13,6 +13,7 @@ import {
   DeliveryCoordinator,
   type DeliveryContext,
   type DeliveryHealth,
+  type DeliveryPriority,
 } from "./delivery-coordinator.js";
 import { DeliveryStore } from "./delivery-store.js";
 import {
@@ -197,7 +198,13 @@ export class RemoteAgentHub {
       channel,
       this.audit,
       async (target, text, deliveryContext) => {
-        this.delivery.enqueueText(target, text, undefined, deliveryContext ?? this.deliveryContextFor(target));
+        this.delivery.enqueueText(
+          target,
+          text,
+          undefined,
+          deliveryContext ?? this.deliveryContextFor(target),
+          "authoritative",
+        );
       },
       async (target, artifact, request) => {
         await this.delivery.sendArtifact(
@@ -206,6 +213,7 @@ export class RemoteAgentHub {
           undefined,
           request.deliveryContext ?? this.deliveryContextFor(target),
           request,
+          "authoritative",
         );
       },
       (target) => this.deliveryContextFor(target),
@@ -250,6 +258,7 @@ export class RemoteAgentHub {
       }
     } finally {
       this.stopWorkerSweep();
+      this.delivery.stop();
       await Promise.allSettled(this.inFlight);
       await this.stopWorkers("hub_exit");
       await Promise.allSettled(this.backgroundTasks);
@@ -268,6 +277,7 @@ export class RemoteAgentHub {
     this.stopWorkerSweep();
     this.shutdownPromise = (async () => {
       await this.audit.write({ type: "hub.shutdown", details: { reason } });
+      this.delivery.stop();
       await this.channel.stop?.();
       await this.stopWorkers("shutdown");
     })();
@@ -354,9 +364,13 @@ export class RemoteAgentHub {
           return;
       }
     } catch (error) {
-      await this.safeSendText(event.target, error instanceof Error ? error.message : String(error), {
-        replyToEventId: event.id,
-      });
+      await this.safeSendText(
+        event.target,
+        error instanceof Error ? error.message : String(error),
+        { replyToEventId: event.id },
+        undefined,
+        "authoritative",
+      );
     }
   }
 
@@ -596,11 +610,21 @@ export class RemoteAgentHub {
     );
 
     if (result.status === "sent") {
-      await this.sendChunkedText(event.target, `Media sent: ${path.basename(result.path)}`);
+      await this.sendChunkedText(
+        event.target,
+        `Media sent: ${path.basename(result.path)}`,
+        session ? { sessionId: session.id } : undefined,
+        "authoritative",
+      );
       return;
     }
 
-    await this.sendChunkedText(event.target, `Media delivery failed: ${result.message ?? "unknown error"}`);
+    await this.sendChunkedText(
+      event.target,
+      `Media delivery failed: ${result.message ?? "unknown error"}`,
+      session ? { sessionId: session.id } : undefined,
+      "authoritative",
+    );
   }
 
   private async handleAgentCommand(
@@ -648,7 +672,12 @@ export class RemoteAgentHub {
         target: event.target,
         details: { command: raw, error: error instanceof Error ? error.message : String(error) },
       });
-      await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
+      await this.sendChunkedText(
+        event.target,
+        error instanceof Error ? error.message : String(error),
+        { sessionId: session.id, turnId: turn.id },
+        "authoritative",
+      );
     } finally {
       this.releaseTurn(turn);
       if (!backend.isAlive()) {
@@ -702,7 +731,12 @@ export class RemoteAgentHub {
         target: event.target,
         details: { error: error instanceof Error ? error.message : String(error) },
       });
-      await this.sendChunkedText(event.target, error instanceof Error ? error.message : String(error));
+      await this.sendChunkedText(
+        event.target,
+        error instanceof Error ? error.message : String(error),
+        { sessionId: session.id, turnId: turn.id },
+        "authoritative",
+      );
     } finally {
       this.releaseTurn(turn);
       if (!backend.isAlive()) {
@@ -888,7 +922,12 @@ export class RemoteAgentHub {
       await this.handleAgentCommandResult(target, session, backend, result);
     } catch (error) {
       this.updateStatusUnlessStopped(session.id, "error");
-      await this.sendChunkedText(target, error instanceof Error ? error.message : String(error));
+      await this.sendChunkedText(
+        target,
+        error instanceof Error ? error.message : String(error),
+        { sessionId: session.id },
+        "authoritative",
+      );
     } finally {
       if (!backend.isAlive()) {
         this.workers.delete(session.id);
@@ -955,7 +994,12 @@ export class RemoteAgentHub {
     turn?: ActiveTurn,
   ): Promise<void> {
     if (result.text) {
-      await this.sendChunkedText(target, result.text);
+      await this.sendChunkedText(
+        target,
+        result.text,
+        { sessionId: session.id, ...(turn ? { turnId: turn.id } : {}) },
+        "authoritative",
+      );
     }
     if (result.interaction) {
       await this.createAndSendInteraction(target, {
@@ -1002,13 +1046,14 @@ export class RemoteAgentHub {
       timeoutMs?: number;
     },
   ): Promise<void> {
+    const priority: DeliveryPriority = input.owner === "agent" ? "authoritative" : "normal";
     if (input.options.length === 0) {
-      await this.sendChunkedText(target, "No options available.", input.deliveryContext);
+      await this.sendChunkedText(target, "No options available.", input.deliveryContext, priority);
       return;
     }
 
     const interaction = this.createInteraction(target, input);
-    await this.sendInteractionMenu(target, interaction, input.deliveryContext);
+    await this.sendInteractionMenu(target, interaction, input.deliveryContext, priority);
   }
 
   private createInteraction(
@@ -1042,8 +1087,9 @@ export class RemoteAgentHub {
     target: ChatTarget,
     interaction: PendingInteraction,
     deliveryContext?: DeliveryContext,
+    priority: DeliveryPriority = "normal",
   ): Promise<void> {
-    await this.sendChunkedText(target, renderInteractionMenu(interaction), deliveryContext);
+    await this.sendChunkedText(target, renderInteractionMenu(interaction), deliveryContext, priority);
   }
 
   private async sendBlockedTurn(event: InboundChatEvent, session: HubSession, inputKind: string): Promise<void> {
@@ -1296,7 +1342,7 @@ export class RemoteAgentHub {
     const target = targetForSession(session);
     const deliveryContext: DeliveryContext = { sessionId: session.id, turnId: turn.id };
     const toolMessages = new ToolStatusBatcher(this.config.delivery.tool_status_batch_ms, async (text) => {
-      await this.sendChunkedText(target, text, deliveryContext);
+      await this.sendChunkedText(target, text, deliveryContext, "progress");
     });
     const checkpointMessages = new CheckpointDigestBatcher(
       {
@@ -1309,7 +1355,7 @@ export class RemoteAgentHub {
         if (!this.canContinueTurnHandler(turn)) {
           return;
         }
-        const deliveryIds = await this.sendChunkedText(target, digest.text, deliveryContext);
+        const deliveryIds = await this.sendChunkedText(target, digest.text, deliveryContext, "progress");
         await this.audit.write({
           type: "turn.checkpoint_queued",
           sessionId: session.id,
@@ -1440,11 +1486,12 @@ export class RemoteAgentHub {
       sessionId: session.id,
       details: { turnId: turn.id, streamedTextLength: streamedText.length },
     });
-    await toolMessages.flush();
+    toolMessages.discardPending();
     await this.sendChunkedText(
       target,
       streamedText.length > 0 ? streamedText : "Pi worker exited before reporting a final response; session is idle.",
       deliveryContext,
+      "authoritative",
     );
   }
 
@@ -1500,7 +1547,7 @@ export class RemoteAgentHub {
       case "retry":
         if (event.state === "scheduled") {
           checkpointMessages.discardPending();
-          await toolMessages.flush();
+          toolMessages.discardPending();
           if (!this.canContinueTurnHandler(turn)) {
             return false;
           }
@@ -1526,9 +1573,9 @@ export class RemoteAgentHub {
       case "final": {
         const finalText = streamedText.length > 0 && isEmptyFinalFallback(event.text) ? streamedText : event.text;
         await checkpointMessages.close();
-        await toolMessages.flush();
+        toolMessages.discardPending();
         if (finalText.length > 0) {
-          await this.sendChunkedText(target, finalText, deliveryContext);
+          await this.sendChunkedText(target, finalText, deliveryContext, "authoritative");
         }
         if (finalText.length > 0) {
           await this.sendArtifactsMentionedInText(
@@ -1563,8 +1610,17 @@ export class RemoteAgentHub {
           this.updateStatusForTurn(turn, "idle");
         }
         checkpointMessages.discardPending();
-        await toolMessages.flush();
-        await this.sendChunkedText(target, this.formatNotification(event), deliveryContext);
+        if (event.completesTurn) {
+          toolMessages.discardPending();
+        } else {
+          await toolMessages.flush();
+        }
+        await this.sendChunkedText(
+          target,
+          this.formatNotification(event),
+          deliveryContext,
+          event.completesTurn ? "authoritative" : "normal",
+        );
         return event.completesTurn === true;
       case "approval_request": {
         const method = piUiMethod(event.raw);
@@ -1583,7 +1639,7 @@ export class RemoteAgentHub {
         this.setTurnPhase(turn, "waiting_approval", true);
         this.updateStatusForTurn(turn, "waiting_approval");
         checkpointMessages.discardPending();
-        await toolMessages.flush();
+        toolMessages.discardPending();
         if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_approval") {
           return false;
         }
@@ -1597,6 +1653,7 @@ export class RemoteAgentHub {
             ],
           },
           deliveryContext,
+          "authoritative",
         );
         return false;
       }
@@ -1614,11 +1671,11 @@ export class RemoteAgentHub {
           timeoutMs: turn.timeoutPolicy.inputMs,
         });
         checkpointMessages.discardPending();
-        await toolMessages.flush();
+        toolMessages.discardPending();
         if (!this.isTurnCurrent(turn) || turn.phase !== "waiting_input") {
           return false;
         }
-        await this.sendInteractionMenu(target, interaction, deliveryContext);
+        await this.sendInteractionMenu(target, interaction, deliveryContext, "authoritative");
         return false;
       }
       case "status":
@@ -1636,10 +1693,11 @@ export class RemoteAgentHub {
     target: InboundChatEvent["target"],
     text: string,
     deliveryContext?: DeliveryContext,
+    priority: DeliveryPriority = "normal",
   ): Promise<string[]> {
     const maxLength = 3900;
     if (text.length <= maxLength) {
-      const deliveryId = await this.safeSendText(target, text, undefined, deliveryContext);
+      const deliveryId = await this.safeSendText(target, text, undefined, deliveryContext, priority);
       return deliveryId ? [deliveryId] : [];
     }
 
@@ -1650,6 +1708,7 @@ export class RemoteAgentHub {
         text.slice(start, start + maxLength),
         undefined,
         deliveryContext,
+        priority,
       );
       if (deliveryId) {
         deliveryIds.push(deliveryId);
@@ -1807,12 +1866,13 @@ export class RemoteAgentHub {
         partialResultLength: partialText?.length ?? 0,
       },
     });
-    await toolMessages.flush();
+    toolMessages.discardPending();
     const notice = formatTurnTimeoutNotice(turn, reason);
     await this.sendChunkedText(
       target,
       partialText ? `${notice}\n\nPartial result from the cancelled turn:\n${partialText}` : notice,
       { sessionId: session.id, turnId: turn.id },
+      "authoritative",
     );
   }
 
@@ -1878,8 +1938,15 @@ export class RemoteAgentHub {
     text: string,
     opts?: Parameters<ChannelAdapter["sendText"]>[2],
     deliveryContext?: DeliveryContext,
+    priority: DeliveryPriority = "normal",
   ): Promise<string | undefined> {
-    return this.delivery.enqueueText(target, text, opts, deliveryContext ?? this.deliveryContextFor(target));
+    return this.delivery.enqueueText(
+      target,
+      text,
+      opts,
+      deliveryContext ?? this.deliveryContextFor(target),
+      priority,
+    );
   }
 
   private deliveryContextFor(target: ChatTarget): DeliveryContext {
@@ -2167,6 +2234,11 @@ class ToolStatusBatcher {
       this.flushQueue = this.flushQueue.then(() => this.send(text));
     }
     await this.flushQueue;
+  }
+
+  discardPending(): void {
+    this.cancelTimer();
+    this.messages.splice(0);
   }
 
   cancelTimer(): void {

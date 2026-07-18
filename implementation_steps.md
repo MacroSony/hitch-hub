@@ -121,6 +121,19 @@ Goal: preserve useful intermediate agent updates without exhausting WeChat deliv
 - [x] Audit checkpoint collection and digest enqueue trigger/count/delivery correlation.
 - [x] Cover quiet batching, maximum-wait flushing, duplicate removal, turn caps, retry/timeout cleanup, failed delivery, and final-message behavior in smoke tests.
 
+## Completed Iteration: Authoritative Delivery Priority
+
+Goal: prevent a failed progress message from consuming the final response or media send behind it.
+
+- [x] Classify checkpoint/tool digests as supersedable progress deliveries.
+- [x] Classify final responses, timeout results, approval/input prompts, media failure notices, and hub-routed artifacts as authoritative deliveries.
+- [x] Expire queued progress without a channel attempt when a newer authoritative delivery exists.
+- [x] Drop still-pending tool-status batches before terminal responses, retries, approvals, and input prompts.
+- [x] Let authoritative WeChat deliveries wait through the local failure cooldown, while ordinary messages continue to fail fast.
+- [x] Wake cooldown waits on fresh inbound activity or hub shutdown.
+- [x] Audit text-delivery priority and persist explicit `superseded` terminal evidence.
+- [x] Reproduce an in-flight `ret=-2`, queued progress, cooldown, and successful final delivery in a deterministic smoke test.
+
 ## Completed Iteration: Operability and Delivery Evidence
 
 Goal: turn the now-bounded runtime into a service that can explain, survive, and recover from live channel failures without relying on a tmux scrollback.

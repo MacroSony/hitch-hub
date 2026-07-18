@@ -77,7 +77,7 @@ Edit `examples/config.example.yaml` for your machine:
 - `agents.pi.env_allowlist`: optional environment variable names Pi needs for provider authentication; channel credentials, host-control sockets, loader injection variables, and `HITCH_*` names are rejected
 - `delivery.full_tool_output`: `false` to show only tool names and success/failure, or `true` to include full tool result text
 - `delivery.tool_status_mode`: `all` for every tool start/result, `failures` to suppress ordinary successful tool chatter while still showing explicit `hitch.send_media` progress, or `none` for no tool-status messages
-- `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result messages before the next agent body message
+- `delivery.tool_status_batch_ms`: `0` for immediate tool status messages, or a delay such as `10000` to batch tool start/result bursts; an authoritative final/prompt drops any still-pending batch
 - `delivery.checkpoint_batch_ms`: trailing quiet window for combining finalized pre-tool assistant messages into one timestamped progress digest; each new checkpoint restarts this timer
 - `delivery.checkpoint_max_wait_ms`: maximum wait from the first unsent checkpoint before a digest is forced even if checkpoints keep arriving; `0` disables this maximum
 - `delivery.checkpoint_max_digests_per_turn`: progress-digest cap for a single turn; the final response is never counted or suppressed
@@ -183,7 +183,7 @@ Tool output behavior:
 
 - Tool calls show the tool name and completion status by default.
 - Full tool result text is hidden unless `delivery.full_tool_output: true` is configured.
-- Tool call/result status messages are sent immediately by default; set `delivery.tool_status_batch_ms` to batch bursts into one message and flush them before final agent text, notifications, approval prompts, or interaction prompts.
+- Tool call/result status messages are sent immediately by default; set `delivery.tool_status_batch_ms` to batch bursts into one message. A final response, retry, timeout, completed notification, approval, or interaction prompt drops a still-pending tool batch so it cannot crowd out the authoritative message.
 - Intermediate checkpoints use a trailing quiet window and maximum-wait timer. The defaults send one digest after 10 seconds without a new checkpoint or after 30 seconds of continuous checkpoint activity, whichever happens first, with at most three digests per turn.
 - Hidden tool result text is not scanned for outbound artifact upload.
 
@@ -194,6 +194,7 @@ Runtime health behavior:
 - Idle workers are stopped after `worker_idle_timeout_ms`; their persisted Pi session remains available and is resumed by a new worker on the next prompt.
 - Outbound text is persisted before it is accepted, queued per chat, and bounded by `delivery.send_timeout_ms`, so a slow chat API does not block Pi event consumption.
 - Text and media share one ordered per-chat queue. A queued item receives its full send deadline when its own attempt begins.
+- Final responses, timeout results, approval/input prompts, and hub-routed media are authoritative deliveries: they supersede queued progress messages and wait through an existing WeChat failure cooldown for a real send attempt. Ordinary messages still fail fast during cooldown.
 - Accepted text/media deliveries progress through durable `queued`, `sending`, and terminal `sent`/`failed`/`expired` states. Startup expires interrupted nonterminal rows without automatically resending them.
 - After a WeChat send failure, the rest of that broken batch fails quickly instead of consuming one full timeout per item; a new inbound message reopens delivery immediately.
 - `!status` reports active-turn age/deadline, worker liveness, pending/recent delivery health, and channel receive health.
