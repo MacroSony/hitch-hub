@@ -107,7 +107,7 @@ Checklist:
 - [x] Forward finalized visible assistant text before tool calls, but never thinking or failed-attempt drafts; emit sanitized retry notices and de-duplicate a matching final only after confirmed delivery.
 - [x] Package the session MCP server independently of the Hitch source tree, install it under the sandbox-visible Pi package mount, and verify packed execution plus the real Bubblewrap boundary.
 
-Rollout note (2026-07-17): commits `be1c69c`, `75b8450`, `da40ebd`, and `b1e9f5a` are live in tmux `hitch:0.0` for attended WeChat testing. The active profile uses a five-minute base, one minute per tool up to thirty minutes, five-minute stall/input/approval deadlines, a ten-minute tool deadline, summarized status for every tool, and four-second status batching. The standalone MCP server runs from `/agent-config/npm` with no Hitch repository mount. This remains a single-principal, unguarded-extension soak profile rather than the future multi-user credential-isolated profile.
+Rollout note (updated 2026-07-18): commits `be1c69c`, `75b8450`, `da40ebd`, and `b1e9f5a` are live in tmux `hitch:0.0` for attended WeChat testing. The active profile uses a five-minute base, one minute per tool up to thirty minutes, five-minute stall/input/approval deadlines, a ten-minute tool deadline, summarized status for every tool, and ten-second status batching to reduce WeChat send bursts. The standalone MCP server runs from `/agent-config/npm` with no Hitch repository mount. This remains a single-principal, unguarded-extension soak profile rather than the future multi-user credential-isolated profile.
 
 ## Completed Iteration: Operability and Delivery Evidence
 
