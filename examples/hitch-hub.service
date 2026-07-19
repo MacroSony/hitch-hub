@@ -8,6 +8,9 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=%h/programming/hitch-hub
+# If Node and Pi are installed by NVM, set PATH to that exact version's bin
+# directory so agents.pi.command: pi resolves in the non-interactive service.
+# Environment="PATH=%h/.nvm/versions/node/v24.x.x/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/usr/bin/node --use-env-proxy --import tsx src/main.ts --config config.local.yaml
 Restart=on-failure
 RestartSec=5

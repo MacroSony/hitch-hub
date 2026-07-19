@@ -206,7 +206,7 @@ Runtime health behavior:
 
 ## Service Operation
 
-For a continuously running Linux deployment, copy [examples/hitch-hub.service](examples/hitch-hub.service) to `~/.config/systemd/user/hitch-hub.service`. Adjust `WorkingDirectory`, the config filename, and `ExecStart` if your checkout or Node installation differs. `ExecStart` must use a Node 24+ executable; user services do not reliably load an interactive NVM shell, so prefer the absolute path reported by `readlink -f "$(command -v node)"`. Then run:
+For a continuously running Linux deployment, copy [examples/hitch-hub.service](examples/hitch-hub.service) to `~/.config/systemd/user/hitch-hub.service`. Adjust `WorkingDirectory`, the config filename, and `ExecStart` if your checkout or Node installation differs. `ExecStart` must use a Node 24+ executable; user services do not reliably load an interactive NVM shell, so prefer the absolute path reported by `readlink -f "$(command -v node)"`. Pinning `ExecStart` does not change the environment inherited by agent workers. If `agents.pi.command` is the bare command `pi` and Pi is installed by NVM, also set the unit's `PATH` to that exact NVM version's `bin` directory as shown in the sample, then confirm it with `systemctl --user show hitch-hub.service -p Environment`. Then run:
 
 ```bash
 systemctl --user daemon-reload
