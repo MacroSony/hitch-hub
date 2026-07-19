@@ -26,7 +26,7 @@ After the restricted soak and Pi-version compatibility follow-up, the next produ
 
 - [ ] Soak a fresh single-principal WeChat Pi session with `credential_isolation: required`, one exact read/write workspace, no policy mounts, no shell, and native `hitch_send_media`.
 - [ ] Verify workspace create/read/edit/list, outside-path rejection, symlink rejection, media delivery, post-media final text, abort, worker restart, and fresh-session behavior.
-- [ ] Pin or compatibility-test the installed Pi path resolver before upgrading Pi; the guard mirrors Pi 0.80.6 normalization and must fail closed if those semantics drift.
+- [x] Attest the installed Pi path resolver against the credential guard at each guarded worker startup and fail closed on semantic drift; Pi 0.80.10 is the current verified baseline.
 - [ ] Before adding a second principal, switch from `config_scope: system` to `config_scope: hitch`, keep `credential_isolation: required`, provision a distinct provider identity for each principal out of band, and create fresh sessions. Do not share the system Pi config or old transcripts across principals.
 - [ ] Treat a shared provider key as an explicitly accepted boundary for the attended single-principal soak only. Require scoped/revocable per-principal credentials or a host-side provider broker before unattended execution; a broker is required before any claim that workers do not possess provider credentials.
 - [ ] Keep group-shared sessions disabled until owner/admin/approval authority is designed and tested independently from private multi-user routing.

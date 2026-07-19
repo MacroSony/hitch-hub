@@ -21,6 +21,7 @@
     "smoke:pi-approval": "node --use-env-proxy --import tsx src/smoke/pi-approval.ts",
     "smoke:pi-ui-select": "node --use-env-proxy --import tsx src/smoke/pi-ui-select.ts",
     "smoke:pi-retry-lifecycle": "node --use-env-proxy --import tsx src/smoke/pi-retry-lifecycle.ts",
+    "smoke:pi-path-compatibility": "node --use-env-proxy --import tsx src/smoke/pi-path-compatibility.ts",
     "smoke:pi-sandbox-integration": "node --use-env-proxy --import tsx src/smoke/pi-sandbox-integration.ts",
     "smoke:security-foundation": "node --use-env-proxy --import tsx src/smoke/security-foundation.ts",
     "smoke:sandbox-launcher": "node --use-env-proxy --import tsx src/smoke/sandbox-launcher.ts",
@@ -31,7 +32,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p packages/session-mcp/tsconfig.json",
     "build:hub": "tsc -p tsconfig.json",
     "build:mcp": "tsc -p packages/session-mcp/tsconfig.json",
-    "build": "npm run build:hub && npm run build:mcp"
+    "build": "npm run build:hub && npm run build:mcp",
+    "smoke:ci": "npm run smoke:fake && npm run smoke:media-cache && npm run smoke:media-flow && npm run smoke:mcp-session && npm run smoke:mcp-package && npm run smoke:interaction-flow && npm run smoke:reliability-flow && npm run smoke:multi-channel && npm run smoke:multi-user-sandbox && npm run smoke:wechat-reliability && npm run smoke:pi-rpc && npm run smoke:pi-approval && npm run smoke:pi-ui-select && npm run smoke:pi-retry-lifecycle && npm run smoke:pi-path-compatibility && npm run smoke:pi-sandbox-integration && npm run smoke:security-foundation && npm run smoke:sandbox-launcher && npm run smoke:worker-environment && npm run smoke:credential-guard",
+    "check": "npm run typecheck && npm run build && npm run smoke:ci"
   },
   "engines": {
     "node": ">=24.0.0"

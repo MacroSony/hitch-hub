@@ -310,7 +310,7 @@ Pi config behavior:
 - Sandboxed Pi workers use Bubblewrap on Linux and fail closed when it is unavailable. Restricted `sandbox: preferred` policies do not fall back to direct execution because direct mode cannot enforce them.
 - Under sandboxed execution, `config_scope: system` mounts only the configured Pi directory at `/agent-config` read/write, uses separate principal-owned session storage at `/agent-sessions`, and is rejected unless exactly one principal is configured without `unsafe_allow_all`. The directory must be host-writable because Pi creates settings/trust lock directories during normal RPC startup.
 - `credential_isolation: required` is the recommended remote profile. It requires a workspace-only Bubblewrap policy, `process: false`, and only `read`, `write`, `edit`, `ls`, and optional `hitch_send_media`. Hitch disables caller-supplied Pi extensions, skills, prompt templates, themes, approval flags, and command-backed credentials; it attests the trusted guard and optional media tool before accepting startup.
-- The credential guard validates both the raw tool path and the normalization behavior tested against Pi 0.80.6 (including `@`, tilde, `file://`, and Unicode-space handling), follows symlinks for authorization, and rejects config, session, runtime, proc, and unmounted host paths. Workspace write remains enabled by default inside the mounted cwd; Pi upgrades need the compatibility test/pin updated first.
+- The credential guard validates both the raw tool path and Pi-normalized path (including `@`, tilde, `file://`, and Unicode-space handling), follows symlinks for authorization, and rejects config, session, runtime, proc, and unmounted host paths. Guarded worker startup imports the installed Pi resolver and fails closed if its semantics differ from the guard; Pi 0.80.10 is the current verified baseline.
 - Required isolation is a same-process containment layer, not a provider credential broker. Pi's controller still reads provider credentials from the writable config mount or explicit provider environment, so the controller and trusted guard remain in the credential boundary. A host-side provider broker/scoped-token design is still required before claiming that the agent process never possesses provider credentials.
 - With credential isolation disabled, writable system scope deliberately lets Pi and its trusted extensions persist changes to credentials, settings, trust decisions, packages, extensions, and legacy sessions beneath the configured root. Explicit unsafe direct execution has unrestricted host access and does not enforce mount boundaries.
 - `config_scope: hitch` stores Pi config/session state in principal-private directories under `data_dir` and defaults `PI_OFFLINE=1` unless already set.
@@ -330,7 +330,7 @@ Pi config behavior:
 ## Roadmap
 
 - Live WeChat soak testing through the required credential guard and exact read/write workspace boundary
-- Pin or compatibility-test Pi path normalization, then use guarded Hitch-scoped identities before adding a second principal
+- Keep Pi path normalization startup attestation passing, then use guarded Hitch-scoped identities before adding a second principal
 - One internal owned/re-authorized session-dispatch service for chat and future triggers
 - Durable generic trigger inbox, initially without unattended producers
 - Resource, temporary-storage, output, credential, network, and unattended-extension safeguards before enabling schedules

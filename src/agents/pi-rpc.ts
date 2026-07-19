@@ -8,6 +8,7 @@ import type { HubSession } from "../core/types.js";
 import type { AgentToolContext } from "../core/tool-bridge.js";
 import { FailClosedLauncherSelector, type LauncherSelector } from "../sandbox/launcher-selector.js";
 import { buildWorkerEnvironment } from "../security/worker-environment.js";
+import { assertInstalledPiPathCompatibility } from "../security/pi-path-compatibility.js";
 import { secureMountHostPath } from "../security/session-runtime.js";
 import { attachJsonlReader } from "../utils/jsonl-reader.js";
 import type {
@@ -124,6 +125,7 @@ export class PiRpcBackend implements AgentBackend {
       throw new Error("Credential-isolated hitch_send_media requires an authenticated session tool bridge.");
     }
     if (credentialGuard) {
+      await assertInstalledPiPathCompatibility(piConfig.command, credentialGuard.hostPath);
       assertCredentialConfigSafe(secureMountHostPath(session, "/agent-config"));
     }
     const policyEnforcement = applyPiExecutionPolicy(

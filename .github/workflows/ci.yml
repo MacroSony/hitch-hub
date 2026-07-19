@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install system test dependency
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Install compatible Pi
+        run: npm install --global @earendil-works/pi-coding-agent@0.80.10
+      - run: npm ci
+      - run: npm run check
+      - run: npm audit --omit=dev

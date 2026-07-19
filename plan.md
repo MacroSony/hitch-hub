@@ -1008,16 +1008,10 @@ remote-agent-hub/
 
 ## 21. Recommended Immediate Next Step
 
-Run the deployed reliability iteration under normal WeChat use, then make the hub operationally self-explaining and self-restarting.
+The reliability, delivery-evidence, principal-ownership, Bubblewrap, and credential-guard foundations are complete.
+The immediate rollout step is a fresh single-principal restricted WeChat soak after attesting the installed Pi path
+resolver against Hitch's credential guard. The next production code slice is the owned, re-authorized unified session
+dispatch service described in `docs/security-sandbox-automation-roadmap.md`.
 
-The next implementation slice should be "Operability and Delivery Evidence":
-
-- graceful shutdown and deterministic recovery
-- a user-level service definition with restart-on-failure
-- durable per-delivery lifecycle records
-- rate-limited channel-health transition auditing
-- a hub-level health diagnostic
-- deterministic WeChat failure/recovery tests
-- audit/log retention
-
-Do not add Discord and a second backend in this slice. Those multiply the state space before the current deployment can reliably distinguish an agent stall, a delivery failure, and a channel outage.
+Do not add triggers, schedules, Discord, a second backend, or group-shared sessions in this slice. Unattended work
+still requires explicit resource, credential, network, temporary-storage, output, and extension safeguards.

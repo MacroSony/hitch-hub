@@ -148,7 +148,7 @@ function normalizeMediaToolPath(value) {
   return typeof value === "string" && value.startsWith("@") ? value.slice(1) : value;
 }
 
-function normalizePiBuiltinPath(value) {
+export function normalizePiBuiltinPath(value) {
   if (typeof value !== "string") {
     return value;
   }

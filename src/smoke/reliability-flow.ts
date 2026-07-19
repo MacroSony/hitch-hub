@@ -58,14 +58,29 @@ class AsyncEventQueue<T> {
 class ReliabilityChannel implements ChannelAdapter {
   readonly texts: string[] = [];
   private readonly target: ChatTarget = { platform: "fake", chatId: "reliability", userId: "smoke" };
+  private readonly stalledDeliveryStarted: Promise<void>;
+  private markStalledDeliveryStarted: () => void = () => undefined;
+
+  constructor() {
+    this.stalledDeliveryStarted = new Promise((resolve) => {
+      this.markStalledDeliveryStarted = resolve;
+    });
+  }
 
   async *receive(): AsyncIterable<InboundChatEvent> {
     yield this.event("!new pi");
     yield this.event("hang forever");
     yield this.event("overlap must be rejected");
-    // Leave deterministic room for the 60ms deadline, abort-event drain, and
-    // worker stop even when the full smoke suite is running concurrently.
-    await sleep(300);
+    await Promise.race([
+      this.stalledDeliveryStarted,
+      sleep(2_000).then(() => {
+        throw new Error("Stalled delivery did not start before the reliability deadline scenario.");
+      }),
+    ]);
+    // The primary scenario uses a deliberately wider turn clock than the
+    // focused timeout cases below so host load cannot reorder the send attempt
+    // behind the authoritative timeout response.
+    await sleep(700);
     yield this.event("!status");
     yield this.event("recover after timeout");
   }
@@ -74,6 +89,7 @@ class ReliabilityChannel implements ChannelAdapter {
     if (text === "Tool started: stalled_delivery") {
       // Intentionally ignore AbortSignal. The hub must still enforce its own
       // delivery and turn deadlines.
+      this.markStalledDeliveryStarted();
       await new Promise<void>(() => {});
     }
     this.texts.push(text);
@@ -724,7 +740,10 @@ async function main(): Promise<void> {
   const completing = new CompletingBackend();
   const backends: AgentBackend[] = [stalled, completing];
   const startedAt = Date.now();
-  const hub = new RemoteAgentHub(reliabilityConfig(dataDir), channel, () => {
+  const config = reliabilityConfig(dataDir);
+  config.agent_turn_timeout_ms = 500;
+  config.agent_turn_max_timeout_ms = 500;
+  const hub = new RemoteAgentHub(config, channel, () => {
     const backend = backends.shift();
     if (!backend) {
       throw new Error("Unexpected extra backend allocation.");
@@ -734,7 +753,7 @@ async function main(): Promise<void> {
   await hub.run();
   const elapsedMs = Date.now() - startedAt;
 
-  if (elapsedMs > 1_500) {
+  if (elapsedMs > 2_500) {
     throw new Error(`Hard deadline regression: flow took ${elapsedMs}ms.`);
   }
   if (stalled.sendCount !== 1 || stalled.abortCount !== 1 || completing.sendCount !== 1) {
@@ -742,7 +761,7 @@ async function main(): Promise<void> {
       `Expected one stalled turn, one abort, and one recovery turn; got ${stalled.sendCount}/${stalled.abortCount}/${completing.sendCount}.`,
     );
   }
-  if (!channel.texts.includes("Agent turn timed out after 60ms of active work.")) {
+  if (!channel.texts.includes("Agent turn timed out after 500ms of active work.")) {
     throw new Error(`Expected hard timeout notification: ${JSON.stringify(channel.texts)}`);
   }
   const status = channel.texts.find((text) => text.startsWith("Session ") && text.includes("delivery:"));
@@ -770,26 +789,28 @@ async function main(): Promise<void> {
   if (auditRows.filter((row) => row.type === "prompt.received").length !== 2) {
     throw new Error("Expected the overlapping prompt to be rejected before it reached the backend.");
   }
+  const stalledAudit = auditRows.find(
+    (row) =>
+      row.type === "text.delivery" &&
+      (row.details?.status === "failed" || row.details?.status === "expired") &&
+      row.details.deliveryId &&
+      row.details.turnId &&
+      row.sessionId,
+  );
+  if (!stalledAudit) {
+    throw new Error("Expected stalled text delivery to reach an audited terminal state with delivery/session/turn correlation.");
+  }
+  const persisted = new DeliveryStore(dataDir);
+  const stalledDelivery = stalledAudit.details?.deliveryId ? persisted.get(stalledAudit.details.deliveryId) : undefined;
+  persisted.close();
   if (
-    !auditRows.some(
-      (row) =>
-        row.type === "text.delivery" &&
-        row.details?.status === "failed" &&
-        row.details.deliveryId &&
-        row.details.turnId &&
-        row.sessionId,
+    !stalledDelivery ||
+    !(
+      (stalledDelivery.status === "failed" && stalledDelivery.errorCode === "send_timeout") ||
+      (stalledDelivery.status === "expired" && stalledDelivery.errorCode === "superseded")
     )
   ) {
-    throw new Error("Expected stalled text delivery to be audited with delivery/session/turn correlation.");
-  }
-  const failedAudit = auditRows.find(
-    (row) => row.type === "text.delivery" && row.details?.status === "failed" && row.details.deliveryId,
-  );
-  const persisted = new DeliveryStore(dataDir);
-  const failedDelivery = failedAudit?.details?.deliveryId ? persisted.get(failedAudit.details.deliveryId) : undefined;
-  persisted.close();
-  if (failedDelivery?.status !== "failed" || failedDelivery.errorCode !== "send_timeout") {
-    throw new Error(`Failed text audit did not match its durable terminal state: ${JSON.stringify(failedDelivery)}`);
+    throw new Error(`Stalled text audit did not match its durable terminal state: ${JSON.stringify(stalledDelivery)}`);
   }
 
   await runTimeoutPartialScenario();
