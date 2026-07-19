@@ -22,6 +22,8 @@
     "smoke:pi-ui-select": "node --use-env-proxy --import tsx src/smoke/pi-ui-select.ts",
     "smoke:pi-retry-lifecycle": "node --use-env-proxy --import tsx src/smoke/pi-retry-lifecycle.ts",
     "smoke:pi-path-compatibility": "node --use-env-proxy --import tsx src/smoke/pi-path-compatibility.ts",
+    "smoke:restricted-profile": "node --use-env-proxy --import tsx src/smoke/restricted-profile.ts --config config.wechat.yaml",
+    "smoke:restricted-agent-flow": "node --use-env-proxy --import tsx src/smoke/restricted-agent-flow.ts --config config.wechat.yaml",
     "smoke:pi-sandbox-integration": "node --use-env-proxy --import tsx src/smoke/pi-sandbox-integration.ts",
     "smoke:security-foundation": "node --use-env-proxy --import tsx src/smoke/security-foundation.ts",
     "smoke:sandbox-launcher": "node --use-env-proxy --import tsx src/smoke/sandbox-launcher.ts",

@@ -24,12 +24,14 @@ After the restricted soak and Pi-version compatibility follow-up, the next produ
 
 ## Immediate Rollout: Restricted Sandbox and Multi-User Preparation
 
-- [ ] Soak a fresh single-principal WeChat Pi session with `credential_isolation: required`, one exact read/write workspace, no policy mounts, no shell, and native `hitch_send_media`.
-- [ ] Verify workspace create/read/edit/list, outside-path rejection, symlink rejection, media delivery, post-media final text, abort, worker restart, and fresh-session behavior.
+- [~] The live systemd-managed WeChat profile now uses `credential_isolation: required`, one exact read/write workspace, no policy mounts or shell, and native `hitch_send_media`; a fresh chat-originated session and attended soak remain.
+- [~] Automated real-provider acceptance verifies workspace create/read/edit/list, outside-path and symlink rejection, native media delivery, and post-media final text. Chat-originated abort, worker restart, and fresh-session behavior remain for the attended soak.
 - [x] Attest the installed Pi path resolver against the credential guard at each guarded worker startup and fail closed on semantic drift; Pi 0.80.10 is the current verified baseline.
 - [ ] Before adding a second principal, switch from `config_scope: system` to `config_scope: hitch`, keep `credential_isolation: required`, provision a distinct provider identity for each principal out of band, and create fresh sessions. Do not share the system Pi config or old transcripts across principals.
 - [ ] Treat a shared provider key as an explicitly accepted boundary for the attended single-principal soak only. Require scoped/revocable per-principal credentials or a host-side provider broker before unattended execution; a broker is required before any claim that workers do not possess provider credentials.
 - [ ] Keep group-shared sessions disabled until owner/admin/approval authority is designed and tested independently from private multi-user routing.
+
+Rollout note (2026-07-19): the clean branch was published, CI and one aggregate `npm run check` path were added, and guarded startup now attests the installed Pi resolver (verified with Pi 0.80.10). The live WeChat hub moved from tmux to an enabled user service, survived a deliberate main-process `SIGKILL` with a five-second restart and zero interrupted deliveries, quarantined all owned pre-guard sessions, and returned to healthy. A private rollback copy of the pre-guard config, Hitch state, and system Pi config was verified before the transition. The restricted real-provider flow exercised `ls`, `write`, `read`, `edit`, and `hitch_send_media`, observed two blocked reads (`/agent-config` and a symlink escape), delivered the edited immutable artifact snapshot, and cleaned up its fixture. A fresh session created through WeChat is still required before the soak is complete.
 
 ## Completed Iteration: Credential and Guarded Media Containment
 

@@ -111,10 +111,13 @@ Latest local verification from the review pass:
 - `npm run smoke:credential-guard`: passed.
 - `npm run smoke:pi-sandbox-integration`: passed.
 - `npm run smoke:pi-retry-lifecycle`: passed.
+- `npm run smoke:pi-path-compatibility`: passed against installed Pi 0.80.10, including a negative drift control.
 - `npm run smoke:reliability-flow`: passed.
 - `npm run smoke:wechat-reliability`: passed.
 - `npm run smoke:mcp-session`: passed.
 - `npm run smoke:mcp-package`: passed, including packed install and real Bubblewrap execution with the active Node runtime.
+- `npm run smoke:restricted-profile`: passed with the ignored live single-principal configuration.
+- `npm run smoke:restricted-agent-flow`: passed with real provider/tool execution, blocked outside/symlink reads, native guarded media, and clean fixture removal.
 - `npm audit --omit=dev`: passed with zero reported vulnerabilities.
 - Controlled live Bubblewrap acceptance with the installed Pi configuration/extensions: returned `BUBBLEWRAP_OK`; 22 trusted system-config plans migrated from read-only to read/write with zero quarantines.
 - 2026-07-17 attended WeChat rollout: installed `@hitch-hub/session-mcp@0.1.0`, verified the package and `mcp` Forge allowlist inside the live mount plan, confirmed Hitch source invisibility and read-only tool results, restarted tmux `hitch:0.0`, and observed WeChat `starting -> healthy`.

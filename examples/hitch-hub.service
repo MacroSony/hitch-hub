@@ -8,7 +8,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=%h/programming/hitch-hub
-ExecStart=/bin/bash -lc 'exec node --use-env-proxy --import tsx src/main.ts --config config.local.yaml'
+ExecStart=/usr/bin/node --use-env-proxy --import tsx src/main.ts --config config.local.yaml
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

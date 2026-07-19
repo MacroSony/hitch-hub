@@ -206,7 +206,7 @@ Runtime health behavior:
 
 ## Service Operation
 
-For a continuously running Linux deployment, copy [examples/hitch-hub.service](examples/hitch-hub.service) to `~/.config/systemd/user/hitch-hub.service`. Adjust `WorkingDirectory` and the config filename if your checkout differs, then run:
+For a continuously running Linux deployment, copy [examples/hitch-hub.service](examples/hitch-hub.service) to `~/.config/systemd/user/hitch-hub.service`. Adjust `WorkingDirectory`, the config filename, and `ExecStart` if your checkout or Node installation differs. `ExecStart` must use a Node 24+ executable; user services do not reliably load an interactive NVM shell, so prefer the absolute path reported by `readlink -f "$(command -v node)"`. Then run:
 
 ```bash
 systemctl --user daemon-reload
@@ -280,6 +280,15 @@ Run the runtime and deterministic WeChat reliability smoke tests:
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:reliability-flow
 & 'C:\Program Files\nodejs\npm.cmd' run smoke:wechat-reliability
 ```
+
+On the deployment host, validate the ignored restricted profile and then run its real provider/tool acceptance flow:
+
+```bash
+npm run smoke:restricted-profile
+npm run smoke:restricted-agent-flow
+```
+
+The second command creates and removes a unique hidden fixture inside the configured workspace. It exercises the installed Pi worker, Bubblewrap, guarded workspace tools, outside/symlink rejection, and native media bridge without writing a session into the live chat database.
 
 Check Telegram credentials without printing the token:
 
