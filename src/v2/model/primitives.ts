@@ -19,10 +19,23 @@ export type SessionEndpointBindingId = Id<"SessionEndpointBinding">;
 export type EndpointBindingPolicySnapshotId = Id<"EndpointBindingPolicySnapshot">;
 export type EndpointId = Id<"Endpoint">;
 export type TurnId = Id<"Turn">;
+export type TurnPolicyId = Id<"TurnPolicy">;
+export type TurnPolicySnapshotId = Id<"TurnPolicySnapshot">;
+export type TurnInputSnapshotId = Id<"TurnInputSnapshot">;
+export type TurnQueueEntryId = Id<"TurnQueueEntry">;
+export type TurnEventId = Id<"TurnEvent">;
+export type TurnMessageId = Id<"TurnMessage">;
+export type TurnInteractionId = Id<"TurnInteraction">;
+export type TurnInteractionOptionId = Id<"TurnInteractionOption">;
+export type TurnInteractionResponseId = Id<"TurnInteractionResponse">;
+export type ToolInvocationId = Id<"ToolInvocation">;
+export type AttachmentId = Id<"Attachment">;
 export type WorkerLeaseId = Id<"WorkerLease">;
 export type AgentResumeHandleId = Id<"AgentResumeHandle">;
 
 export type AgentDriverId = Id<"AgentDriver">;
+export type AgentDriverPermissionMediationId =
+  Id<"AgentDriverPermissionMediation">;
 export type AgentProfileId = Id<"AgentProfile">;
 export type AgentProfileRevisionId = Id<"AgentProfileRevision">;
 export type ProviderId = Id<"Provider">;
@@ -46,6 +59,16 @@ export type IsoTimestamp = BrandedString<"IsoTimestamp">;
 export type AuthenticationSubjectId = BrandedString<"AuthenticationSubjectId">;
 export type ExternalEndpointId = BrandedString<"ExternalEndpointId">;
 export type LocalEndpointId = BrandedString<"LocalEndpointId">;
+export type OriginMessageId = BrandedString<"OriginMessageId">;
+export type TurnIdempotencyKey = BrandedString<"TurnIdempotencyKey">;
+export type TurnQueueMutationIdempotencyKey =
+  BrandedString<"TurnQueueMutationIdempotencyKey">;
+export type AgentProtocolMessageId = BrandedString<"AgentProtocolMessageId">;
+export type AgentProtocolToolCallId = BrandedString<"AgentProtocolToolCallId">;
+export type AgentProtocolInteractionOptionId =
+  BrandedString<"AgentProtocolInteractionOptionId">;
+export type AgentProtocolPermissionOptionKind =
+  BrandedString<"AgentProtocolPermissionOptionKind">;
 export type CanonicalHostPath = BrandedString<"CanonicalHostPath">;
 export type SandboxPath = BrandedString<"SandboxPath">;
 

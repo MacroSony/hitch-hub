@@ -23,6 +23,8 @@ import type {
   ProviderCredentialBindingId,
   SessionEndpointBindingId,
   SessionId,
+  TurnId,
+  TurnPolicyId,
   WorkspaceId,
 } from "./primitives.js";
 
@@ -186,6 +188,7 @@ export type SessionConfigurationResourceRef =
   | { readonly kind: "agent-profile"; readonly id: AgentProfileId }
   | { readonly kind: "workspace"; readonly id: WorkspaceId }
   | { readonly kind: "execution-policy"; readonly id: ExecutionPolicyId }
+  | { readonly kind: "turn-policy"; readonly id: TurnPolicyId }
   | { readonly kind: "extension"; readonly id: ExtensionId }
   | { readonly kind: "provider-credential-binding"; readonly id: ProviderCredentialBindingId };
 
@@ -230,6 +233,9 @@ export type BlindSessionAdministrativePermission =
   | "session.admin.revoke-binding"
   | "session.admin.revoke-delegated-access";
 
+/** Content-blind containment of one queued or active turn. */
+export type BlindTurnAdministrativePermission = "turn.admin.cancel";
+
 export type SessionPermission =
   | "session.read"
   | "session.prompt"
@@ -240,6 +246,8 @@ export type SessionPermission =
   | "session.fork"
   | "session.archive"
   | "session.manage-access";
+
+export type TurnPermission = "turn.read" | "turn.cancel" | "turn.replace";
 
 export type AuthorizationRequest =
   | {
@@ -264,6 +272,15 @@ export type AuthorizationRequest =
   | {
       readonly actor: AuthenticatedPrincipal;
       readonly scope: {
+        readonly kind: "turn";
+        readonly sessionId: SessionId;
+        readonly turnId: TurnId;
+      };
+      readonly permission: TurnPermission | BlindTurnAdministrativePermission;
+    }
+  | {
+      readonly actor: AuthenticatedPrincipal;
+      readonly scope: {
         readonly kind: "session-configuration-resource";
         readonly installationId: InstallationId;
         readonly resource: SessionConfigurationResourceRef;
@@ -275,6 +292,7 @@ export type AuthorizationDecisionReason =
   | "session-owner"
   | "role-grant"
   | "endpoint-participant-grant"
+  | "turn-requester"
   | "installation-admin"
   | "resource-grant"
   | "principal-disabled"

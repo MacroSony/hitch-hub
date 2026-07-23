@@ -29,6 +29,7 @@ import type {
   SessionSpecId,
   ToolCapabilityId,
   TurnId,
+  TurnPolicySnapshotId,
   WorkerLeaseId,
   WorkspaceId,
   WorkspaceResourceId,
@@ -75,11 +76,25 @@ export interface AgentProfileRevision {
   readonly createdAt: IsoTimestamp;
 }
 
-/** Requested on a turn; it must be permitted by the profile revision. */
-export interface TurnModelSelection extends ModelRef {}
+/**
+ * Immutable model-selection intent recorded on every Turn. A configured
+ * default is resolved before admission; agent-selected is explicit rather
+ * than represented by an omitted field.
+ */
+export type TurnModelSelection =
+  | {
+      readonly kind: "resolved";
+      readonly providerId: ProviderId;
+      readonly modelId: ModelId;
+    }
+  | {
+      readonly kind: "agent-selected";
+      /** Optionally constrain agent selection to one allowed provider. */
+      readonly providerId?: ProviderId;
+    };
 
 export interface TurnExecutionOptions {
-  readonly model?: TurnModelSelection;
+  readonly model: TurnModelSelection;
 }
 
 export type WorkspaceAccess = "read-only" | "read-write";
@@ -116,7 +131,6 @@ export interface WorkspaceResourceGrant {
 }
 
 export interface ResourceLimits {
-  readonly activeTurnTimeoutMs?: number;
   readonly memoryBytes?: number;
   readonly maxProcesses?: number;
   readonly temporaryStorageBytes?: number;
@@ -169,6 +183,7 @@ export interface SessionSpec {
   readonly agentProfileRevisionId: AgentProfileRevisionId;
   readonly workspaceRevisionId: WorkspaceRevisionId;
   readonly executionPolicySnapshotId: ExecutionPolicySnapshotId;
+  readonly turnPolicySnapshotId: TurnPolicySnapshotId;
   readonly extensionGrantSnapshotIds: readonly ExtensionGrantSnapshotId[];
   readonly providerBindings: readonly SessionProviderBinding[];
   readonly createdAt: IsoTimestamp;

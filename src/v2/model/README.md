@@ -7,9 +7,11 @@ It does not define storage schemas, runtime codecs, migrations, or adapters.
 Current decisions:
 
 - A session has one immutable `SessionSpec`.
+- Each `SessionSpec` pins an append-only `TurnPolicySnapshot` separately from its execution policy.
 - Agent profiles, workspaces, policies, and extension grants are append-only revisions or snapshots.
 - Agent profiles allow providers and either all or an explicit list of their models.
-- A turn may select any model allowed by the session's agent profile revision.
+- Every turn records either a resolved allowed provider/model or an explicit
+  agent-selected choice (optionally constrained to one allowed provider).
 - Provider credentials remain broker-owned and are referenced, never copied into a snapshot.
 - Connector and local-client destinations are modeled as `Endpoint` records.
 - Endpoints connect through mutable, suspendable, and revocable `SessionEndpointBinding` records.
@@ -38,6 +40,8 @@ Identity and authorization decisions:
 - Session ownership is intrinsic and singular; delegated roles are `operator`, `participant`, `approver`, and `viewer`.
 - Agent-profile, workspace, policy, extension, and provider-binding use grants target stable resources and follow all
   currently and future published revisions. Each session continues to pin the exact revisions it uses.
+- Turn-policy use grants follow future published revisions of a stable policy, while each session and turn records the
+  exact policy snapshot actually used.
 - Session endpoint bindings route traffic and filter audiences; identity and access grants authorize every action.
 - Disabled principals, revoked identity bindings, and revoked grants fail closed and are checked on every action.
 
@@ -73,7 +77,37 @@ Endpoint and group-chat decisions:
   rates and turn queues.
 - An `EndpointSessionSelection` is mutable UI routing state. It does not grant access or alter session configuration.
 
+Turn and dispatch decisions:
+
+- A Turn is an immutable Hitch record with its own ID, origin-scoped idempotency key, requester evidence, exact input
+  snapshot, model choice, and turn-policy snapshot.
+- At most one turn actively controls an agent session. Accepted pending work remains in a Hitch-owned bounded FIFO; only
+  the queue head reaches an agent driver.
+- A successful transport write is not prompt acceptance. Turns remain `submitted-unconfirmed` until an explicit
+  acknowledgement, causally attributable work event, or terminal response provides evidence. Background session events
+  do not count without a driver guarantee tying them to the exact dispatched Turn.
+- A possibly accepted prompt is never replayed automatically. Exact driver reconciliation may resolve it; otherwise
+  worker loss produces an `unknown` result and an explicit retry creates a new turn.
+- Requesters may cancel or replace their own queued turns. Operators/owners may cancel any queued turn but may not replace
+  another principal's turn. Replacement creates a new immutable turn in the same stable queue slot.
+- Queue cancel/replace compares the slot revision, queued state, and current Turn ID atomically; mutation retries use a
+  separate operation idempotency key.
+- Queued work is reauthorized before dispatch. Authority, endpoint-binding, or binding-policy revocation cancels it.
+- Loss of authority required to execute an active turn, including identity, origin binding/policy, configuration-use,
+  or credential revocation, blocks new privileged operations and initiates cancellation. Pending interactions fail
+  closed; delivery performs a separate live authorization check.
+- Active-work and human-wait time are accounted separately, while an absolute wall-clock limit never pauses.
+- ACP permission requests are subordinate to Hitch execution policy and session approval authority. Agent-provided
+  persistent choices never create Hitch grants and cannot be relabeled as one-time responses. Direct selections require
+  an advertised one-operation disposition; otherwise a driver must guarantee safe one-operation mediation or Hitch
+  fails closed. Durable interaction records preserve the sanitized request, tool context, authenticated resolver,
+  authorization basis, normalized decision, original protocol option semantics, and actual driver response.
+- Event payload kinds constrain durability: raw progress/message chunks cannot be durable, while finalized messages,
+  interaction decisions, terminal results, and state transitions cannot be transient.
+- Turn completion and outbound delivery are separate state machines; delivery failure never rewrites a completed result.
+
 Structural invariants such as non-empty allowlists, unique providers, valid default models, compatible workspace grants,
 one provider binding per selected provider, endpoint/policy audience compatibility, self-binding ownership, non-empty
-activation signals, positive context/rate limits, invitation expiry and single-use claims, and active-grant
-reauthorization will be enforced by runtime codecs after the interfaces are approved.
+activation signals, positive context/rate/timing limits, invitation expiry and single-use claims, origin-scoped
+idempotency, one active turn, atomic queue claims/replacements, terminal immutability, and active-grant reauthorization
+will be enforced by runtime codecs after the interfaces are approved.
