@@ -15,7 +15,8 @@ Current decisions:
 - Provider credentials remain broker-owned and are referenced, never copied into a snapshot.
 - Connector and local-client destinations are modeled as `Endpoint` records.
 - Endpoints connect through mutable, suspendable, and revocable `SessionEndpointBinding` records.
-- Endpoint binding policies are append-only snapshots and remain outside the immutable `SessionSpec`.
+- V2.0 bindings are private only. Shared endpoints may be recognized by ingress
+  but cannot be bound until their authority and lifecycle model is implemented.
 - Runtime state and display metadata are separate from session configuration.
 - Every launch revalidates the immutable snapshot against current authority; immutability never defeats revocation.
 - Host paths are confined to the trusted workspace catalog and supervisor boundary.
@@ -54,28 +55,18 @@ Initial built-in role semantics:
 - Session `operator`: read, prompt, control, and create/update private bindings to the operator's own verified endpoints.
 - Session `participant`: prompt and receive the originating response, but no private history, control, approval, or
   binding authority.
-- Endpoint participant: prompt only through the exact shared binding named by the grant.
 - Session `approver`: read and approve.
 - Session `viewer`: read only.
 
-Endpoint and group-chat decisions:
+Endpoint decisions:
 
 - A private endpoint records the principal proven to control it. `session.bind-self` never permits binding another
   principal's endpoint.
-- Shared endpoints and their policy snapshots are session-owner managed. Administrators may blindly suspend or revoke
-  them but cannot broaden their audience.
-- Shared audience modes are owner-only, any already-authorized principal, or an allowlist that further filters
-  already-authorized principals. Presence in a chat and an @mention never grant authority.
-- Shared interaction modes are respond-to-all, bounded contextual listening with mention/reply/command activation, and
-  mentions-only. Passive context capture never starts the agent or executes tools.
-- Only audience-authorized messages may enter shared context. Normal output returns to the triggering endpoint according
-  to its response policy and is never broadcast to every session binding.
-- Authenticated-but-unenrolled guest participation is disabled in the initial model. It will require a separately
-  reviewed endpoint-scoped guest actor, quotas, and audit policy if added later.
-- Newly created shared bindings should default to authorized principals, mentions-only activation, a threaded/reply
-  response when supported, ignored automated senders, no proactive delivery, and bounded per-sender/binding activation
-  rates and turn queues.
-- An `EndpointSessionSelection` is mutable UI routing state. It does not grant access or alter session configuration.
+- Shared endpoint binding, audience, context, activation, response, and
+  endpoint-participant grant semantics are deferred. The preserved design
+  considerations live in `docs/v2-deferred-design.md`.
+- An `EndpointSessionSelection` is mutable private UI routing state. It does not
+  grant access or alter session configuration.
 
 Turn and dispatch decisions:
 
@@ -88,26 +79,32 @@ Turn and dispatch decisions:
   do not count without a driver guarantee tying them to the exact dispatched Turn.
 - A possibly accepted prompt is never replayed automatically. Exact driver reconciliation may resolve it; otherwise
   worker loss produces an `unknown` result and an explicit retry creates a new turn.
-- Requesters may cancel or replace their own queued turns. Operators/owners may cancel any queued turn but may not replace
-  another principal's turn. Replacement creates a new immutable turn in the same stable queue slot.
-- Queue cancel/replace compares the slot revision, queued state, and current Turn ID atomically; mutation retries use a
-  separate operation idempotency key.
-- Queued work is reauthorized before dispatch. Authority, endpoint-binding, or binding-policy revocation cancels it.
-- Loss of authority required to execute an active turn, including identity, origin binding/policy, configuration-use,
+- Requesters may cancel their own queued turns by immutable Turn ID.
+  Operators/owners may cancel any queued turn. The repository removes it only
+  if it remains pending; edit-in-place queue replacement is deferred.
+- Queued work is reauthorized before dispatch. Authority or endpoint-binding revocation cancels it.
+- Loss of authority required to execute an active turn, including identity, origin binding, configuration-use,
   or credential revocation, blocks new privileged operations and initiates cancellation. Pending interactions fail
   closed; delivery performs a separate live authorization check.
-- Active-work and human-wait time are accounted separately, while an absolute wall-clock limit never pauses.
+- The initial active-work budget is extended by distinct tool invocations up to
+  a hard maximum, matching the v1 dynamic deadline. Human interaction wait is
+  accounted separately; v2.0 does not impose an additional fixed wall-clock cap.
 - ACP permission requests are subordinate to Hitch execution policy and session approval authority. Agent-provided
   persistent choices never create Hitch grants and cannot be relabeled as one-time responses. Direct selections require
   an advertised one-operation disposition; otherwise a driver must guarantee safe one-operation mediation or Hitch
   fails closed. Durable interaction records preserve the sanitized request, tool context, authenticated resolver,
   authorization basis, normalized decision, original protocol option semantics, and actual driver response.
-- Event payload kinds constrain durability: raw progress/message chunks cannot be durable, while finalized messages,
-  interaction decisions, terminal results, and state transitions cannot be transient.
+- Event callers do not choose durability. The persistence boundary derives it
+  from payload kind and rejects invalid storage behavior: raw progress/message
+  chunks remain transient, while finalized messages, interaction decisions,
+  terminal results, and state transitions are durable.
 - Turn completion and outbound delivery are separate state machines; delivery failure never rewrites a completed result.
 
-Structural invariants such as non-empty allowlists, unique providers, valid default models, compatible workspace grants,
-one provider binding per selected provider, endpoint/policy audience compatibility, self-binding ownership, non-empty
-activation signals, positive context/rate/timing limits, invitation expiry and single-use claims, origin-scoped
-idempotency, one active turn, atomic queue claims/replacements, terminal immutability, and active-grant reauthorization
-will be enforced by runtime codecs after the interfaces are approved.
+Structural invariants such as non-empty allowlists, unique providers, valid
+default models, compatible workspace grants, one provider binding per selected
+provider, private binding to a private Endpoint controlled by the expected
+principal, positive timing values, invitation expiry and single-use claims,
+origin-scoped idempotency, one active turn, atomic FIFO claims and complete
+cancellation transitions, terminal immutability, payload-derived event
+durability, and active-grant reauthorization will be enforced by runtime codecs
+as part of the first vertical slice.

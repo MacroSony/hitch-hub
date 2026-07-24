@@ -15,7 +15,6 @@ import type {
   AgentProtocolToolCallId,
   AttachmentId,
   AuthenticationRequestId,
-  EndpointBindingPolicySnapshotId,
   EndpointId,
   ExecutionPolicySnapshotId,
   IdentityBindingId,
@@ -37,17 +36,12 @@ import type {
   TurnMessageId,
   TurnPolicyId,
   TurnPolicySnapshotId,
-  TurnQueueEntryId,
-  TurnQueueMutationIdempotencyKey,
   WorkspaceResourceId,
 } from "./primitives.js";
 import type { AuditActorRef, AuthenticatedPrincipal } from "./identity-access.js";
 import type { TurnExecutionOptions } from "./session.js";
 
-export type TurnBusyBehavior =
-  | "reject"
-  | "bounded-fifo"
-  | "replace-newest-own-pending";
+export type TurnBusyBehavior = "reject" | "bounded-fifo";
 
 export interface TurnAdmissionPolicy {
   readonly whenBusy: TurnBusyBehavior;
@@ -55,18 +49,14 @@ export interface TurnAdmissionPolicy {
 }
 
 export interface TurnTimingPolicy {
-  /** Active agent work before tool-based extensions. */
+  /** Initial active agent-work budget before tool-based extensions. */
   readonly initialActiveWorkMs: number;
   /** Active-work time added by each distinct tool invocation. */
   readonly toolExtensionMs: number;
-  /** Hard cap for active work after all extensions. */
+  /** Hard cap for the dynamically extended active-work budget. */
   readonly maximumActiveWorkMs: number;
-  /** Absolute lifetime including time waiting for human interaction. */
-  readonly maximumWallClockMs: number;
-  readonly agentStallMs: number;
-  readonly toolStallMs: number;
+  /** Deadline for resolving each approval or structured-input interaction. */
   readonly interactionWaitMs: number;
-  readonly cancellationGraceMs: number;
 }
 
 export interface TurnInteractionPolicy {
@@ -132,22 +122,10 @@ export type TurnContentBlock =
       readonly mimeType?: string;
     };
 
-/**
- * One audience-authorized, untrusted group-context contribution. Contributors
- * provide context only; they never lend authority to the triggering actor.
- */
-export interface CapturedContextMessage {
-  readonly originMessageId: OriginMessageId;
-  readonly authorPrincipalId: PrincipalId;
-  readonly sentAt: IsoTimestamp;
-  readonly content: readonly TurnContentBlock[];
-}
-
-/** Exact immutable prompt and bounded group context admitted for a turn. */
+/** Exact immutable private-endpoint prompt admitted for a turn. */
 export interface TurnInputSnapshot {
   readonly id: TurnInputSnapshotId;
   readonly triggeringContent: readonly TurnContentBlock[];
-  readonly capturedContext: readonly CapturedContextMessage[];
   readonly createdAt: IsoTimestamp;
 }
 
@@ -161,7 +139,6 @@ export interface EndpointTurnOrigin {
   readonly kind: "endpoint";
   readonly endpointId: EndpointId;
   readonly endpointBindingId: SessionEndpointBindingId;
-  readonly bindingPolicySnapshotId: EndpointBindingPolicySnapshotId;
   readonly originMessageId: OriginMessageId;
 }
 
@@ -173,8 +150,7 @@ export type TurnOrigin = EndpointTurnOrigin;
 
 /**
  * Immutable accepted work. The idempotency tuple is scoped by the origin
- * endpoint and key. A replacement creates a new Turn and points back to the
- * superseded record rather than mutating it.
+ * endpoint and key.
  */
 export interface Turn {
   readonly id: TurnId;
@@ -185,48 +161,29 @@ export interface Turn {
   readonly turnPolicySnapshotId: TurnPolicySnapshotId;
   readonly execution: TurnExecutionOptions;
   readonly idempotencyKey: TurnIdempotencyKey;
-  readonly supersedesTurnId?: TurnId;
   readonly createdAt: IsoTimestamp;
 }
 
-export type TurnQueueEntryState =
-  | { readonly status: "queued" }
-  | {
-      readonly status: "claimed";
-      readonly claimedAt: IsoTimestamp;
-    }
-  | {
-      readonly status: "closed";
-      readonly closedAt: IsoTimestamp;
-    };
-
 /**
- * Stable FIFO slot. Replacing a queued turn atomically updates currentTurnId,
- * preserving ordinal while the old immutable Turn becomes superseded.
+ * Minimal persisted session queue. `pendingTurnIds` is bounded by the pinned
+ * admission policy and ordered oldest first. A repository must atomically claim
+ * only the head, set it active, and record its dispatching lifecycle transition.
+ * It must maintain at most one active turn.
  */
-export interface TurnQueueEntry {
-  readonly id: TurnQueueEntryId;
+export interface TurnQueue {
   readonly sessionId: SessionId;
-  readonly ordinal: number;
-  /** Incremented on replacement, claim, and close. */
-  readonly revision: number;
-  readonly currentTurnId: TurnId;
-  readonly state: TurnQueueEntryState;
-  readonly createdAt: IsoTimestamp;
+  readonly activeTurnId?: TurnId;
+  readonly pendingTurnIds: readonly TurnId[];
   readonly updatedAt: IsoTimestamp;
 }
 
 export interface TurnQueueControls {
   readonly canCancel: boolean;
-  readonly canReplace: boolean;
 }
 
 /** Actor-specific presentation projection returned after admission or listing. */
 export interface TurnQueueView {
-  readonly queueEntryId: TurnQueueEntryId;
   readonly turnId: TurnId;
-  /** Supplied back as part of a queue-mutation compare-and-swap. */
-  readonly queueEntryRevision: number;
   readonly position: number;
   readonly requesterPrincipalId: PrincipalId;
   readonly controls: TurnQueueControls;
@@ -245,74 +202,31 @@ export type TurnReceipt =
     };
 
 /**
- * Every queued cancel/replace is a compare-and-swap over both the stable slot
- * and the immutable Turn currently occupying it. Checking only "queued" is
- * unsafe because replacement deliberately leaves the slot queued.
+ * Cancellation is response-idempotent by immutable Turn ID. In one transaction,
+ * the repository removes a still-pending Turn, records its terminal cancelled
+ * state/result, and appends the durable state/terminal events. Once claimed,
+ * active turn cancellation uses session-control authority instead.
  */
-export interface TurnQueueMutationPrecondition {
-  readonly queueEntryId: TurnQueueEntryId;
-  readonly expectedState: "queued";
-  readonly expectedRevision: number;
-  readonly expectedCurrentTurnId: TurnId;
-}
-
-interface TurnQueueMutationCommandBase {
-  readonly actor: AuthenticatedPrincipal;
-  /**
-   * Unique within (actor principal, queue entry). Retrying an applied command
-   * returns its original result and does not perform another mutation.
-   */
-  readonly idempotencyKey: TurnQueueMutationIdempotencyKey;
-  readonly precondition: TurnQueueMutationPrecondition;
-}
-
-export interface CancelQueuedTurnCommand extends TurnQueueMutationCommandBase {
+export interface CancelQueuedTurnCommand {
   readonly kind: "cancel-queued-turn";
+  readonly actor: AuthenticatedPrincipal;
+  readonly turnId: TurnId;
 }
 
-/**
- * The replacement Turn and its snapshot are created in the same transaction
- * that validates the precondition and updates the stable queue slot.
- */
-export interface ReplaceQueuedTurnCommand extends TurnQueueMutationCommandBase {
-  readonly kind: "replace-queued-turn";
-  /**
-   * Only the trigger is replaceable. The service copies the original captured
-   * context into a new snapshot inside the queue transaction.
-   */
-  readonly replacementTriggeringContent: readonly TurnContentBlock[];
-  readonly replacementExecution: TurnExecutionOptions;
-  readonly replacementTurnIdempotencyKey: TurnIdempotencyKey;
-}
-
-export type TurnQueueMutationCommand =
-  | CancelQueuedTurnCommand
-  | ReplaceQueuedTurnCommand;
-
-export type TurnQueueMutationResult =
+export type CancelQueuedTurnResult =
   | {
-      readonly status: "applied";
-      readonly operation: "cancel";
-      readonly queueEntryId: TurnQueueEntryId;
-      readonly previousTurnId: TurnId;
-      readonly queueEntryRevision: number;
+      readonly status: "cancelled";
+      readonly turnId: TurnId;
     }
   | {
-      readonly status: "applied";
-      readonly operation: "replace";
-      readonly queueEntryId: TurnQueueEntryId;
-      readonly previousTurnId: TurnId;
-      readonly currentTurnId: TurnId;
-      readonly queueEntryRevision: number;
+      /** A retry after the original successful response was lost. */
+      readonly status: "already-cancelled";
+      readonly turnId: TurnId;
     }
   | {
-      readonly status: "conflict";
-      readonly reason:
-        | "idempotency-key-reused"
-        | "turn-already-started"
-        | "turn-already-closed"
-        | "stale-current-turn"
-        | "stale-revision";
+      readonly status: "not-cancelled";
+      readonly turnId: TurnId;
+      readonly reason: "turn-not-queued";
     };
 
 /**
@@ -348,22 +262,19 @@ export type PromptAcceptanceEvidence =
 export type TurnCancellationReason =
   | "withdrawn-by-requester"
   | "cancelled-by-controller"
-  | "superseded"
   | "authority-revoked"
   | "configuration-authority-revoked"
   | "credential-revoked"
   | "binding-revoked"
-  | "binding-policy-changed"
   | "unsafe-agent-permission-options"
   | "session-stopped"
   | "shutdown";
 
-export type TurnTimeoutReason =
-  | "active-work"
-  | "wall-clock"
-  | "agent-stall"
-  | "tool-stall"
-  | "cancellation-grace";
+/**
+ * Stall thresholds are supervisor safeguards in v2.0 rather than session
+ * policy knobs, but their terminal outcomes remain explicit and auditable.
+ */
+export type TurnTimeoutReason = "active-work" | "agent-stall" | "tool-stall";
 
 export interface TurnFailure {
   readonly code:
@@ -410,10 +321,7 @@ export type TurnResult =
     };
 
 export type TurnLifecycleState =
-  | {
-      readonly status: "queued";
-      readonly queueEntryId: TurnQueueEntryId;
-    }
+  | { readonly status: "queued" }
   | {
       readonly status: "dispatching";
       readonly attempt: number;
@@ -787,41 +695,26 @@ export type DurableTurnEventPayload =
       readonly partialOutputAvailable: boolean;
     };
 
-export type TurnEventDurability = "transient" | "checkpoint" | "durable";
 export type TurnEventVisibility = "internal" | "requester" | "session-readers";
 
 /**
  * Hitch assigns IDs and sequence after validating a driver event. Driver-
  * supplied IDs are optional correlation metadata and are never domain identity.
- * The discriminated union prevents privacy/audit invariants from being weakened
- * by assigning arbitrary durability to a payload.
+ *
+ * Durability is deliberately absent from the event. The storage boundary
+ * derives transient/checkpoint/durable handling exhaustively from payload.kind,
+ * so callers cannot persist raw progress merely by choosing a durability flag.
  */
-interface TurnEventEnvelope {
+export interface TurnEvent {
   readonly id: TurnEventId;
   readonly turnId: TurnId;
   readonly sequence: number;
   readonly visibility: TurnEventVisibility;
   readonly occurredAt: IsoTimestamp;
+  readonly payload: TurnEventPayload;
 }
 
-export type TransientTurnEvent = TurnEventEnvelope & {
-  readonly durability: "transient";
-  readonly payload: TransientTurnEventPayload;
-};
-
-export type CheckpointTurnEvent = TurnEventEnvelope & {
-  readonly durability: "checkpoint";
-  readonly payload: CheckpointTurnEventPayload;
-};
-
-export type DurableTurnEvent = TurnEventEnvelope & {
-  readonly durability: "durable";
-  readonly payload: DurableTurnEventPayload;
-};
-
-export type TurnEvent =
-  | TransientTurnEvent
-  | CheckpointTurnEvent
-  | DurableTurnEvent;
-
-export type TurnEventPayload = TurnEvent["payload"];
+export type TurnEventPayload =
+  | TransientTurnEventPayload
+  | CheckpointTurnEventPayload
+  | DurableTurnEventPayload;

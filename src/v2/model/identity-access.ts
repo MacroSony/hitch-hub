@@ -21,7 +21,6 @@ import type {
   LocalHostId,
   PrincipalId,
   ProviderCredentialBindingId,
-  SessionEndpointBindingId,
   SessionId,
   TurnId,
   TurnPolicyId,
@@ -170,17 +169,6 @@ export interface SessionRoleGrant extends AccessGrantAudit {
 }
 
 /**
- * Endpoint-scoped participant authority. It permits prompting only through the
- * named binding and grants no private history, control, approval, or bind access.
- */
-export interface SessionEndpointParticipantGrant extends AccessGrantAudit {
-  readonly kind: "session-endpoint-participant";
-  readonly sessionId: SessionId;
-  readonly endpointBindingId: SessionEndpointBindingId;
-  readonly principalId: PrincipalId;
-}
-
-/**
  * Stable configuration resource. A use grant follows all currently and future
  * published revisions of the resource; each SessionSpec still pins exact IDs.
  */
@@ -203,7 +191,6 @@ export interface SessionConfigurationUseGrant extends AccessGrantAudit {
 export type AccessGrant =
   | InstallationRoleGrant
   | SessionRoleGrant
-  | SessionEndpointParticipantGrant
   | SessionConfigurationUseGrant;
 
 export type InstallationPermission =
@@ -247,7 +234,7 @@ export type SessionPermission =
   | "session.archive"
   | "session.manage-access";
 
-export type TurnPermission = "turn.read" | "turn.cancel" | "turn.replace";
+export type TurnPermission = "turn.read" | "turn.cancel";
 
 export type AuthorizationRequest =
   | {
@@ -259,15 +246,6 @@ export type AuthorizationRequest =
       readonly actor: AuthenticatedPrincipal;
       readonly scope: { readonly kind: "session"; readonly sessionId: SessionId };
       readonly permission: SessionPermission | BlindSessionAdministrativePermission;
-    }
-  | {
-      readonly actor: AuthenticatedPrincipal;
-      readonly scope: {
-        readonly kind: "session-endpoint";
-        readonly sessionId: SessionId;
-        readonly endpointBindingId: SessionEndpointBindingId;
-      };
-      readonly permission: "session.prompt-via-endpoint";
     }
   | {
       readonly actor: AuthenticatedPrincipal;
@@ -291,7 +269,6 @@ export type AuthorizationRequest =
 export type AuthorizationDecisionReason =
   | "session-owner"
   | "role-grant"
-  | "endpoint-participant-grant"
   | "turn-requester"
   | "installation-admin"
   | "resource-grant"

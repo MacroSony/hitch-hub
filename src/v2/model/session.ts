@@ -110,14 +110,17 @@ export interface WorkspaceResource {
   readonly maximumAccess: WorkspaceAccess;
 }
 
-/** An append-only snapshot of workspace identity and mountable resources. */
+/**
+ * An append-only snapshot of one workspace root and its optional extra mounts.
+ * Revision pinning does not require a revision-management UI.
+ */
 export interface WorkspaceRevision {
   readonly id: WorkspaceRevisionId;
   readonly workspaceId: WorkspaceId;
   readonly revision: number;
   readonly displayName: string;
   readonly root: WorkspaceResource;
-  readonly additionalResources: readonly WorkspaceResource[];
+  readonly mounts: readonly WorkspaceResource[];
   readonly createdAt: IsoTimestamp;
 }
 

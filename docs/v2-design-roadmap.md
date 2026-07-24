@@ -9,17 +9,16 @@ fully specify every future product feature before implementation begins.
 
 ## Design order
 
-### 1. Turn and dispatch model (modeled)
+### 1. Turn and dispatch model (MVP contract modeled)
 
 Define the Hitch-native unit of work independently of any agent protocol:
 
 - immutable turn request, actor, origin, content, attachments, and model choice
 - admission, queueing, concurrency, idempotency, and duplicate delivery
 - running, waiting, cancellation, timeout, completion, and failure transitions
-- canonical agent events and durable versus ephemeral output
+- canonical agent events with storage-derived durability
 - approval and elicitation lifecycles
-- group-context capture and activation
-- origin replies, proactive delivery, and authorization rechecks
+- private-origin replies and authorization rechecks
 
 ACP is the preferred translation target, but ACP request IDs, prompt lifetimes,
 session updates, and stop reasons do not become Hitch domain identifiers or
@@ -28,50 +27,50 @@ policy.
 The accepted design is recorded in
 [`v2-turn-policy-design.md`](./v2-turn-policy-design.md).
 
-### 2. Agent runtime boundary
+### 2. Minimal agent runtime boundary (next)
 
-Derive `AgentDriver` from the accepted Hitch turn contract:
+Derive only the `AgentDriver` operations required by the first vertical slice:
 
-- capability discovery and negotiation
-- structured versus PTY interaction modes
+- capability discovery needed to validate a configured profile
 - runtime start, resume, close, and opaque resume handles
 - turn submission and canonical event streaming
 - approval, elicitation, cancellation, and terminal-result handling
-- ACP v1, Pi RPC, and PTY driver mappings
+- Pi RPC mapping first, with the boundary shaped for later ACP and PTY drivers
 
 The worker supervisor, not an agent driver, owns process launch, sandboxing,
 credential injection, environment construction, and cleanup.
 
-### 3. Execution security and credential boundary
+### 3. Minimal execution security and credential boundary
 
-Define how an immutable `SessionSpec` becomes a revalidated launch plan:
+Define, in executable code, how an immutable `SessionSpec` becomes a
+revalidated launch plan by adapting the existing v1 sandbox and credential
+guard:
 
 - host-resource resolution into sandbox mounts
 - provider/model and extension reauthorization
 - session-scoped broker protocol and credential lifetime
-- credential rotation and revocation
-- compatibility policy for agents that require raw provider credentials
-- extension capability projection
+- credential revocation at every privileged boundary
+- explicit rejection of unsupported raw-credential or extension requirements
 - network behavior and fail-closed sandbox guarantees
 
-### 4. Connector and delivery contract
+### 4. Private connector and delivery slice
 
 Define the connector-neutral ingress and egress records:
 
 - authenticated sender and normalized endpoint identity
-- private, group, channel, thread, mention, reply, and command signals
+- private endpoint and reply signals
 - message IDs, deduplication, edits, deletion, and attachment limits
 - connector capability discovery and response-mode fallback
 - ordered delivery, retries, expiry, and idempotency
 
 All connectors and the CLI must call the same dispatch application service.
 
-### 5. Persistence, recovery, and audit
+### 5. Persistence, recovery, and audit slice
 
 Define:
 
 - repository contracts and transaction boundaries
-- append-only revisions, grants, and policy snapshots
+- runtime codecs for the revisions, grants, and snapshots used by the slice
 - mutable lifecycle records and durable turn events
 - worker leases and crash recovery
 - revocation propagation and retention ownership
@@ -81,20 +80,22 @@ Define:
 The preferred migration direction is separate v2 tables plus an explicit
 importer, leaving the v1 schema intact while v2 stabilizes.
 
-### 6. Application-service boundary
+### 6. Application-service slice
 
-Define the commands used uniformly by CLI, IM, and future API adapters:
+Implement the commands needed for a private turn uniformly across CLI, IM, and
+future API adapters:
 
-- principal enrollment and identity linking
-- role and resource-grant management
-- profile, workspace, policy, and extension publication
-- session creation, forking, binding, archive, and quarantine
-- turn dispatch, interaction response, cancellation, and administrative stop
+- session and configuration loading
+- turn dispatch, interaction response, queued/active cancellation, and
+  administrative stop
 
 ## Intentionally deferred
 
 These do not block the first v2 implementation:
 
+- shared endpoint bindings, group context, and endpoint-participant grants
+- same-position queued-turn replacement and its stable-slot concurrency model
+- configurable stall detection and cancellation grace
 - OIDC and remote CLI login
 - authenticated-but-unenrolled group guests
 - team-owned sessions
@@ -107,7 +108,16 @@ These do not block the first v2 implementation:
 
 ## Implementation threshold
 
-Implementation may begin after the turn/dispatch, agent-runtime, and execution
-security boundaries have accepted contracts. Connector, persistence, and
-application-service design should then proceed as part of the first vertical
-slice rather than as independent implementations.
+Implementation begins with one vertical slice. Agent runtime, launch planning,
+private connector ingress, persistence, and application-service interfaces
+should be introduced only when the slice consumes them. The first slice must
+exercise:
+
+- immutable `SessionSpec` loading and live reauthorization
+- private turn admission, idempotency, bounded FIFO, and cancellation by Turn ID
+- Pi launch through the existing sandbox and credential guard
+- prompt acceptance evidence, safe recovery, and immutable terminal results
+- approval safety and independently authorized delivery
+
+Future-facing contracts move into `v2-deferred-design.md` until implementation
+evidence justifies promoting them into the active model.
