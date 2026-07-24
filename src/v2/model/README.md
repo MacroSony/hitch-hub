@@ -4,6 +4,11 @@ This directory contains compile-only domain interfaces. It is intentionally
 isolated from the operational v1 implementation while the model is reviewed.
 It does not define storage schemas, runtime codecs, migrations, or adapters.
 
+V2 is a clean replacement for v1 storage. The implementation will initialize
+one canonical schema after an explicit destructive cutover; it will not add
+prefixed tables beside v1, import legacy records, or carry compatibility paths
+into the new repositories.
+
 Current decisions:
 
 - A session has one immutable `SessionSpec`.

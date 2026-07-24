@@ -1,6 +1,6 @@
 # Hitch v2 pre-implementation design roadmap
 
-Date: 2026-07-23
+Date: 2026-07-24
 
 This document records the remaining design gates after the initial v2 session,
 identity, authorization, endpoint, and binding model. The goal is to settle the
@@ -75,10 +75,27 @@ Define:
 - worker leases and crash recovery
 - revocation propagation and retention ownership
 - audit envelopes, actor attribution, and content redaction
-- v1-to-v2 migration and rollback boundaries
+- clean-schema initialization and destructive cutover safeguards
 
-The preferred migration direction is separate v2 tables plus an explicit
-importer, leaving the v1 schema intact while v2 stabilizes.
+V2 storage is a replacement, not a migration target:
+
+- the new application owns one canonical schema with normal domain table names,
+  not `v2_*` compatibility tables
+- there is no v1 importer, dual read/write path, compatibility view, or
+  automatic rollback
+- development and vertical-slice tests use isolated disposable data roots
+- production cutover explicitly resets the old Hitch-managed database, runtime
+  state, delivery state, audit data, and agent session state before initializing
+  the new schema
+- startup rejects a legacy or unknown schema and tells the operator to run the
+  explicit reset; it never silently destroys data merely because a new binary
+  was started
+
+The reset operation must resolve and validate the exact configured Hitch data
+root, require an installation marker, and remove only the enumerated
+Hitch-managed artifacts. External workspaces and user-supplied configuration are
+never reset. Operators who want an archive must create it outside Hitch before
+cutover; Hitch itself retains or imports no legacy records.
 
 ### 6. Application-service slice
 
