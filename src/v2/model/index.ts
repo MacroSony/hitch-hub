@@ -1,5 +1,6 @@
 export * from "./endpoint-binding.js";
 export * from "./identity-access.js";
 export * from "./primitives.js";
+export * from "./runtime-security.js";
 export * from "./session.js";
 export * from "./turn.js";

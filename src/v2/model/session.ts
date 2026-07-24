@@ -72,14 +72,15 @@ export interface AgentProfileRevision {
   readonly displayName: string;
   readonly providers: readonly AgentProviderAllowance[];
   readonly defaultModel?: ModelRef;
+  readonly defaultReasoning: TurnReasoningSelection;
   readonly configuration: JsonObject;
   readonly createdAt: IsoTimestamp;
 }
 
 /**
- * Immutable model-selection intent recorded on every Turn. A configured
- * default is resolved before admission; agent-selected is explicit rather
- * than represented by an omitted field.
+ * Immutable model-selection intent recorded on every Turn. A configured model
+ * default is resolved before admission; agent-selected is explicit rather than
+ * represented by an omitted field.
  */
 export type TurnModelSelection =
   | {
@@ -93,8 +94,23 @@ export type TurnModelSelection =
       readonly providerId?: ProviderId;
     };
 
+/**
+ * Portable reasoning intent. `agent-default` is an explicit choice, not an
+ * omitted Turn field. At the provider boundary it means exact omission of a
+ * reasoning override, so an explicit agent/provider override is rejected. A
+ * requested effort must be supported by both the driver and broker adapter;
+ * v2.0 never silently downgrades it.
+ */
+export type TurnReasoningSelection =
+  | { readonly kind: "agent-default" }
+  | {
+      readonly kind: "effort";
+      readonly effort: "none" | "low" | "medium" | "high";
+    };
+
 export interface TurnExecutionOptions {
   readonly model: TurnModelSelection;
+  readonly reasoning: TurnReasoningSelection;
 }
 
 export type WorkspaceAccess = "read-only" | "read-write";

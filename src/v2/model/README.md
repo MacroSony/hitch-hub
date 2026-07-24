@@ -15,9 +15,15 @@ Current decisions:
 - Each `SessionSpec` pins an append-only `TurnPolicySnapshot` separately from its execution policy.
 - Agent profiles, workspaces, policies, and extension grants are append-only revisions or snapshots.
 - Agent profiles allow providers and either all or an explicit list of their models.
+- Agent profiles define an explicit default reasoning intent; admission resolves
+  both model and reasoning defaults before creating a Turn.
 - Every turn records either a resolved allowed provider/model or an explicit
-  agent-selected choice (optionally constrained to one allowed provider).
+  agent-selected choice (optionally constrained to one allowed provider), plus
+  an explicit agent-default or portable reasoning-effort intent.
 - Provider credentials remain broker-owned and are referenced, never copied into a snapshot.
+- Secure runners receive only local, worker/provider-scoped broker capabilities.
+  Hitch-managed provider secrets never enter agent arguments, environment,
+  mounts, configuration, logs, or transcripts.
 - Connector and local-client destinations are modeled as `Endpoint` records.
 - Endpoints connect through mutable, suspendable, and revocable `SessionEndpointBinding` records.
 - V2.0 bindings are private only. Shared endpoints may be recognized by ingress
@@ -25,6 +31,11 @@ Current decisions:
 - Runtime state and display metadata are separate from session configuration.
 - Every launch revalidates the immutable snapshot against current authority; immutability never defeats revocation.
 - Host paths are confined to the trusted workspace catalog and supervisor boundary.
+- Worker leases use a session-monotonic fence; stale workers cannot emit
+  accepted events or use renewed broker authority.
+- Provider calls consume durable per-Turn request/token reservations attributed
+  to the current worker fence. Interaction waits close the broker gate, and all
+  in-flight requests drain or abort before the next Turn dispatches.
 
 Identity and authorization decisions:
 
@@ -76,7 +87,7 @@ Endpoint decisions:
 Turn and dispatch decisions:
 
 - A Turn is an immutable Hitch record with its own ID, origin-scoped idempotency key, requester evidence, exact input
-  snapshot, model choice, and turn-policy snapshot.
+  snapshot, model/reasoning choice, and turn-policy snapshot.
 - At most one turn actively controls an agent session. Accepted pending work remains in a Hitch-owned bounded FIFO; only
   the queue head reaches an agent driver.
 - A successful transport write is not prompt acceptance. Turns remain `submitted-unconfirmed` until an explicit
@@ -84,6 +95,11 @@ Turn and dispatch decisions:
   do not count without a driver guarantee tying them to the exact dispatched Turn.
 - A possibly accepted prompt is never replayed automatically. Exact driver reconciliation may resolve it; otherwise
   worker loss produces an `unknown` result and an explicit retry creates a new turn.
+- Resolved-model Turns are projected explicitly into the agent and enforced by
+  the broker. Agent-selected Turns pin the first accepted provider/model choice
+  as an immutable inference resolution and cannot switch models mid-Turn. Their
+  exposed catalog is filtered to combinations that support the requested
+  reasoning intent.
 - Requesters may cancel their own queued turns by immutable Turn ID.
   Operators/owners may cancel any queued turn. The repository removes it only
   if it remains pending; edit-in-place queue replacement is deferred.
@@ -110,6 +126,13 @@ default models, compatible workspace grants, one provider binding per selected
 provider, private binding to a private Endpoint controlled by the expected
 principal, positive timing values, invitation expiry and single-use claims,
 origin-scoped idempotency, one active turn, atomic FIFO claims and complete
-cancellation transitions, terminal immutability, payload-derived event
-durability, and active-grant reauthorization will be enforced by runtime codecs
-as part of the first vertical slice.
+cancellation transitions, one matching inference resolution per Turn, positive
+finite inference ceilings, reservation/ledger conservation, drain-before-Turn
+handoff, positive worker fencing tokens, terminal immutability, payload-derived
+event durability, launch-time mount identity/destination validation, and
+active-grant reauthorization will be enforced by runtime codecs as part of the
+first vertical slice.
+
+The execution trust boundary, credential leases, broker request rules, sanitized
+agent configuration, and ephemeral supervisor launch authorization are
+specified in `docs/v2-execution-security-design.md`.

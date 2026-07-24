@@ -15,9 +15,11 @@ import type {
   AgentProtocolToolCallId,
   AttachmentId,
   AuthenticationRequestId,
+  CredentialLeaseId,
   EndpointId,
   ExecutionPolicySnapshotId,
   IdentityBindingId,
+  InferenceRequestReservationId,
   IsoTimestamp,
   JsonObject,
   OriginMessageId,
@@ -36,10 +38,15 @@ import type {
   TurnMessageId,
   TurnPolicyId,
   TurnPolicySnapshotId,
+  WorkerLeaseId,
   WorkspaceResourceId,
 } from "./primitives.js";
 import type { AuditActorRef, AuthenticatedPrincipal } from "./identity-access.js";
-import type { TurnExecutionOptions } from "./session.js";
+import type {
+  ModelRef,
+  TurnExecutionOptions,
+  TurnReasoningSelection,
+} from "./session.js";
 
 export type TurnBusyBehavior = "reject" | "bounded-fifo";
 
@@ -83,6 +90,16 @@ export interface TurnOutputPolicy {
 }
 
 /**
+ * Finite broker-enforced ceilings for one Turn. Runtime codecs require positive
+ * safe integers. Installation ceilings may only narrow these values.
+ */
+export interface TurnInferencePolicy {
+  readonly maximumProviderRequests: number;
+  readonly maximumTotalTokens: number;
+  readonly maximumOutputTokensPerRequest: number;
+}
+
+/**
  * Append-only orchestration policy. Installation hard ceilings are revalidated
  * at admission, dispatch, and each privileged runtime boundary and may only
  * narrow this snapshot.
@@ -95,6 +112,7 @@ export interface TurnPolicySnapshot {
   readonly timing: TurnTimingPolicy;
   readonly interaction: TurnInteractionPolicy;
   readonly retry: TurnRetryPolicy;
+  readonly inference: TurnInferencePolicy;
   readonly output: TurnOutputPolicy;
   readonly createdAt: IsoTimestamp;
 }
@@ -162,6 +180,95 @@ export interface Turn {
   readonly execution: TurnExecutionOptions;
   readonly idempotencyKey: TurnIdempotencyKey;
   readonly createdAt: IsoTimestamp;
+}
+
+/**
+ * Immutable actual inference behavior for a Turn. Resolved-model Turns record
+ * it at admission. Agent-selected Turns record it atomically with the first
+ * broker request reservation. Exactly one resolution may exist per Turn.
+ *
+ * `agent-default` means the provider request contains no reasoning override.
+ */
+export interface TurnInferenceResolution {
+  readonly turnId: TurnId;
+  readonly model: ModelRef;
+  readonly reasoning: TurnReasoningSelection;
+  readonly resolvedBy: "hitch" | "agent";
+  readonly resolvedAt: IsoTimestamp;
+}
+
+export interface InferenceTokenUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+}
+
+export type InferenceRequestReservationState =
+  | { readonly status: "authorized" }
+  | {
+      /**
+       * Persisted before network I/O. The upstream may have accepted the
+       * request, so recovery must never release this reservation as unspent.
+       */
+      readonly status: "forwarding";
+      readonly forwardingAt: IsoTimestamp;
+    }
+  | {
+      readonly status: "settled";
+      readonly settledAt: IsoTimestamp;
+      readonly usage: InferenceTokenUsage;
+    }
+  | {
+      /** Usage was unavailable after forwarding; charge the full reservation. */
+      readonly status: "charged-reservation";
+      readonly endedAt: IsoTimestamp;
+      readonly reason:
+        | "usage-unavailable"
+        | "broker-recovery"
+        | "cancelled-after-forward";
+    }
+  | {
+      /** Allowed only when the broker proves no upstream I/O occurred. */
+      readonly status: "released";
+      readonly releasedAt: IsoTimestamp;
+      readonly reason: "not-forwarded";
+    };
+
+/**
+ * Durable attribution and budget reservation for one provider request.
+ * Authorization, the unique inference resolution when needed, and this record
+ * are committed atomically before any upstream I/O.
+ */
+export interface InferenceRequestReservation {
+  readonly id: InferenceRequestReservationId;
+  readonly turnId: TurnId;
+  readonly workerLeaseId: WorkerLeaseId;
+  readonly workerFencingToken: number;
+  readonly credentialLeaseId: CredentialLeaseId;
+  readonly model: ModelRef;
+  readonly reasoning: TurnReasoningSelection;
+  readonly reservedInputTokens: number;
+  readonly reservedOutputTokens: number;
+  readonly reservedTotalTokens: number;
+  readonly authorizedAt: IsoTimestamp;
+  readonly state: InferenceRequestReservationState;
+  readonly updatedAt: IsoTimestamp;
+}
+
+/**
+ * Durable current aggregate updated in the same transaction as reservations.
+ * Held values cover authorized requests not yet settled/released; charged
+ * values are final. The repository rejects an increment that would exceed the
+ * pinned Turn inference policy or a narrower live installation ceiling.
+ */
+export interface TurnInferenceUsageLedger {
+  readonly turnId: TurnId;
+  readonly heldRequests: number;
+  readonly consumedRequests: number;
+  readonly heldTokens: number;
+  readonly chargedTokens: number;
+  readonly inFlightRequests: number;
+  readonly updatedAt: IsoTimestamp;
 }
 
 /**
@@ -647,6 +754,14 @@ export type DurableTurnEventPayload =
       /** Durable evidence retained after the current state advances to running. */
       readonly kind: "prompt-accepted";
       readonly evidence: PromptAcceptanceEvidence;
+    }
+  | {
+      /**
+       * Actual immutable model/reasoning choice. Required for agent-selected
+       * Turns and recorded at admission for already-resolved Turns.
+       */
+      readonly kind: "inference-resolved";
+      readonly resolution: TurnInferenceResolution;
     }
   | {
       readonly kind: "user-message-recorded";

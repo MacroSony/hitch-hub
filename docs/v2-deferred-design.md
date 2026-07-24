@@ -97,8 +97,9 @@ boundary. If different retention backends later need it, the derived classes are
 
 - transient: message chunks and raw progress
 - checkpoint: current plan, active sanitized tool status, and incremental usage
-- durable: state transitions, acceptance evidence, finalized messages and tool
-  status, interactions, final usage, and terminal results
+- durable: state transitions, acceptance evidence, immutable inference
+  resolution, finalized messages and tool status, interactions, final usage,
+  and terminal results
 
 The classification must remain exhaustive and caller-independent. A future
 storage API may expose separate typed write methods, but an adapter or driver

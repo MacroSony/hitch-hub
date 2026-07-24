@@ -26,9 +26,12 @@ export type TurnMessageId = Id<"TurnMessage">;
 export type TurnInteractionId = Id<"TurnInteraction">;
 export type TurnInteractionOptionId = Id<"TurnInteractionOption">;
 export type TurnInteractionResponseId = Id<"TurnInteractionResponse">;
+export type InferenceRequestReservationId =
+  Id<"InferenceRequestReservation">;
 export type ToolInvocationId = Id<"ToolInvocation">;
 export type AttachmentId = Id<"Attachment">;
 export type WorkerLeaseId = Id<"WorkerLease">;
+export type CredentialLeaseId = Id<"CredentialLease">;
 export type AgentResumeHandleId = Id<"AgentResumeHandle">;
 
 export type AgentDriverId = Id<"AgentDriver">;
@@ -65,6 +68,9 @@ export type AgentProtocolInteractionOptionId =
   BrandedString<"AgentProtocolInteractionOptionId">;
 export type AgentProtocolPermissionOptionKind =
   BrandedString<"AgentProtocolPermissionOptionKind">;
+export type ProviderApiProtocolId = BrandedString<"ProviderApiProtocolId">;
+export type BrokerEndpoint = BrandedString<"BrokerEndpoint">;
+export type BrokerCapabilityToken = BrandedString<"BrokerCapabilityToken">;
 export type CanonicalHostPath = BrandedString<"CanonicalHostPath">;
 export type SandboxPath = BrandedString<"SandboxPath">;
 

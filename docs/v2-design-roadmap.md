@@ -13,7 +13,8 @@ fully specify every future product feature before implementation begins.
 
 Define the Hitch-native unit of work independently of any agent protocol:
 
-- immutable turn request, actor, origin, content, attachments, and model choice
+- immutable turn request, actor, origin, content, attachments, and inference
+  choice
 - admission, queueing, concurrency, idempotency, and duplicate delivery
 - running, waiting, cancellation, timeout, completion, and failure transitions
 - canonical agent events with storage-derived durability
@@ -27,7 +28,23 @@ policy.
 The accepted design is recorded in
 [`v2-turn-policy-design.md`](./v2-turn-policy-design.md).
 
-### 2. Minimal agent runtime boundary (next)
+### 2. Execution security and credential boundary (MVP contract modeled)
+
+Define how an immutable `SessionSpec` becomes a revalidated launch plan:
+
+- host-resource resolution into sandbox mounts
+- provider/model and extension reauthorization
+- session-scoped broker protocol and credential lifetime
+- per-Turn request/token reservation and drain-before-handoff behavior
+- credential revocation at every privileged boundary
+- launch-time mount identity, destination-shadowing, and network-mode checks
+- explicit rejection of unsupported raw-credential or extension requirements
+- network behavior and fail-closed sandbox guarantees
+
+The accepted design is recorded in
+[`v2-execution-security-design.md`](./v2-execution-security-design.md).
+
+### 3. Minimal agent runtime boundary (next)
 
 Derive only the `AgentDriver` operations required by the first vertical slice:
 
@@ -38,20 +55,8 @@ Derive only the `AgentDriver` operations required by the first vertical slice:
 - Pi RPC mapping first, with the boundary shaped for later ACP and PTY drivers
 
 The worker supervisor, not an agent driver, owns process launch, sandboxing,
-credential injection, environment construction, and cleanup.
-
-### 3. Minimal execution security and credential boundary
-
-Define, in executable code, how an immutable `SessionSpec` becomes a
-revalidated launch plan by adapting the existing v1 sandbox and credential
-guard:
-
-- host-resource resolution into sandbox mounts
-- provider/model and extension reauthorization
-- session-scoped broker protocol and credential lifetime
-- credential revocation at every privileged boundary
-- explicit rejection of unsupported raw-credential or extension requirements
-- network behavior and fail-closed sandbox guarantees
+broker-capability injection, environment construction, lease fencing, and
+cleanup.
 
 ### 4. Private connector and delivery slice
 
@@ -132,7 +137,9 @@ exercise:
 
 - immutable `SessionSpec` loading and live reauthorization
 - private turn admission, idempotency, bounded FIFO, and cancellation by Turn ID
-- Pi launch through the existing sandbox and credential guard
+- Pi launch through the clean v2 sandbox boundary in `host-network` mode,
+  ported model-tool confinement, and one fixed-origin secure provider-broker
+  adapter
 - prompt acceptance evidence, safe recovery, and immutable terminal results
 - approval safety and independently authorized delivery
 

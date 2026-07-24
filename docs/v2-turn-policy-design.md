@@ -32,6 +32,8 @@ These are not configurable:
 - Authorization is checked at admission and again before queued work starts.
 - Required authority and live installation ceilings are rechecked at every
   privileged boundary while work is active.
+- Every provider request consumes a durable, finite per-Turn request/token
+  reservation before upstream I/O.
 - Terminal results never change.
 - Turn completion and connector delivery are separate state machines.
 - A prompt that may have reached an agent is never replayed automatically.
@@ -46,6 +48,7 @@ The append-only `TurnPolicySnapshot` configures:
 - a v1-style dynamic active-work deadline and interaction timing
 - approval and structured-input handling
 - retry attempts that are provably before agent acceptance
+- finite provider-request, total-token, and per-request output-token ceilings
 - progress delivery and sanitized checkpoint behavior
 
 Initial defaults:
@@ -54,6 +57,7 @@ Initial defaults:
 - bounded FIFO with at most three private pending turns
 - no automatic cancellation of active work on a new message
 - no replay after possible agent acceptance
+- finite request/token budgets, narrowed by live installation ceilings
 - approval timeout means denial
 - finalized messages and terminal facts are durable
 - raw reasoning and raw tool input/output are never durable
@@ -192,6 +196,10 @@ recover. Stall detection and the supervisor's bounded cancellation/cleanup grace
 are operational safeguards rather than session-policy knobs in the first slice.
 Agent and tool stalls still produce explicit, auditable timeout reasons.
 
+The provider broker admits no new inference request while active-work
+accounting is paused for approval or input. Its gate reopens only when the same
+Turn returns to `running`.
+
 ## Approval and input
 
 Agent permission requests are interaction events, not authorization decisions:
@@ -265,6 +273,14 @@ The driver receives cancellation and may emit bounded final events during a
 supervisor-defined grace period; the supervisor forcibly terminates the worker
 when the grace expires.
 
+Each provider request has a durable reservation attributed to its Turn,
+CredentialLease, WorkerLease, and fencing token. The reservation transaction is
+the request's authorization point. A reservation is released only when no
+upstream I/O occurred; otherwise final provider usage is charged, or the full
+reservation is charged when usage is unavailable. Before the queue can dispatch
+the next Turn, all old-Turn requests are settled/released/charged and in-flight
+streams are aborted or drained.
+
 Delivery always performs its own current authorization and binding checks,
 including after a Turn has completed. A revoked/suspended binding or lost
 recipient authority suppresses delivery and records a delivery failure without
@@ -275,13 +291,14 @@ changing the terminal Turn result.
 Canonical turn events include:
 
 - state transitions
+- immutable inference resolution
 - user-message recording
 - agent message chunks and finalized messages
 - transient progress
 - plan snapshots
 - sanitized tool invocation status
 - interaction request and resolution
-- usage/cost observations
+- provider request/token reservations and usage/cost observations
 - terminal result
 
 Hitch assigns every event ID and sequence after validation. Optional protocol
@@ -292,9 +309,13 @@ persistence boundary exhaustively derives storage handling from payload kind:
 
 - message/progress chunks are transient and cannot be marked durable
 - plans, active sanitized tool status, and incremental usage are checkpoints
-- finalized messages/tool status/usage, complete interaction requests and
-  resolutions, terminal results, and state transitions are durable and cannot
-  be marked transient
+- inference resolution, finalized messages/tool status/usage, complete
+  interaction requests and resolutions, terminal results, and state transitions
+  are durable and cannot be marked transient
+
+Inference reservations and their aggregate ledger are durable records rather
+than driver-selected event payloads. Their repository transaction also appends
+the inference-resolution event for the first agent-selected request.
 
 Turn completion does not depend on outbound delivery. Delivery rechecks the
 origin binding and current authority, follows its response policy, and records
