@@ -2,8 +2,8 @@
 
 Date: 2026-07-25
 
-Status: accepted architecture; the Pi native-transport feasibility spike is the
-implementation gate.
+Status: accepted architecture; the Pi native-transport feasibility gate is
+satisfied and implementation may begin.
 
 ## Decisions
 
@@ -372,6 +372,35 @@ DeepSeek to exercise Pi's OpenAI-completions transport and `openai-codex` to
 exercise Pi's distinct Codex Responses/OAuth transport. Saved credential
 contents are never printed or copied into fixtures. Kimi Coding and OpenCode Go
 are follow-on compatibility cases after the two-protocol seam is proven.
+
+### Spike result
+
+Satisfied on 2026-07-25 by
+[`spikes/pi-native-sidecar`](../spikes/pi-native-sidecar/README.md):
+
+- A version- and digest-pinned Pi 0.82.0 `ModelRuntime` accepted an injected
+  credential store and an offline model catalog.
+- Saved DeepSeek API-key and OpenAI Codex OAuth entries both completed real
+  requests through Pi's native transports. A later Codex rerun reached the same
+  authenticated transport but was rejected by the account's external usage
+  quota; the native error remained representable across the bridge.
+- The versioned JSONL/Unix-socket bridge preserves streaming text, reasoning,
+  tool calls, image-bearing context, usage, errors, cancellation, and serialized
+  OAuth refresh.
+- The Pi worker runs in a Bubblewrap network namespace without the real auth
+  store or provider-secret environment variables. Only the trusted sidecar
+  reads Pi's credential store and performs provider egress.
+- Negative fixtures deny wrong capabilities, Turn/connection/catalog/model
+  mismatches, native-stack mismatches, origin/retry overrides, request-ID
+  replays, and same-request semantic replays.
+- The sidecar forces `maxRetries: 0` and SSE before entering either pinned
+  native transport. Semantic replay denial prevents an agent-level retry from
+  forwarding the same structured inference request a second time.
+
+The spike proves the library seam and fixes the first implementation fixture;
+it is not production broker code. Durable forwarding reservations, restart-safe
+replay state, typed application integration, and production-strength egress
+containment remain implementation work under the already accepted contracts.
 
 ## What can wait
 

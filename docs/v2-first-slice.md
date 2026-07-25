@@ -461,5 +461,11 @@ implementation begins, the focused Pi `ModelRuntime` sidecar spike must satisfy
 that document's feasibility gate. A successful spike becomes the implementation
 fixture and fixes the exact first connection/model configuration.
 
+The gate was satisfied on 2026-07-25 by
+[`spikes/pi-native-sidecar`](../spikes/pi-native-sidecar/README.md). The first
+implementation fixture is Pi 0.82.0 with the native-library sidecar; deterministic
+tests pin the bridge behavior, while real DeepSeek and OpenAI Codex calls prove
+the two initial native transport/auth paths.
+
 Any proposed capability not required by an acceptance scenario stays outside
 the executable model or in `v2-deferred-design.md`.

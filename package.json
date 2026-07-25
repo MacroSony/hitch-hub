@@ -29,6 +29,8 @@
     "smoke:sandbox-launcher": "node --use-env-proxy --import tsx src/smoke/sandbox-launcher.ts",
     "smoke:worker-environment": "node --use-env-proxy --import tsx src/smoke/worker-environment.ts",
     "smoke:credential-guard": "node --use-env-proxy --import tsx src/smoke/credential-guard.ts",
+    "spike:pi-native-sidecar": "node --use-env-proxy spikes/pi-native-sidecar/run-spike.mjs",
+    "spike:pi-native-sidecar:real": "node --use-env-proxy spikes/pi-native-sidecar/run-spike.mjs --real",
     "smoke:telegram-getme": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",
     "smoke:telegram-updates": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getUpdates",
     "typecheck": "tsc --noEmit && tsc --noEmit -p packages/session-mcp/tsconfig.json",
