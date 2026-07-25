@@ -39,6 +39,7 @@ declare const preparedProviderInferenceRequestBrand: unique symbol;
 declare const providerReservationAuthorizationBrand: unique symbol;
 declare const providerForwardAuthorizationBrand: unique symbol;
 declare const boundProviderInvocationBrand: unique symbol;
+declare const sendStartedProviderInvocationBrand: unique symbol;
 
 /**
  * How one agent/provider connection performs inference. Only `agent-native`
@@ -344,6 +345,20 @@ export interface BoundProviderInvocation {
   readonly forwarding: ProviderForwardAuthorization;
 }
 
+/**
+ * Exact invocation evidence minted only after the application persistence
+ * boundary atomically changes the matching forwarding attempt from
+ * `ready-for-one-send` to `send-started`. Transport bridges never receive the
+ * reusable ready-state aggregate above.
+ */
+export interface SendStartedProviderInvocation {
+  readonly [sendStartedProviderInvocationBrand]: true;
+  readonly connection: BrokeredProviderConnectionSpec;
+  readonly request: ValidatedInferenceRequest;
+  readonly forwarding: ProviderForwardAuthorization;
+  readonly startedAt: IsoTimestamp;
+}
+
 export type ProviderReservationAuthorizationResult =
   | {
       readonly authorized: true;
@@ -424,6 +439,20 @@ export type BrokeredInferenceStream =
       cancel(reason: string): Promise<void>;
     };
 
+export type BrokeredInferenceInvocationResult =
+  | {
+      readonly status: "started";
+      readonly stream: BrokeredInferenceStream;
+    }
+  | {
+      /**
+       * The bridge has already consumed this forwarding-attempt ID in this
+       * runtime. It performs no credential resolution or upstream I/O.
+       */
+      readonly status: "duplicate-rejected";
+      readonly forwardingAttemptId: InferenceForwardingAttemptId;
+    };
+
 /**
  * One reviewed, version-pinned bridge implementation. A Pi bridge delegates to
  * Pi's own ModelRuntime/provider stack; a wire bridge reuses the agent's
@@ -441,16 +470,18 @@ export interface BrokeredInferenceTransportBridge {
     authorization: ProviderRequestAuthorizationContext,
   ): ProviderRequestValidationResult;
   /**
-   * Accepts only the trusted aggregate bound before the forwarding transition.
-   * Atomically compare-and-swaps its exact forwarding attempt from
-   * `ready-for-one-send` to `send-started`, then resolves the connection's
-   * credential through its trusted resolver and starts at most one native
-   * invocation. A failed compare-and-swap performs no upstream I/O. Raw
-   * authentication material never crosses this interface.
+   * Accepts only evidence that the exact forwarding attempt has already made
+   * the durable `ready-for-one-send` to `send-started` transition. The bridge
+   * resolves the connection's credential through its trusted resolver and
+   * performs that attempt's one native invocation. It does not own or repeat
+   * the persistence transition. Within a bridge runtime it remembers consumed
+   * forwarding-attempt IDs and returns `duplicate-rejected`, with no credential
+   * resolution or upstream I/O, for every replay. Raw authentication material
+   * never crosses this interface.
    */
   invoke(
-    invocation: BoundProviderInvocation,
-  ): Promise<BrokeredInferenceStream>;
+    invocation: SendStartedProviderInvocation,
+  ): Promise<BrokeredInferenceInvocationResult>;
 }
 
 /**

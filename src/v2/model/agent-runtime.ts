@@ -20,6 +20,9 @@ import type {
   JsonObject,
   SandboxPath,
   TurnId,
+  TurnInteractionId,
+  TurnInteractionResponseId,
+  WorkerLeaseId,
 } from "./primitives.js";
 import type { InferenceExecutionMode } from "./provider-broker.js";
 import type {
@@ -40,6 +43,8 @@ import type {
 } from "./turn.js";
 
 declare const armedProtocolSubmissionBrand: unique symbol;
+declare const agentInteractionResponseAuthorizationBrand: unique symbol;
+declare const sendStartedAgentInteractionResponseBrand: unique symbol;
 
 export interface AgentDriverCapabilities {
   readonly protocol: "pi-rpc" | "acp" | "other";
@@ -340,6 +345,54 @@ export type AgentInteractionResponse =
       readonly protocolInteractionId: AgentProtocolInteractionId;
     };
 
+/**
+ * Durable ready-state authorization for one exact interaction response. It is
+ * sealed by the application after resolution and is not accepted by a driver.
+ */
+export interface AgentInteractionResponseAuthorization {
+  readonly [agentInteractionResponseAuthorizationBrand]: true;
+  readonly responseDispatchId: TurnInteractionResponseId;
+  readonly interactionId: TurnInteractionId;
+  readonly turnId: TurnId;
+  readonly attemptId: AgentDispatchAttemptId;
+  readonly workerLeaseId: WorkerLeaseId;
+  readonly workerFencingToken: number;
+  readonly disposition: "resume-running" | "continue-cancelling";
+  readonly response: AgentInteractionResponse;
+}
+
+/** Driver-facing evidence minted only after the durable send-started CAS. */
+export interface SendStartedAgentInteractionResponse {
+  readonly [sendStartedAgentInteractionResponseBrand]: true;
+  readonly responseDispatchId: TurnInteractionResponseId;
+  readonly interactionId: TurnInteractionId;
+  readonly turnId: TurnId;
+  readonly attemptId: AgentDispatchAttemptId;
+  readonly workerLeaseId: WorkerLeaseId;
+  readonly workerFencingToken: number;
+  readonly disposition: "resume-running" | "continue-cancelling";
+  readonly response: AgentInteractionResponse;
+  readonly startedAt: IsoTimestamp;
+}
+
+/**
+ * Conservative result of the one driver call. Unknown is terminal for this
+ * dispatch and must never be replayed heuristically.
+ */
+export type AgentInteractionResponseDeliveryOutcome =
+  | { readonly kind: "delivered" }
+  | {
+      readonly kind: "outcome-unknown";
+      readonly reason: "driver-disconnected" | "worker-lost";
+    };
+
+export type AgentInteractionResponseInvocationResult =
+  | AgentInteractionResponseDeliveryOutcome
+  | {
+      readonly kind: "duplicate-rejected";
+      readonly responseDispatchId: TurnInteractionResponseId;
+    };
+
 export type AgentTurnReconciliation =
   | {
       readonly kind: "definitely-not-submitted";
@@ -376,7 +429,13 @@ export interface AgentTurnRun {
   ): Promise<ProtocolPromptSubmissionOutcome>;
   awaitPromptAcceptance(): Promise<AgentPromptAcceptanceOutcome>;
   events(): AsyncIterable<AgentDriverTurnEvent>;
-  respondToInteraction(response: AgentInteractionResponse): Promise<void>;
+  /**
+   * A driver runtime consumes each response-dispatch ID once. Every replay is
+   * rejected before protocol I/O, even when the sealed object is reused.
+   */
+  respondToInteraction(
+    response: SendStartedAgentInteractionResponse,
+  ): Promise<AgentInteractionResponseInvocationResult>;
   cancel(reason: string): Promise<void>;
   reconcile(): Promise<AgentTurnReconciliation>;
 }

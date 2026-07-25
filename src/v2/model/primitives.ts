@@ -67,6 +67,9 @@ export type ExtensionGrantSnapshotId = Id<"ExtensionGrantSnapshot">;
 export type ExtensionCapabilityId = Id<"ExtensionCapability">;
 
 export type IsoTimestamp = BrandedString<"IsoTimestamp">;
+/** Installation-scoped, normalized immutable configuration lookup key. */
+export type ConfigurationReference =
+  BrandedString<"ConfigurationReference">;
 export type AuthenticationSubjectId = BrandedString<"AuthenticationSubjectId">;
 export type ExternalEndpointId = BrandedString<"ExternalEndpointId">;
 export type LocalEndpointId = BrandedString<"LocalEndpointId">;

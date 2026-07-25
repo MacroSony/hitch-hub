@@ -28,6 +28,7 @@ import type {
   SessionSpecId,
   TurnId,
   TurnInteractionId,
+  TurnInteractionResponseId,
   TurnMessageId,
   TurnResponseDeliveryAttemptId,
   TurnResponseDeliveryId,
@@ -266,6 +267,39 @@ export interface TurnResponseDelivery {
   readonly updatedAt: IsoTimestamp;
 }
 
+export type TurnInteractionResponseDispatchState =
+  | { readonly status: "ready" }
+  | {
+      readonly status: "send-started";
+      readonly startedAt: IsoTimestamp;
+    }
+  | {
+      readonly status: "delivered";
+      readonly deliveredAt: IsoTimestamp;
+    }
+  | {
+      readonly status: "outcome-unknown";
+      readonly observedAt: IsoTimestamp;
+      readonly reason: "driver-disconnected" | "worker-lost";
+    };
+
+/**
+ * Durable exact-once dispatch state for a resolved interaction response. The
+ * normalized driver response itself is carried only by sealed runtime
+ * authorization; this record retains correlation and conservative outcome.
+ */
+export interface TurnInteractionResponseDispatch {
+  readonly id: TurnInteractionResponseId;
+  readonly interactionId: TurnInteractionId;
+  readonly turnId: TurnId;
+  readonly attemptId: AgentDispatchAttemptId;
+  readonly workerLeaseId: WorkerLeaseId;
+  readonly workerFencingToken: number;
+  readonly state: TurnInteractionResponseDispatchState;
+  readonly createdAt: IsoTimestamp;
+  readonly updatedAt: IsoTimestamp;
+}
+
 /**
  * Closed audit correlations. Every action carries exactly the domain IDs
  * required to interpret it; there is no generic optional correlation bag.
@@ -291,6 +325,17 @@ export type AuditEvent =
       readonly endpointBindingId: SessionEndpointBindingId;
     }
   | {
+      readonly action: "session-creation-denied";
+    }
+  | {
+      readonly action: "session-runtime-stop-recorded";
+      readonly sessionId: SessionId;
+    }
+  | {
+      readonly action: "session-lifecycle-state-changed";
+      readonly sessionId: SessionId;
+    }
+  | {
       readonly action: "attachment-admitted";
       readonly attachmentId: AttachmentId;
       readonly authenticationRequestId: AuthenticationRequestId;
@@ -302,6 +347,11 @@ export type AuditEvent =
     }
   | {
       readonly action: "turn-state-transitioned";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+    }
+  | {
+      readonly action: "turn-queue-handoff-recorded";
       readonly sessionId: SessionId;
       readonly turnId: TurnId;
     }
@@ -337,6 +387,13 @@ export type AuditEvent =
       readonly interactionId: TurnInteractionId;
     }
   | {
+      readonly action: "interaction-response-dispatch-recorded";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+      readonly interactionId: TurnInteractionId;
+      readonly interactionResponseId: TurnInteractionResponseId;
+    }
+  | {
       readonly action: "worker-lease-state-changed";
       readonly sessionId: SessionId;
       readonly workerLeaseId: WorkerLeaseId;
@@ -363,6 +420,13 @@ export type AuditEvent =
       readonly reservationId: InferenceRequestReservationId;
     }
   | {
+      readonly action: "inference-reservation-denied";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+      readonly workerLeaseId: WorkerLeaseId;
+      readonly credentialLeaseId: CredentialLeaseId;
+    }
+  | {
       readonly action: "inference-forwarding-recorded";
       readonly sessionId: SessionId;
       readonly turnId: TurnId;
@@ -370,6 +434,14 @@ export type AuditEvent =
       readonly credentialLeaseId: CredentialLeaseId;
       readonly reservationId: InferenceRequestReservationId;
       readonly forwardingAttemptId: InferenceForwardingAttemptId;
+    }
+  | {
+      readonly action: "inference-forwarding-denied";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+      readonly workerLeaseId: WorkerLeaseId;
+      readonly credentialLeaseId: CredentialLeaseId;
+      readonly reservationId: InferenceRequestReservationId;
     }
   | {
       readonly action: "inference-send-started";
@@ -425,6 +497,14 @@ export type AuditEvent =
       readonly reservationId: InferenceRequestReservationId;
     }
   | {
+      readonly action: "inference-release-denied";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+      readonly workerLeaseId: WorkerLeaseId;
+      readonly credentialLeaseId: CredentialLeaseId;
+      readonly reservationId: InferenceRequestReservationId;
+    }
+  | {
       readonly action: "turn-terminalized";
       readonly sessionId: SessionId;
       readonly turnId: TurnId;
@@ -441,6 +521,12 @@ export type AuditEvent =
       readonly turnId: TurnId;
       readonly deliveryId: TurnResponseDeliveryId;
       readonly deliveryAttemptId: TurnResponseDeliveryAttemptId;
+    }
+  | {
+      readonly action: "response-delivery-expired";
+      readonly sessionId: SessionId;
+      readonly turnId: TurnId;
+      readonly deliveryId: TurnResponseDeliveryId;
     };
 
 export type AuditAction = AuditEvent["action"];

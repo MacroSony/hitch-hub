@@ -6,6 +6,7 @@ import type {
   HitchV2ServiceSchemaIdentity,
   InferenceForwardingAttempt,
   PrivateBlobReference,
+  TurnInteractionResponseDispatch,
   TurnRecoveryRecord,
   TurnResponseDelivery,
   TurnResponseDeliveryState,
@@ -18,6 +19,7 @@ import type {
   PreparedProviderInferenceRequest,
   ProviderRequestAuthorizationContext,
   ProviderReservationAuthorization,
+  SendStartedProviderInvocation,
 } from "./provider-broker.js";
 import type { InferenceRequestReservationState } from "./turn.js";
 
@@ -36,6 +38,15 @@ type _AttachmentHasNoHostSource = Assert<
     HasAnyKey<
       Attachment,
       "canonicalHostPath" | "hostPath" | "sourcePath" | "sourceFilename"
+    >,
+    false
+  >
+>;
+type _InteractionResponseDispatchHasNoRawResponse = Assert<
+  Equal<
+    HasAnyKey<
+      TurnInteractionResponseDispatch,
+      "response" | "text" | "protocolInteractionId"
     >,
     false
   >
@@ -248,10 +259,16 @@ type _StartedStateRequiresStartTime = Assert<
   Equal<HasKey<StartedSend, "startedAt">, true>
 >;
 
-type _BridgeAcceptsOnlyBoundInvocation = Assert<
+type _BridgeAcceptsOnlySendStartedInvocation = Assert<
   Equal<
     Parameters<BrokeredInferenceTransportBridge["invoke"]>,
-    [invocation: BoundProviderInvocation]
+    [invocation: SendStartedProviderInvocation]
+  >
+>;
+type _ReadyInvocationCannotBypassSendStartedCas = Assert<
+  Equal<
+    BoundProviderInvocation extends SendStartedProviderInvocation ? true : false,
+    false
   >
 >;
 type _ForwardingBoundaryBindsRequestAndReservation = Assert<

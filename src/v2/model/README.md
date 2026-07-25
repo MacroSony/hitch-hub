@@ -39,6 +39,34 @@ Current decisions:
   trusted sidecar. Native wire gateways and Hitch-authored codecs are later
   transport modes, not one adapter per upstream.
 - Connector and local-client destinations are modeled as `Endpoint` records.
+- Connector commands carry caller intent only. Trusted local authentication
+  constructs the application context; callers cannot supply a principal,
+  endpoint binding, Turn origin, SessionSpec, or authorization result.
+- Application persistence exposes named semantic atomic units of work rather
+  than CRUD or a generic transaction callback. Each method owns and completes
+  its transaction before returning, so process, driver, sidecar, attachment,
+  and delivery I/O remains outside SQLite.
+- Write units accept sealed request/service contexts and repeat live authority
+  checks in the same transaction. Advisory authorization decisions are never
+  reusable write authority.
+- Attachment commands carry a connector-minted bounded intake handle, never a
+  host path, caller-selected durable ID, or unbounded in-memory byte array.
+- Ready provider invocations and interaction responses must cross a separate
+  durable send-started compare-and-swap before their external bridge/driver
+  accepts them. The external boundary rejects replayed dispatch IDs, and
+  restart recovery closes an interrupted interaction response as
+  outcome-unknown instead of guessing or resending it.
+- Delivery transports report only delivered/failed observations. Persistence
+  derives attempt timestamps, retry schedules, exhaustion, expiry, and
+  authorization suppression from trusted state.
+- Stable configuration references are normalized immutable installation keys;
+  display names are never lookup authority. `session stop` drains/cancels the
+  current workload but does not archive the reusable Session.
+- A prompt's Session ID-or-owner-scoped-name selector is resolved and
+  reauthorized inside the same Turn-admission transaction as idempotency and
+  queue insertion.
+- Startup recovery closes a delivery attempt left in progress by a crash and
+  derives retry, exhaustion, or expiry without inventing a transport outcome.
 - Endpoints connect through mutable, suspendable, and revocable `SessionEndpointBinding` records.
 - V2.0 bindings are private only. Shared endpoints may be recognized by ingress
   but cannot be bound until their authority and lifecycle model is implemented.
