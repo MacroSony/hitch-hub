@@ -30,10 +30,16 @@ export type InferenceRequestReservationId =
   Id<"InferenceRequestReservation">;
 export type ToolInvocationId = Id<"ToolInvocation">;
 export type AttachmentId = Id<"Attachment">;
+export type PrivateBlobId = Id<"PrivateBlob">;
 export type WorkerLeaseId = Id<"WorkerLease">;
 export type CredentialLeaseId = Id<"CredentialLease">;
 export type AgentResumeHandleId = Id<"AgentResumeHandle">;
 export type AgentDispatchAttemptId = Id<"AgentDispatchAttempt">;
+export type TurnTerminalResponseId = Id<"TurnTerminalResponse">;
+export type TurnResponseDeliveryId = Id<"TurnResponseDelivery">;
+export type TurnResponseDeliveryAttemptId = Id<"TurnResponseDeliveryAttempt">;
+export type AuditEnvelopeId = Id<"AuditEnvelope">;
+export type InferenceForwardingAttemptId = Id<"InferenceForwardingAttempt">;
 
 export type AgentDriverId = Id<"AgentDriver">;
 export type AgentDriverLaunchProfileId = Id<"AgentDriverLaunchProfile">;
@@ -83,6 +89,9 @@ export type ProviderCredentialResolverId =
   BrandedString<"ProviderCredentialResolverId">;
 export type ProviderTokenEstimatorId = BrandedString<"ProviderTokenEstimatorId">;
 export type IntegrityDigest = BrandedString<"IntegrityDigest">;
+/** Digest of a canonical, secret-free normalized inference request envelope. */
+export type InferenceRequestFingerprint =
+  BrandedString<"InferenceRequestFingerprint">;
 export type TrustedUpstreamOrigin = BrandedString<"TrustedUpstreamOrigin">;
 export type Base64Payload = BrandedString<"Base64Payload">;
 export type BrokerEndpoint = BrandedString<"BrokerEndpoint">;

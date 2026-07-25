@@ -21,11 +21,14 @@ import type {
   EndpointId,
   ExecutionPolicySnapshotId,
   IdentityBindingId,
+  InferenceForwardingAttemptId,
+  InferenceRequestFingerprint,
   InferenceRequestReservationId,
   IsoTimestamp,
   JsonObject,
   OriginMessageId,
   PrincipalId,
+  ProviderConnectionId,
   SandboxPath,
   SessionEndpointBindingId,
   SessionId,
@@ -215,16 +218,19 @@ export type InferenceRequestReservationState =
        * request, so recovery must never release this reservation as unspent.
        */
       readonly status: "forwarding";
+      readonly forwardingAttemptId: InferenceForwardingAttemptId;
       readonly forwardingAt: IsoTimestamp;
     }
   | {
       readonly status: "settled";
+      readonly forwardingAttemptId: InferenceForwardingAttemptId;
       readonly settledAt: IsoTimestamp;
       readonly usage: InferenceTokenUsage;
     }
   | {
       /** Usage was unavailable after forwarding; charge the full reservation. */
       readonly status: "charged-reservation";
+      readonly forwardingAttemptId: InferenceForwardingAttemptId;
       readonly endedAt: IsoTimestamp;
       readonly reason:
         | "usage-unavailable"
@@ -249,8 +255,15 @@ export interface InferenceRequestReservation {
   readonly workerLeaseId: WorkerLeaseId;
   readonly workerFencingToken: number;
   readonly credentialLeaseId: CredentialLeaseId;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly model: ModelRef;
   readonly reasoning: TurnReasoningSelection;
+  /**
+   * Canonical, secret-free request identity. It is unique with the selected
+   * connection for this Turn across restarts, so a semantic replay cannot gain
+   * a second reservation or forwarding transition.
+   */
+  readonly requestFingerprint: InferenceRequestFingerprint;
   readonly reservedInputTokens: number;
   readonly reservedOutputTokens: number;
   readonly reservedTotalTokens: number;

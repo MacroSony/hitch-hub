@@ -29,10 +29,22 @@ import type {
 
 export type PrincipalKind = "human" | "service";
 
+export type AuditSystemComponent =
+  | "application"
+  | "authorization"
+  | "bootstrap"
+  | "broker"
+  | "delivery"
+  | "local-connector"
+  | "recovery"
+  | "sidecar"
+  | "supervisor"
+  | "turn-coordinator";
+
 export type AuditActorRef =
   | { readonly kind: "bootstrap" }
   | { readonly kind: "principal"; readonly principalId: PrincipalId }
-  | { readonly kind: "system"; readonly component: string };
+  | { readonly kind: "system"; readonly component: AuditSystemComponent };
 
 export type PrincipalState =
   | { readonly status: "active" }

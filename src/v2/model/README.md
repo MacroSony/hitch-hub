@@ -50,9 +50,24 @@ Current decisions:
 - Provider calls consume durable per-Turn request/token reservations attributed
   to the current worker fence. Interaction waits close the broker gate, and all
   in-flight requests drain or abort before the next Turn dispatches.
-- Native provider invocation or upstream credential injection requires opaque
-  authorization proving the exact request fingerprint's reservation is durably
-  `forwarding`.
+- Native provider invocation or upstream credential injection accepts only one
+  opaque aggregate binding the exact registered connection, validated request,
+  and reservation/forwarding attempt. Mismatched identities fail before the
+  one-send compare-and-swap or any upstream I/O.
+- Request validation also binds the normalized request identity and its token
+  estimate into one trusted aggregate before reservation, preventing a caller
+  from pairing a request with another request's cheaper estimate.
+- The installation carries the exact Hitch v2 service/schema identity
+  (`schemaVersion = 1`, SQLite application ID `HIT2`) and live hard ceilings.
+  Opening a legacy, unknown, partial, older, or newer root is a rejection,
+  never a compatibility migration or reset.
+- Installation ceilings may only narrow pinned Turn policy and resource limits;
+  they include before-acceptance retry, memory, process, temporary-storage, and
+  agent-output limits and are rechecked at admission, dispatch, launch, and
+  broker boundaries.
+- First-slice attachments are immutable private image copies. Their records
+  retain MIME, byte length, digest, and opaque Hitch-owned blob reference, but
+  never the caller's source path.
 
 Identity and authorization decisions:
 
@@ -61,6 +76,9 @@ Identity and authorization decisions:
 - Connector and local-peer subjects resolve through revocable `IdentityBinding` records. An identity binding maps to
   exactly one principal and is revoked/replaced rather than reassigned in place.
 - Authentication evidence is request-specific, carries an assurance level, and is produced only by trusted adapters.
+- Authentication-request retention contains only trusted, non-reusable adapter
+  evidence and the decision correlation; raw peer credentials and socket paths
+  are not durable domain data.
 - The first private local peer bootstraps the initial administrator. Later local CLI callers resolve through their
   operating-system peer identity and receive only their principal's actual grants.
 - Normal enrollment is administrator-created or uses a short-lived proof-of-possession invitation. Unknown connector
@@ -148,6 +166,17 @@ Turn and dispatch decisions:
   chunks remain transient, while finalized messages, interaction decisions,
   terminal results, and state transitions are durable.
 - Turn completion and outbound delivery are separate state machines; delivery failure never rewrites a completed result.
+- The terminal response projection is immutable and remains queryable after a
+  disconnect. Each response delivery has a separately durable lifecycle and
+  reauthorizes its private endpoint binding and recipient at send time.
+- Operational audit records use a closed action-discriminated envelope; each
+  action requires its exact ID correlations. They never contain prompt bodies,
+  secret material, host paths, raw reasoning, or raw tool input/output.
+- Resume handles are opaque protected references tied to the exact worker
+  lease/fence, Turn, and dispatch attempt, with explicit expiry and retirement
+  reasons. Recovery records couple each conservative outcome to only the prior
+  lifecycle states that can produce it; possible submission is never heuristic
+  replay evidence.
 
 Structural invariants such as non-empty allowlists, unique providers, valid
 default models, exact provider-connection and transport-bridge pins, compatible
@@ -169,6 +198,12 @@ Runtime validation also rejects duplicate entries for one provider, conflicting
 connections, connection/model/native-stack or credential-custody mismatches,
 profile/SessionSpec resource drift, replayed forward authorizations,
 request-selected origins, and image history beyond the exact model manifest.
+
+The durable broker uniqueness key is `(TurnId, ProviderConnectionId,
+InferenceRequestFingerprint)`. The reservation is the sole durable owner of
+that normalized request identity. It survives a worker restart, and its one
+forwarding-attempt record must atomically transition from `ready-for-one-send`
+to `send-started` before at most one upstream/native send.
 
 The execution trust boundary, credential leases, broker request rules, sanitized
 agent configuration, and ephemeral supervisor launch authorization are

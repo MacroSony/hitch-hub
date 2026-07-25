@@ -13,6 +13,8 @@ import type {
   BrokerEndpoint,
   CredentialLeaseId,
   InferenceProtocolInspectorId,
+  InferenceForwardingAttemptId,
+  InferenceRequestFingerprint,
   InferenceRequestReservationId,
   InferenceTransportBridgeId,
   InstallationId,
@@ -33,8 +35,10 @@ import type { ModelRef, TurnReasoningSelection } from "./session.js";
 import type { InferenceTokenUsage } from "./turn.js";
 
 declare const validatedInferenceRequestBrand: unique symbol;
+declare const preparedProviderInferenceRequestBrand: unique symbol;
 declare const providerReservationAuthorizationBrand: unique symbol;
 declare const providerForwardAuthorizationBrand: unique symbol;
+declare const boundProviderInvocationBrand: unique symbol;
 
 /**
  * How one agent/provider connection performs inference. Only `agent-native`
@@ -240,7 +244,7 @@ interface ValidatedInferenceRequestBase {
   readonly reasoning: TurnReasoningSelection;
   readonly requestedOutputTokens: number;
   /** Digest of connection, bridge, Turn, model, reasoning, and native payload. */
-  readonly requestFingerprint: IntegrityDigest;
+  readonly requestFingerprint: InferenceRequestFingerprint;
 }
 
 /**
@@ -261,10 +265,28 @@ export type ValidatedInferenceRequest = ValidatedInferenceRequestBase &
       }
   );
 
+export interface ProviderInferenceReservationEstimate {
+  readonly estimatedInputTokens: number;
+  readonly reservedOutputTokens: number;
+  readonly reservedTotalTokens: number;
+}
+
+/**
+ * One trusted validation result that binds the exact request bytes/identity to
+ * the token estimate reserved for them. The bridge creates it in the same
+ * operation that validates the registered connection and request envelope, so
+ * callers cannot pair request A with the cheaper estimate for request B.
+ */
+export interface PreparedProviderInferenceRequest {
+  readonly [preparedProviderInferenceRequestBrand]: true;
+  readonly request: ValidatedInferenceRequest;
+  readonly reservationEstimate: ProviderInferenceReservationEstimate;
+}
+
 export type ProviderRequestValidationResult =
   | {
       readonly accepted: true;
-      readonly request: ValidatedInferenceRequest;
+      readonly prepared: PreparedProviderInferenceRequest;
     }
   | {
       readonly accepted: false;
@@ -273,12 +295,6 @@ export type ProviderRequestValidationResult =
       readonly sanitizedMessage: string;
     };
 
-export interface ProviderInferenceReservationEstimate {
-  readonly estimatedInputTokens: number;
-  readonly reservedOutputTokens: number;
-  readonly reservedTotalTokens: number;
-}
-
 /**
  * Evidence returned only after live authorization and a durable reservation
  * commit. It does not yet permit upstream I/O.
@@ -286,7 +302,8 @@ export interface ProviderInferenceReservationEstimate {
 export interface ProviderReservationAuthorization {
   readonly [providerReservationAuthorizationBrand]: true;
   readonly reservationId: InferenceRequestReservationId;
-  readonly requestFingerprint: IntegrityDigest;
+  readonly requestFingerprint: InferenceRequestFingerprint;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly turnId: TurnId;
   readonly credentialLeaseId: CredentialLeaseId;
   readonly workerLeaseId: WorkerLeaseId;
@@ -295,19 +312,36 @@ export interface ProviderReservationAuthorization {
 }
 
 /**
- * Evidence that the same reservation is durably `forwarding`. Implementations
- * must consume it once; only this evidence permits native invocation or
- * upstream credential injection.
+ * Evidence that the same reservation is durably `forwarding` and its exact
+ * attempt is `ready-for-one-send`. Implementations must consume the attempt
+ * once; only this evidence permits native invocation or upstream credential
+ * injection.
  */
 export interface ProviderForwardAuthorization {
   readonly [providerForwardAuthorizationBrand]: true;
   readonly reservationId: InferenceRequestReservationId;
-  readonly requestFingerprint: IntegrityDigest;
+  readonly forwardingAttemptId: InferenceForwardingAttemptId;
+  readonly requestFingerprint: InferenceRequestFingerprint;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly turnId: TurnId;
   readonly credentialLeaseId: CredentialLeaseId;
   readonly workerLeaseId: WorkerLeaseId;
   readonly workerFencingToken: number;
   readonly forwardingAt: IsoTimestamp;
+}
+
+/**
+ * Trusted aggregate produced only after the control boundary proves that the
+ * registered connection, validated request, reservation, and forwarding
+ * authorization carry the same connection, Turn, fingerprint, lease, and
+ * fence identities. Keeping them behind one brand prevents bridge callers from
+ * pairing authorization A with request B.
+ */
+export interface BoundProviderInvocation {
+  readonly [boundProviderInvocationBrand]: true;
+  readonly connection: BrokeredProviderConnectionSpec;
+  readonly request: ValidatedInferenceRequest;
+  readonly forwarding: ProviderForwardAuthorization;
 }
 
 export type ProviderReservationAuthorizationResult =
@@ -324,7 +358,7 @@ export type ProviderReservationAuthorizationResult =
 export type ProviderForwardAuthorizationResult =
   | {
       readonly authorized: true;
-      readonly forwarding: ProviderForwardAuthorization;
+      readonly invocation: BoundProviderInvocation;
     }
   | {
       readonly authorized: false;
@@ -338,11 +372,17 @@ export type ProviderForwardAuthorizationResult =
  */
 export interface InferenceControlAuthorizationBoundary {
   reserveRequest(
-    request: ValidatedInferenceRequest,
-    estimate: ProviderInferenceReservationEstimate,
+    prepared: PreparedProviderInferenceRequest,
     authorization: ProviderRequestAuthorizationContext,
   ): Promise<ProviderReservationAuthorizationResult>;
+  /**
+   * Before changing durable state, proves exact equality between the validated
+   * request and reservation identities and resolves the same live registered
+   * connection. A mismatch returns denial and performs no forwarding
+   * transition, credential resolution, native invocation, or upstream I/O.
+  */
   markForwarding(
+    prepared: PreparedProviderInferenceRequest,
     reservation: ProviderReservationAuthorization,
   ): Promise<ProviderForwardAuthorizationResult>;
 }
@@ -400,19 +440,16 @@ export interface BrokeredInferenceTransportBridge {
     inbound: InferenceBridgeInboundRequest,
     authorization: ProviderRequestAuthorizationContext,
   ): ProviderRequestValidationResult;
-  estimateReservation(
-    connection: BrokeredProviderConnectionSpec,
-    request: ValidatedInferenceRequest,
-  ): ProviderInferenceReservationEstimate;
   /**
-   * Atomically consumes `forwarding`, resolves the connection's credential
-   * through its trusted resolver, and starts at most one native invocation.
-   * Raw authentication material never crosses this interface.
+   * Accepts only the trusted aggregate bound before the forwarding transition.
+   * Atomically compare-and-swaps its exact forwarding attempt from
+   * `ready-for-one-send` to `send-started`, then resolves the connection's
+   * credential through its trusted resolver and starts at most one native
+   * invocation. A failed compare-and-swap performs no upstream I/O. Raw
+   * authentication material never crosses this interface.
    */
   invoke(
-    connection: BrokeredProviderConnectionSpec,
-    request: ValidatedInferenceRequest,
-    forwarding: ProviderForwardAuthorization,
+    invocation: BoundProviderInvocation,
   ): Promise<BrokeredInferenceStream>;
 }
 
