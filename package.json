@@ -34,11 +34,12 @@
     "smoke:telegram-getme": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getMe",
     "smoke:telegram-updates": "node --use-env-proxy --import tsx src/smoke/telegram-health.ts --config examples/config.example.yaml --mode getUpdates",
     "typecheck": "tsc --noEmit && tsc --noEmit -p packages/session-mcp/tsconfig.json",
+    "test:v2": "node --import tsx src/v2/acceptance/run-tests.ts",
     "build:hub": "tsc -p tsconfig.json",
     "build:mcp": "tsc -p packages/session-mcp/tsconfig.json",
     "build": "npm run build:hub && npm run build:mcp",
     "smoke:ci": "npm run smoke:fake && npm run smoke:media-cache && npm run smoke:media-flow && npm run smoke:mcp-session && npm run smoke:mcp-package && npm run smoke:interaction-flow && npm run smoke:reliability-flow && npm run smoke:multi-channel && npm run smoke:multi-user-sandbox && npm run smoke:wechat-reliability && npm run smoke:pi-rpc && npm run smoke:pi-approval && npm run smoke:pi-ui-select && npm run smoke:pi-retry-lifecycle && npm run smoke:pi-path-compatibility && npm run smoke:pi-sandbox-integration && npm run smoke:security-foundation && npm run smoke:sandbox-launcher && npm run smoke:worker-environment && npm run smoke:credential-guard",
-    "check": "npm run typecheck && npm run build && npm run smoke:ci"
+    "check": "npm run typecheck && npm run build && npm run test:v2 && npm run smoke:ci"
   },
   "engines": {
     "node": ">=24.0.0"
