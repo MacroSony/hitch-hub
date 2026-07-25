@@ -17,9 +17,11 @@ schema, and clean runtime boundary.
 
 One installation owner can use a local structured CLI to submit durable work to
 one private Pi RPC session. Hitch authenticates the caller, admits an immutable
-Turn, runs Pi inside a required Linux sandbox, brokers one exact provider/model
-pair without exposing the upstream credential, persists the authoritative Turn
-result, and independently delivers the response to the originating CLI request.
+Turn, runs Pi inside a required Linux sandbox, invokes one exact
+provider/model pair through a trusted sidecar that reuses Pi's native provider
+stack without exposing the upstream credential, persists the authoritative
+Turn result, and independently delivers the response to the originating CLI
+request.
 
 The first slice proves the architecture and security boundary. It is not yet a
 replacement for every v1 channel or convenience feature.
@@ -48,11 +50,12 @@ replacement for every v1 channel or convenience feature.
   exact granted extension revisions. Ambient/project discovery, hot reload,
   arbitrary resource paths/packages, and user-supplied MCP servers are
   disabled.
-- Secure operation requires Bubblewrap, the credential broker, finite Turn
-  inference limits, and supervisor cleanup. There is no direct or raw-credential
-  fallback.
-- Host networking is an explicit first-slice limitation required by the local
-  loopback broker. Hitch does not claim arbitrary egress confinement.
+- Secure operation requires Bubblewrap, the Pi native-library sidecar,
+  credential broker, finite Turn inference limits, and supervisor cleanup.
+  There is no direct or raw-credential fallback.
+- The Pi worker reaches the sidecar through a supervisor-owned local endpoint.
+  Its network namespace is denied in the secure first slice; only the trusted
+  sidecar receives provider egress restricted to registered origins.
 
 ## Process and trust shape
 
@@ -65,8 +68,9 @@ hitch CLI
   -> Hitch Turn queue
   -> worker supervisor
   -> Bubblewrap + PiRpcAgentDriver
-  -> local credential broker
-  -> one fixed upstream provider origin
+  -> generated Pi inference bridge extension
+  -> trusted Pi ModelRuntime sidecar + credential broker
+  -> one registered provider connection
 
 Pi events
   -> trusted driver normalization
@@ -192,6 +196,7 @@ resolve:
 - one execution policy and immutable snapshot
 - one turn policy and immutable snapshot
 - one provider credential binding
+- one immutable provider connection using the Pi native-library sidecar
 - one exact provider/model allowance and default
 - pinned declarative agent-resource snapshots and exact extension grants
 - the configuration-use grants required by the owner
@@ -201,13 +206,16 @@ configuration resolves the same stable resources and revisions. A semantic
 configuration change publishes a new append-only revision or snapshot; it never
 mutates a record pinned by an existing `SessionSpec`.
 
-The configuration contains a reference used by the trusted secret store, not an
-upstream credential value. The first provider protocol is OpenAI-compatible
-Chat Completions through the fixed-origin dialect contract in
+The configuration contains a reference used by the trusted credential store,
+not an upstream credential value. The first connection uses the
+`native-library-sidecar` contract in
 [`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md).
-The concrete upstream origin, exact model manifest, secret-store mechanism, and
-token estimator must be selected before broker implementation begins. The
-executable slice still supports exactly one adapter and one resolved model pair.
+It pins the Pi/native catalog revision, registered origin set, credential
+resolver, exact model manifest, and token estimator. The initial credential
+store may reuse the operator's existing Pi auth storage through Pi's native
+credential interfaces, but the worker never mounts or reads that storage. The
+executable slice still exposes exactly one resolved connection/model pair even
+though the feasibility spike exercises more than one native provider.
 
 No management UI, dynamic configuration administration, invitation flow, or
 delegated configuration publishing is part of this slice.
@@ -244,7 +252,8 @@ The first `AgentDriver` contract needs only:
 
 - capability discovery sufficient to validate the Pi profile
 - profile-configuration decoding and sanitization
-- runtime start with supervisor-provided sandbox paths and broker projection
+- runtime start with supervisor-provided sandbox paths and native-sidecar broker
+  projection
 - runtime resume from an opaque, protected Pi resume handle
 - preparation of one exact Turn and its inference configuration without prompt
   emission
@@ -263,8 +272,9 @@ or deliver connector messages.
 
 The supervisor owns the Pi executable allowlist, arguments, environment,
 Bubblewrap launch, mount identity checks, lifetime container, lease fencing,
-broker capability injection, descendant cleanup, and proof that an old sandbox
-is gone before a successor launches.
+generated provider bridge extension, broker capability injection, sidecar
+lifetime, descendant cleanup, and proof that an old sandbox is gone before a
+successor launches.
 
 ## Persistence and recovery consumed by the slice
 
@@ -272,7 +282,7 @@ The first schema and repositories cover only records exercised here:
 
 - installation, principal, local identity binding, and role/use grants
 - workspace/profile/policy resources and pinned revisions or snapshots
-- provider credential binding metadata
+- provider connection and credential binding metadata
 - session, immutable `SessionSpec`, metadata, lifecycle, and private endpoint
   binding
 - attachment metadata and private storage reference
@@ -326,11 +336,15 @@ When every secure acceptance test passes, this slice may claim:
 - Pi and its model-facing tools see only the authorized sandbox resources.
 - A Hitch-managed upstream provider credential is absent from Pi arguments,
   environment, mounts, configuration, logs, and transcripts.
-- Pi receives only a revocable local broker capability for one worker/provider.
+- Pi receives only a revocable local broker capability for one
+  worker/provider connection.
 - Every loaded agent resource is an exact immutable snapshot or extension grant;
   executable extensions share only that worker's sandbox and broker authority.
 - Provider/model/reasoning and finite request/token limits are enforced at the
-  broker boundary.
+  native-sidecar broker boundary.
+- Provider protocol serialization, streaming, compatibility, and OAuth refresh
+  are reused from the exact pinned Pi provider stack rather than reimplemented
+  by Hitch.
 - Possibly accepted prompts are not automatically replayed.
 - Stale workers cannot emit accepted events or use renewed Hitch authority.
 - Terminal Turn results and delivery outcomes are independently durable.
@@ -339,7 +353,8 @@ This slice does not claim:
 
 - cryptographic privacy from the host administrator
 - isolation from another process running as the Hitch service account
-- arbitrary network egress confinement
+- arbitrary network egress confinement outside the secure first-slice worker
+  and sidecar origin policy
 - prevention of direct requests using a credential deliberately placed in an
   authorized prompt, workspace, or attachment
 - provider cost enforcement
@@ -364,7 +379,8 @@ The slice is complete only when automated tests prove:
 6. Requester cancellation wins only while the named queued Turn remains pending,
    and active cancellation follows the bounded cleanup path.
 7. Queue dispatch reauthorizes the requester, origin binding, configuration
-   grants, provider binding, and installation ceilings.
+   grants, provider connection/credential custody binding, and installation
+   ceilings.
 8. Submission arming, protocol prompt submission, acceptance evidence, worker
    loss, exact reconciliation, and `unknown` recovery follow the accepted state
    machine using the same durable dispatch-attempt ID and without heuristic
@@ -379,17 +395,20 @@ The slice is complete only when automated tests prove:
     hash recorded, checked against the exact model MIME/per-request byte/count
     limits and the one-new-image-per-Turn limit, and supplied to Pi without
     exposing the source host path. Accumulated image history over the manifest
-    limit fails before provider I/O until pruning/compaction semantics exist.
+    limit fails before native sidecar invocation until pruning/compaction
+    semantics exist.
 13. The secure Pi sandbox exposes the intended workspace, pinned resources, and
     tools while blocking host, Hitch-state, symlink-swap,
     protected-destination, shell, resource-discovery, and ungranted-extension
     escape attempts.
-14. The upstream credential is absent from the sandbox, a valid broker
-    capability is restricted to the active worker and Turn, and stale, idle,
-    queued, waiting, cancelling, and terminal requests fail.
+14. The upstream credential and real Pi auth store are absent from the sandbox,
+    a valid broker capability is restricted to the active worker, connection,
+    and Turn, and stale, idle, queued, waiting, cancelling, and terminal
+    requests fail.
 15. Concurrent inference reservations cannot exceed request/token ceilings;
     missing usage is conservatively charged, a forward authorization cannot be
-    replayed into a second upstream send, and old-Turn requests drain or abort
+    replayed into a second native invocation/upstream send, the sidecar cannot
+    egress outside registered origins, and old-Turn requests drain or abort
     before handoff.
 16. A finalized result remains queryable when the originating CLI disconnects
     or delivery fails.
@@ -400,8 +419,11 @@ The slice is complete only when automated tests prove:
 19. Audit records contain actor, session, Turn, lease, interaction, reservation,
     and delivery correlation without raw secrets, prompt bodies in operational
     envelopes, raw reasoning, or raw tool input/output.
-20. One opt-in real-provider smoke passes through the same broker and sandbox
-    boundary after all deterministic provider-stub tests pass.
+20. The version-pinned Pi bridge represents streaming, reasoning, tools, images
+    where supported, usage, errors, cancellation, and OAuth refresh; mismatched
+    native-stack/catalog revisions fail closed.
+21. Opt-in DeepSeek and OpenAI Codex smoke calls pass through the same native
+    sidecar and sandbox boundary after deterministic provider-stub tests pass.
 
 ## Explicit non-goals
 
@@ -416,25 +438,28 @@ The first executable slice does not include:
 - schedules, triggers, subscriptions, or unattended producers
 - session fork/reconfiguration UX
 - agent-selected models, model switching, slash commands, or model pickers
-- multiple provider adapters or custom provider origins
+- multiple simultaneously exposed provider connections or runtime registration
+- native wire gateways, agent-native connections, or Hitch-authored provider
+  protocol adapters
 - extension-handled prompts, background extension inference, user MCP servers,
   or agent config/package management
 - free-form elicitation
 - outbound media or automatic path discovery
 - management UI
 - alternative sandbox engines
-- enforced egress proxying
+- general-purpose agent egress proxying
 - CPU/fairness claims for mutually untrusted local users
 - production reset/cutover tooling
 
 ## Implementation gate
 
-The minimal `AgentDriver`/supervisor and OpenAI-compatible Chat Completions
-adapter contracts are fixed in
+The minimal `AgentDriver`/supervisor and transport-pluggable inference control
+contracts are fixed in
 [`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md)
-and the compile-only model. Repository, connector, supervisor, and Pi codec
-implementation may begin after review. Broker implementation additionally
-requires the first fixed origin and exact model manifest to be filled in.
+and the compile-only model. Before repository, connector, or supervisor
+implementation begins, the focused Pi `ModelRuntime` sidecar spike must satisfy
+that document's feasibility gate. A successful spike becomes the implementation
+fixture and fixes the exact first connection/model configuration.
 
 Any proposed capability not required by an acceptance scenario stays outside
 the executable model or in `v2-deferred-design.md`.

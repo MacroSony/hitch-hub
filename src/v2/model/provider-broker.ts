@@ -1,50 +1,66 @@
 /**
- * Compile-only fixed-origin provider-broker adapter contract.
+ * Compile-only v2 inference control-plane and transport-bridge contract.
  *
- * The first wire protocol is OpenAI-compatible Chat Completions. A reusable
- * codec validates that protocol, while a reviewed immutable dialect manifest
- * pins one provider origin and its exact compatibility behavior.
+ * Hitch owns authorization, credential custody, Turn budgets, reservations,
+ * and audit. Provider request serialization and response parsing should be
+ * reused from the selected agent/provider stack whenever a reviewed bridge is
+ * available. Hitch-authored protocol adapters are a fallback, not the default.
  */
 
 import type {
+  AgentDriverId,
   AgentImageMimeType,
   BrokerEndpoint,
   CredentialLeaseId,
+  InferenceProtocolInspectorId,
   InferenceRequestReservationId,
+  InferenceTransportBridgeId,
+  InstallationId,
   IntegrityDigest,
   IsoTimestamp,
   JsonObject,
   ModelId,
   ProviderApiProtocolId,
-  ProviderDialectId,
+  ProviderConnectionId,
+  ProviderCredentialResolverId,
   ProviderId,
   ProviderTokenEstimatorId,
-  TrustedHttpsOrigin,
+  TrustedUpstreamOrigin,
   TurnId,
   WorkerLeaseId,
 } from "./primitives.js";
 import type { ModelRef, TurnReasoningSelection } from "./session.js";
 import type { InferenceTokenUsage } from "./turn.js";
 
-declare const validatedProviderRequestBrand: unique symbol;
+declare const validatedInferenceRequestBrand: unique symbol;
 declare const providerReservationAuthorizationBrand: unique symbol;
 declare const providerForwardAuthorizationBrand: unique symbol;
-declare const upstreamAuthenticationMaterialBrand: unique symbol;
 
-/** Ephemeral secret material resolved only inside the trusted broker. */
-export type UpstreamAuthenticationMaterial = string & {
-  readonly [upstreamAuthenticationMaterialBrand]: true;
-};
+/**
+ * How one agent/provider connection performs inference. Only `agent-native`
+ * places the real provider credential in the agent runtime.
+ */
+export type InferenceExecutionMode =
+  | "native-library-sidecar"
+  | "native-wire-gateway"
+  | "agent-native"
+  | "hitch-protocol-adapter";
 
-export interface OpenAIChatCompletionsModelSpec {
+export type ProviderCredentialCustody =
+  | "hitch-control-plane"
+  | "agent-runtime";
+
+export interface ProviderModelManifest {
+  readonly providerId: ProviderId;
   readonly modelId: ModelId;
+  readonly apiProtocolId: ProviderApiProtocolId;
   readonly contextWindowTokens: number;
   readonly maximumOutputTokens: number;
   readonly tokenEstimatorId: ProviderTokenEstimatorId;
   readonly imageInput:
     | { readonly kind: "unsupported" }
     | {
-        readonly kind: "openai-content-parts";
+        readonly kind: "supported";
         readonly acceptedMimeTypes: readonly [
           AgentImageMimeType,
           ...AgentImageMimeType[],
@@ -53,152 +69,151 @@ export interface OpenAIChatCompletionsModelSpec {
         readonly maximumImageBytesEach: number;
         readonly maximumTotalImageBytesPerRequest: number;
       };
-  readonly supportsTools: boolean;
+  readonly tools: "unsupported" | "supported";
   readonly reasoning:
     | { readonly kind: "unsupported" }
     | {
-        readonly kind: "effort-map";
-        /**
-         * Null means that portable effort is unavailable for this exact model;
-         * strings are the exact provider values projected into Pi.
-         */
-        readonly efforts: {
-          readonly none: string | null;
-          readonly low: string | null;
-          readonly medium: string | null;
-          readonly high: string | null;
-        };
+        readonly kind: "portable-efforts";
+        readonly supportedEfforts: readonly [
+          "none" | "low" | "medium" | "high",
+          ...("none" | "low" | "medium" | "high")[],
+        ];
+        readonly agentDefaultSupported: boolean;
       };
-}
-
-export type OpenAIChatReasoningEncoding =
-  | { readonly kind: "unsupported" }
-  | {
-      readonly kind: "pi-openai-completions";
-      readonly thinkingFormat:
-        | "openai"
-        | "openrouter"
-        | "together"
-        | "deepseek"
-        | "zai"
-        | "qwen"
-        | "chat-template"
-        | "qwen-chat-template"
-        | "string-thinking"
-        | "ant-ling";
-      readonly supportsReasoningEffort: boolean;
-      readonly omitForAgentDefault: true;
-    };
-
-export type OpenAIChatCompletionsRequestField =
-  | "model"
-  | "messages"
-  | "stream"
-  | "stream_options"
-  | "max_tokens"
-  | "max_completion_tokens"
-  | "temperature"
-  | "top_p"
-  | "stop"
-  | "tools"
-  | "tool_choice"
-  | "tool_stream"
-  | "parallel_tool_calls"
-  | "response_format"
-  | "reasoning_effort"
-  | "reasoning"
-  | "thinking"
-  | "enable_thinking"
-  | "chat_template_kwargs"
-  | "preserve_thinking";
-
-export type OpenAIChatCompletionsSemanticRequestHeader =
-  | "accept"
-  | "content-type";
-
-/**
- * Headers emitted automatically by the pinned Pi/OpenAI client version. They
- * may be accepted after exact syntax/size validation but are stripped rather
- * than forwarded upstream.
- */
-export type OpenAIChatCompletionsIgnoredClientHeader =
-  | "user-agent"
-  | "x-stainless-arch"
-  | "x-stainless-lang"
-  | "x-stainless-os"
-  | "x-stainless-package-version"
-  | "x-stainless-retry-count"
-  | "x-stainless-runtime"
-  | "x-stainless-runtime-version"
-  | "x-stainless-timeout";
-
-/** Safe protocol behavior projected into the agent runtime. */
-export interface OpenAIChatCompletionsAgentCompatibility {
-  readonly kind: "openai-chat-completions";
-  readonly outputTokenField: "max_tokens" | "max_completion_tokens";
-  readonly reasoning: OpenAIChatReasoningEncoding;
-  readonly developerRole: "supported" | "map-to-system";
-  readonly store: "unsupported";
-  readonly streamingUsage:
-    | "include-usage"
-    | "unavailable-charge-reservation";
-  readonly images: "unsupported" | "openai-content-parts";
-  readonly tools: "unsupported" | "openai-function-tools";
-  readonly strictToolSchema: "supported" | "unsupported";
-  readonly requiresToolResultName: boolean;
-  readonly requiresAssistantAfterToolResult: boolean;
-  readonly requiresThinkingAsText: boolean;
-  readonly requiresReasoningContentOnAssistantMessages: boolean;
-  readonly deferredToolsMode: "disabled" | "kimi";
-  readonly zaiToolStream: boolean;
-}
-
-/**
- * A reviewed provider compatibility manifest, never request-supplied
- * configuration. Pi receives these compatibility values explicitly because
- * its apparent base URL is Hitch's loopback broker rather than the real
- * provider origin.
- */
-export interface OpenAIChatCompletionsDialectSpec
-  extends OpenAIChatCompletionsAgentCompatibility {
-  readonly id: ProviderDialectId;
-  readonly providerId: ProviderId;
-  readonly apiProtocolId: ProviderApiProtocolId;
-  readonly wireProtocol: "openai-chat-completions";
-  readonly fixedUpstreamOrigin: TrustedHttpsOrigin;
-  readonly route: "/v1/chat/completions";
-  readonly authentication: "bearer";
-  readonly requestMethod: "POST";
-  readonly streaming: "required";
-  readonly unknownRequestFields: "reject";
-  readonly requestBodyFields: readonly OpenAIChatCompletionsRequestField[];
-  /** Carries only the local broker capability and is never forwarded. */
-  readonly brokerAuthenticationHeader: "authorization";
-  readonly semanticRequestHeaderNames: readonly OpenAIChatCompletionsSemanticRequestHeader[];
-  readonly ignoredClientHeaderNames: readonly OpenAIChatCompletionsIgnoredClientHeader[];
-  readonly modelSpecs: readonly [
-    OpenAIChatCompletionsModelSpec,
-    ...OpenAIChatCompletionsModelSpec[],
-  ];
-  /** Digest of the reviewed built-in manifest used for audit and fixtures. */
+  /**
+   * Secret-free exact metadata consumed only by the matching version-pinned
+   * bridge/driver. It may describe native compatibility behavior but cannot
+   * select an origin, credential, command, environment entry, or host path.
+   */
+  readonly nativeModelMetadata: JsonObject;
   readonly integrityDigest: IntegrityDigest;
 }
+
+export interface NativeLibrarySidecarTransport {
+  readonly mode: "native-library-sidecar";
+  readonly credentialCustody: "hitch-control-plane";
+  readonly bridgeId: InferenceTransportBridgeId;
+  readonly nativeStack: "pi-ai" | "other";
+  readonly nativeStackVersion: string;
+  readonly bridgeProtocolVersion: number;
+  readonly nativeCatalogDigest: IntegrityDigest;
+  readonly credentialResolverId: ProviderCredentialResolverId;
+  /**
+   * The first secure slice forbids hidden native-client retries under one
+   * forwarding authorization. A later bridge may expose retries as new
+   * attempts, each with its own durable reservation.
+   */
+  readonly nativeRetries: "disabled";
+  /**
+   * The bridge invokes a reviewed native provider library. Neither the worker
+   * nor its extensions receive the upstream authentication material.
+   */
+  readonly invocation: "structured-native-request";
+}
+
+export interface NativeWireGatewayTransport {
+  readonly mode: "native-wire-gateway";
+  readonly credentialCustody: "hitch-control-plane";
+  readonly bridgeId: InferenceTransportBridgeId;
+  readonly inspectorId: InferenceProtocolInspectorId;
+  readonly apiProtocolId: ProviderApiProtocolId;
+  readonly credentialResolverId: ProviderCredentialResolverId;
+  readonly requestBodyHandling: "opaque-after-inspection";
+  readonly responseBodyHandling: "opaque-stream";
+  readonly redirects: "deny";
+}
+
+export interface AgentNativeTransport {
+  readonly mode: "agent-native";
+  readonly credentialCustody: "agent-runtime";
+  readonly driverId: AgentDriverId;
+  readonly nativeProviderId: string;
+  readonly enforcement: "turn-and-process-bound-observation";
+  /**
+   * This mode cannot claim broker-enforced per-request authorization, hard
+   * token reservation, or credential isolation from the agent/extensions.
+   */
+  readonly assurance: "trusted-agent-runtime";
+}
+
+export interface HitchProtocolAdapterTransport {
+  readonly mode: "hitch-protocol-adapter";
+  readonly credentialCustody: "hitch-control-plane";
+  readonly bridgeId: InferenceTransportBridgeId;
+  readonly apiProtocolId: ProviderApiProtocolId;
+  readonly credentialResolverId: ProviderCredentialResolverId;
+  readonly redirects: "deny";
+}
+
+export type ProviderConnectionTransport =
+  | NativeLibrarySidecarTransport
+  | NativeWireGatewayTransport
+  | AgentNativeTransport
+  | HitchProtocolAdapterTransport;
+
+export type BrokeredProviderConnectionTransport = Exclude<
+  ProviderConnectionTransport,
+  AgentNativeTransport
+>;
+
+/**
+ * Immutable reviewed connection definition. A connection may target any
+ * deliberately registered upstream supported by its native stack; an agent
+ * request can never supply or replace an origin.
+ */
+export interface ProviderConnectionSpec {
+  readonly id: ProviderConnectionId;
+  readonly installationId: InstallationId;
+  readonly providerId: ProviderId;
+  readonly displayName: string;
+  readonly transport: ProviderConnectionTransport;
+  readonly allowedUpstreamOrigins: readonly [
+    TrustedUpstreamOrigin,
+    ...TrustedUpstreamOrigin[],
+  ];
+  readonly models: readonly [
+    ProviderModelManifest,
+    ...ProviderModelManifest[],
+  ];
+  readonly integrityDigest: IntegrityDigest;
+  readonly createdAt: IsoTimestamp;
+}
+
+export type BrokeredProviderConnectionSpec = ProviderConnectionSpec & {
+  readonly transport: BrokeredProviderConnectionTransport;
+};
 
 export interface BrokerInboundHttpRequest {
   readonly method: string;
   readonly originFormTarget: string;
   /**
-   * Ordered pre-canonicalization fields. Duplicate/framing/authority checks must
-   * run before names are merged into a map.
+   * Ordered pre-canonicalization fields. Duplicate/framing/authority checks run
+   * before names are merged. The wire gateway never accepts `CONNECT`, an
+   * absolute-form target, or a request-selected upstream authority.
    */
   readonly rawHeaders: readonly {
     readonly name: string;
     readonly value: string;
   }[];
-  readonly body: unknown;
-  readonly bodyByteLength: number;
+  readonly body: Uint8Array;
   readonly receivedAt: IsoTimestamp;
 }
+
+/**
+ * One bridge request. Structured sidecars use `nativePayload`; wire gateways
+ * use `wireRequest`. A transport implementation accepts exactly one shape.
+ */
+export type InferenceBridgeInboundRequest =
+  | {
+      readonly kind: "structured-native";
+      readonly nativePayload: JsonObject;
+      readonly payloadByteLength: number;
+      readonly receivedAt: IsoTimestamp;
+    }
+  | {
+      readonly kind: "native-wire-http";
+      readonly wireRequest: BrokerInboundHttpRequest;
+    };
 
 export interface ProviderRequestAuthorizationContext {
   readonly turnId: TurnId;
@@ -206,35 +221,50 @@ export interface ProviderRequestAuthorizationContext {
   readonly workerLeaseId: WorkerLeaseId;
   readonly workerFencingToken: number;
   readonly brokerEndpoint: BrokerEndpoint;
-  readonly expectedDialectId: ProviderDialectId;
+  readonly expectedConnectionId: ProviderConnectionId;
+  readonly expectedProviderId: ProviderId;
   readonly expectedModel: ModelRef;
   readonly expectedReasoning: TurnReasoningSelection;
   readonly maximumOutputTokens: number;
 }
 
-/**
- * Normalized only after method, origin-form route, headers, body fields, model,
- * reasoning, feature support, and finite output limit all pass validation.
- */
-export interface ValidatedOpenAIChatCompletionsRequest {
-  readonly [validatedProviderRequestBrand]: true;
+interface ValidatedInferenceRequestBase {
+  readonly [validatedInferenceRequestBrand]: true;
+  readonly connectionId: ProviderConnectionId;
   readonly providerId: ProviderId;
-  readonly dialectId: ProviderDialectId;
+  readonly transportMode: Exclude<InferenceExecutionMode, "agent-native">;
+  readonly bridgeId: InferenceTransportBridgeId;
+  readonly apiProtocolId: ProviderApiProtocolId;
   readonly turnId: TurnId;
   readonly model: ModelRef;
   readonly reasoning: TurnReasoningSelection;
-  readonly stream: true;
-  readonly includeStreamingUsage: boolean;
   readonly requestedOutputTokens: number;
-  readonly normalizedBody: JsonObject;
-  /** Digest of dialect, Turn, model, reasoning, and normalized body. */
+  /** Digest of connection, bridge, Turn, model, reasoning, and native payload. */
   readonly requestFingerprint: IntegrityDigest;
 }
+
+/**
+ * Produced only after the version-pinned bridge/inspector validates the exact
+ * connection/model/reasoning, finite limits, request size, and transport
+ * envelope. The discriminant preserves everything the selected native
+ * transport needs without accepting a destination or credential.
+ */
+export type ValidatedInferenceRequest = ValidatedInferenceRequestBase &
+  (
+    | {
+        readonly kind: "structured-native";
+        readonly validatedNativePayload: JsonObject;
+      }
+    | {
+        readonly kind: "native-wire-http";
+        readonly validatedWireRequest: BrokerInboundHttpRequest;
+      }
+  );
 
 export type ProviderRequestValidationResult =
   | {
       readonly accepted: true;
-      readonly request: ValidatedOpenAIChatCompletionsRequest;
+      readonly request: ValidatedInferenceRequest;
     }
   | {
       readonly accepted: false;
@@ -265,9 +295,9 @@ export interface ProviderReservationAuthorization {
 }
 
 /**
- * Evidence that the same reservation is durably `forwarding`. Only this brand
- * permits the adapter to inject an upstream credential and build a sendable
- * request.
+ * Evidence that the same reservation is durably `forwarding`. Implementations
+ * must consume it once; only this evidence permits native invocation or
+ * upstream credential injection.
  */
 export interface ProviderForwardAuthorization {
   readonly [providerForwardAuthorizationBrand]: true;
@@ -304,11 +334,11 @@ export type ProviderForwardAuthorizationResult =
 
 /**
  * Trusted repository/application boundary. Both operations recheck current
- * Turn, lease, fence, credential, and budget authority in their transactions.
+ * Turn, connection, lease, fence, credential, and budget authority.
  */
-export interface ProviderBrokerAuthorizationBoundary {
+export interface InferenceControlAuthorizationBoundary {
   reserveRequest(
-    request: ValidatedOpenAIChatCompletionsRequest,
+    request: ValidatedInferenceRequest,
     estimate: ProviderInferenceReservationEstimate,
     authorization: ProviderRequestAuthorizationContext,
   ): Promise<ProviderReservationAuthorizationResult>;
@@ -317,24 +347,12 @@ export interface ProviderBrokerAuthorizationBoundary {
   ): Promise<ProviderForwardAuthorizationResult>;
 }
 
-/**
- * The adapter cannot choose an origin here. It is copied from its immutable
- * dialect manifest after validation; redirects are never followed.
- */
-export interface FixedOriginUpstreamRequest {
-  readonly origin: TrustedHttpsOrigin;
-  readonly route: "/v1/chat/completions";
-  readonly method: "POST";
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body: JsonObject;
-}
-
 export type ProviderUsageObservation =
   | {
       readonly reservationId: InferenceRequestReservationId;
       readonly usage: InferenceTokenUsage;
       readonly observedAt: IsoTimestamp;
-      readonly source: "stream-final-usage";
+      readonly source: "native-final-usage" | "wire-inspector";
     }
   | {
       readonly reservationId: InferenceRequestReservationId;
@@ -342,41 +360,71 @@ export type ProviderUsageObservation =
       readonly source: "usage-unavailable";
     };
 
-export interface AdaptedProviderResponse {
-  readonly status: number;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body: AsyncIterable<Uint8Array>;
-  readonly usage: Promise<ProviderUsageObservation>;
-}
-
-export interface RawUpstreamProviderResponse {
-  readonly status: number;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body: AsyncIterable<Uint8Array>;
-}
+export type BrokeredInferenceStream =
+  | {
+      readonly kind: "structured-native";
+      /** Versioned events from the native provider library back to its agent. */
+      readonly events: AsyncIterable<JsonObject>;
+      readonly usage: Promise<ProviderUsageObservation>;
+      cancel(reason: string): Promise<void>;
+    }
+  | {
+      readonly kind: "native-wire-http";
+      readonly status: number;
+      /**
+       * Reviewed response fields after hop-by-hop and sensitive headers are
+       * removed. Ordering is retained for the agent's native HTTP client.
+       */
+      readonly sanitizedHeaders: readonly {
+        readonly name: string;
+        readonly value: string;
+      }[];
+      readonly body: AsyncIterable<Uint8Array>;
+      readonly usage: Promise<ProviderUsageObservation>;
+      cancel(reason: string): Promise<void>;
+    };
 
 /**
- * Reusable OpenAI Chat Completions codec bound to exactly one reviewed dialect.
- * Arbitrary URLs, routes, extra body fields, auth schemes, and model aliases
- * are not adapter inputs.
+ * One reviewed, version-pinned bridge implementation. A Pi bridge delegates to
+ * Pi's own ModelRuntime/provider stack; a wire bridge reuses the agent's
+ * serializer/parser; a Hitch codec is only the final fallback.
  */
-export interface OpenAIChatCompletionsProviderAdapter {
-  readonly dialect: OpenAIChatCompletionsDialectSpec;
+export interface BrokeredInferenceTransportBridge {
+  readonly id: InferenceTransportBridgeId;
+  readonly modes: readonly [
+    Exclude<InferenceExecutionMode, "agent-native">,
+    ...Exclude<InferenceExecutionMode, "agent-native">[],
+  ];
   validateRequest(
-    inbound: BrokerInboundHttpRequest,
+    connection: BrokeredProviderConnectionSpec,
+    inbound: InferenceBridgeInboundRequest,
     authorization: ProviderRequestAuthorizationContext,
   ): ProviderRequestValidationResult;
   estimateReservation(
-    request: ValidatedOpenAIChatCompletionsRequest,
+    connection: BrokeredProviderConnectionSpec,
+    request: ValidatedInferenceRequest,
   ): ProviderInferenceReservationEstimate;
-  buildUpstreamRequest(
-    request: ValidatedOpenAIChatCompletionsRequest,
+  /**
+   * Atomically consumes `forwarding`, resolves the connection's credential
+   * through its trusted resolver, and starts at most one native invocation.
+   * Raw authentication material never crosses this interface.
+   */
+  invoke(
+    connection: BrokeredProviderConnectionSpec,
+    request: ValidatedInferenceRequest,
     forwarding: ProviderForwardAuthorization,
-    authentication: UpstreamAuthenticationMaterial,
-  ): FixedOriginUpstreamRequest;
-  adaptResponse(
-    request: ValidatedOpenAIChatCompletionsRequest,
-    forwarding: ProviderForwardAuthorization,
-    response: RawUpstreamProviderResponse,
-  ): AdaptedProviderResponse;
+  ): Promise<BrokeredInferenceStream>;
+}
+
+/**
+ * Best-effort usage emitted by a credential-trusted native agent. It is useful
+ * for audit and soft limits but is not broker reservation evidence.
+ */
+export interface AgentNativeInferenceObservation {
+  readonly connectionId: ProviderConnectionId;
+  readonly turnId: TurnId;
+  readonly model: ModelRef;
+  readonly usage?: InferenceTokenUsage;
+  readonly observedAt: IsoTimestamp;
+  readonly source: "agent-native";
 }

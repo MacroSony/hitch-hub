@@ -1014,10 +1014,12 @@ remote-agent-hub/
 
 The reliability, delivery-evidence, principal-ownership, Bubblewrap, and
 credential-guard foundations are complete and frozen in v1. The immediate
-design work is to select the exact fixed provider origin/model manifest required
-by `docs/v2-agent-runtime-provider-design.md`. After that manifest and the
-current contracts pass review, implementation begins with the clean v2
-repository/transaction skeleton consumed by `docs/v2-first-slice.md`.
+work is the Pi native-library sidecar feasibility spike required by
+`docs/v2-agent-runtime-provider-design.md`. If the pinned `ModelRuntime`,
+credential-store, streaming, cancellation, usage, OAuth-refresh, and constrained
+egress seam passes, implementation begins with the clean v2
+repository/transaction skeleton consumed by `docs/v2-first-slice.md`. Bespoke
+Hitch provider codecs remain a fallback rather than the default path.
 
 Do not add triggers, schedules, new IM channels, a second backend, PTY, ACP, or
 group-shared sessions to the first slice.

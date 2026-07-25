@@ -26,6 +26,13 @@ it. The canonical v2 implementation scope is
 [docs/v2-first-slice.md](docs/v2-first-slice.md), with the remaining design order
 in [docs/v2-design-roadmap.md](docs/v2-design-roadmap.md).
 
+The immediate v2 implementation gate is a focused Pi native-library sidecar
+spike. It must prove that the exact pinned Pi `ModelRuntime` can reuse saved
+provider auth, OAuth refresh, streaming, cancellation, and usage behind a
+credential-free worker bridge with registered-origin egress. Hitch-authored
+provider protocol adapters are now fallback transports rather than the default
+implementation path.
+
 ## Immediate Rollout: Restricted Sandbox and Multi-User Preparation
 
 - [~] The live systemd-managed WeChat profile now uses `credential_isolation: required`, one exact read/write workspace, no policy mounts or shell, and native `hitch_send_media`; a fresh chat-originated session and attended soak remain.

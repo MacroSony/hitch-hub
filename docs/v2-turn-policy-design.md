@@ -20,6 +20,10 @@ domain IDs.
 
 `SessionSpec` pins one exact turn-policy snapshot. Configuration-use grants
 target the stable `TurnPolicyId` and follow its future published revisions.
+Secure first-slice sessions use a brokered inference connection. An explicit
+`agent-native` connection can observe usage but cannot satisfy the hard
+per-request reservation invariants below and is therefore a different,
+lower-assurance profile.
 
 ## Fixed invariants
 
@@ -32,8 +36,8 @@ These are not configurable:
 - Authorization is checked at admission and again before queued work starts.
 - Required authority and live installation ceilings are rechecked at every
   privileged boundary while work is active.
-- Every provider request consumes a durable, finite per-Turn request/token
-  reservation before upstream I/O.
+- Every secure brokered provider request consumes a durable, finite per-Turn
+  request/token reservation before native invocation or upstream I/O.
 - Terminal results never change.
 - Turn completion and connector delivery are separate state machines.
 - A prompt that may have reached an agent is never replayed automatically.
@@ -213,9 +217,9 @@ recover. Stall detection and the supervisor's bounded cancellation/cleanup grace
 are operational safeguards rather than session-policy knobs in the first slice.
 Agent and tool stalls still produce explicit, auditable timeout reasons.
 
-The provider broker admits no new inference request while active-work
-accounting is paused for approval or input. Its gate reopens only when the same
-Turn returns to `running`.
+The brokered inference control plane admits no new inference request while
+active-work accounting is paused for approval or input. Its gate reopens only
+when the same Turn returns to `running`.
 
 ## Approval and input
 
@@ -290,13 +294,13 @@ The driver receives cancellation and may emit bounded final events during a
 supervisor-defined grace period; the supervisor forcibly terminates the worker
 when the grace expires.
 
-Each provider request has a durable reservation attributed to its Turn,
+Each brokered provider request has a durable reservation attributed to its Turn,
 CredentialLease, WorkerLease, and fencing token. The reservation transaction is
 the request's authorization point. A reservation is released only when no
-upstream I/O occurred; otherwise final provider usage is charged, or the full
-reservation is charged when usage is unavailable. Before the queue can dispatch
-the next Turn, all old-Turn requests are settled/released/charged and in-flight
-streams are aborted or drained.
+native invocation or upstream I/O occurred; otherwise final provider usage is
+charged, or the full reservation is charged when usage is unavailable. Before
+the queue can dispatch the next Turn, all old-Turn requests are
+settled/released/charged and in-flight streams are aborted or drained.
 
 Delivery always performs its own current authorization and binding checks,
 including after a Turn has completed. A revoked/suspended binding or lost

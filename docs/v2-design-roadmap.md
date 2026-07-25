@@ -148,17 +148,18 @@ should be introduced only when that slice consumes them. It must exercise:
 
 - immutable `SessionSpec` loading and live reauthorization
 - private turn admission, idempotency, bounded FIFO, and cancellation by Turn ID
-- Pi launch through the clean v2 sandbox boundary in `host-network` mode,
-  ported model-tool confinement, and one fixed-origin secure provider-broker
-  adapter
+- Pi launch through the clean v2 sandbox boundary with worker networking denied,
+  ported model-tool confinement, and one egress-constrained secure Pi
+  native-library inference sidecar
 - prompt acceptance evidence, safe recovery, and immutable terminal results
 - approval safety and independently authorized delivery
 
-The minimal agent runtime, explicit resource-loading, and OpenAI-compatible Chat
-Completions adapter contracts are accepted in
+The minimal agent runtime, explicit resource-loading, and transport-pluggable
+inference control contracts are accepted in
 [`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md).
-The first built-in provider manifest still needs its fixed origin and exact
-model selection before broker implementation.
+The Pi `ModelRuntime` sidecar feasibility spike is the remaining implementation
+gate; it must fix the first connection/model fixture and prove native transport,
+credential isolation, usage, cancellation, and constrained egress.
 
 Future-facing contracts move into `v2-deferred-design.md` until implementation
 evidence justifies promoting them into the active model.

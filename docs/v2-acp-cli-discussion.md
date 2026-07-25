@@ -94,5 +94,5 @@ Pi 的 RPC 模式不支持 `custom()`、编辑器组件、主题等 TUI 专属�
 4. ~~统一 dispatch service~~
 
 当前顺序：先完成切片所需的最小 `AgentDriver` / supervisor
-契约和固定 provider broker adapter，再实现结构化 CLI 纵向路径。PTY 需要独立的
+契约和 Pi 原生 provider sidecar 可行性验证，再实现结构化 CLI 纵向路径。PTY 需要独立的
 `InteractiveRun` 生命周期与安全声明；ACP 仍是长期互操作目标。

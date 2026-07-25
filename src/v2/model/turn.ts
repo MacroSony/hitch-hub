@@ -92,8 +92,10 @@ export interface TurnOutputPolicy {
 }
 
 /**
- * Finite broker-enforced ceilings for one Turn. Runtime codecs require positive
- * safe integers. Installation ceilings may only narrow these values.
+ * Finite broker-enforced ceilings for one Turn in a brokered inference mode.
+ * Runtime codecs require positive safe integers. Installation ceilings may
+ * only narrow these values. Agent-native usage observations do not satisfy
+ * these hard reservation guarantees.
  */
 export interface TurnInferencePolicy {
   readonly maximumProviderRequests: number;

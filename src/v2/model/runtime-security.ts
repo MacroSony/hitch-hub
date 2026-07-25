@@ -1,8 +1,9 @@
 /**
  * Compile-only v2 execution trust and credential-broker model.
  *
- * Durable records contain authority and lifecycle metadata only. Provider
- * secrets remain in the trusted broker store. Raw broker capability material
+ * Durable records contain authority and lifecycle metadata only. Secure
+ * brokered provider secrets remain in the trusted control plane; agent-native
+ * custody is an explicit lower-assurance mode. Raw broker capability material
  * exists only in an ephemeral supervisor launch authorization. Hitch never
  * intentionally persists or logs it, returns it through management APIs, or
  * exposes it to connectors.
@@ -18,14 +19,14 @@ import type {
   CredentialLeaseId,
   ExecutionPolicySnapshotId,
   ExtensionGrantSnapshotId,
+  InferenceTransportBridgeId,
   IntegrityDigest,
   InstallationId,
   IsoTimestamp,
   JsonObject,
   ModelId,
-  ProviderApiProtocolId,
+  ProviderConnectionId,
   ProviderCredentialBindingId,
-  ProviderDialectId,
   ProviderId,
   SandboxPath,
   SessionId,
@@ -37,8 +38,9 @@ import type {
 } from "./primitives.js";
 import type { AuditActorRef } from "./identity-access.js";
 import type {
-  OpenAIChatCompletionsAgentCompatibility,
-  OpenAIChatCompletionsModelSpec,
+  InferenceExecutionMode,
+  ProviderCredentialCustody,
+  ProviderModelManifest,
 } from "./provider-broker.js";
 import type {
   ProviderModelAllowance,
@@ -48,6 +50,7 @@ import type {
 } from "./session.js";
 
 declare const sanitizedAgentConfigurationBrand: unique symbol;
+declare const sanitizedInferenceTransportConfigurationBrand: unique symbol;
 declare const verifiedSupervisorLaunchMountBrand: unique symbol;
 
 /**
@@ -56,6 +59,14 @@ declare const verifiedSupervisorLaunchMountBrand: unique symbol;
  */
 export type SanitizedAgentProfileConfiguration = JsonObject & {
   readonly [sanitizedAgentConfigurationBrand]: true;
+};
+
+/**
+ * Secret-free bridge/driver projection validated against the exact connection
+ * and native stack revision. It cannot carry an origin override or credential.
+ */
+export type SanitizedInferenceTransportConfiguration = JsonObject & {
+  readonly [sanitizedInferenceTransportConfigurationBrand]: true;
 };
 
 export type ProviderCredentialBindingState =
@@ -67,14 +78,17 @@ export type ProviderCredentialBindingState =
     };
 
 /**
- * Stable metadata for one broker-owned secret. The real API key, OAuth token,
- * refresh token, and vault locator are deliberately absent from this record.
- * The broker's secret store is keyed internally by this ID.
+ * Stable metadata for one provider credential. The real API key, OAuth token,
+ * refresh token, and vault locator are deliberately absent. Secure brokered
+ * modes resolve it inside the Hitch control plane; `agent-native` explicitly
+ * places the native agent and its approved executable extensions in the
+ * credential trust boundary.
  */
 export interface ProviderCredentialBinding {
   readonly id: ProviderCredentialBindingId;
   readonly installationId: InstallationId;
   readonly providerId: ProviderId;
+  readonly custody: ProviderCredentialCustody;
   readonly displayName: string;
   readonly state: ProviderCredentialBindingState;
   readonly createdBy: AuditActorRef;
@@ -114,9 +128,10 @@ export type CredentialLeaseState =
     };
 
 /**
- * Durable authorization metadata for one provider available to one worker.
- * The raw bearer capability is not part of this record. A broker request also
- * requires this worker to own the session's current active Turn.
+ * Durable authorization metadata for one provider connection available to one
+ * worker. Raw bearer capability or native credential material is not part of
+ * this record. A brokered request also requires this worker to own the
+ * session's current active Turn.
  */
 export interface CredentialLease {
   readonly id: CredentialLeaseId;
@@ -124,8 +139,9 @@ export interface CredentialLease {
   readonly workerLeaseId: WorkerLeaseId;
   readonly workerFencingToken: number;
   readonly credentialBindingId: ProviderCredentialBindingId;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly providerId: ProviderId;
-  readonly providerDialectId: ProviderDialectId;
+  readonly transportMode: InferenceExecutionMode;
   readonly allowedModels: ProviderModelAllowance;
   readonly state: CredentialLeaseState;
   readonly issuedAt: IsoTimestamp;
@@ -140,9 +156,10 @@ export interface CredentialLease {
  */
 export interface RuntimeBrokerCapability {
   readonly credentialLeaseId: CredentialLeaseId;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly providerId: ProviderId;
-  readonly apiProtocolId: ProviderApiProtocolId;
-  readonly providerDialectId: ProviderDialectId;
+  readonly transportMode: Exclude<InferenceExecutionMode, "agent-native">;
+  readonly bridgeId: InferenceTransportBridgeId;
   readonly endpoint: BrokerEndpoint;
   readonly bearerToken: BrokerCapabilityToken;
 }
@@ -165,29 +182,38 @@ export interface VerifiedSupervisorLaunchMount {
 }
 
 /**
- * Provider configuration projected into the sandbox. It is intentionally
- * transparent about provider/protocol behavior while withholding real
- * credentials. Per-Turn model choices use `AgentTurnInferenceConfiguration`.
+ * Provider configuration projected into the runtime. Brokered modes contain
+ * only a local capability. Agent-native mode contains no credential value in
+ * this domain object; the trusted supervisor's native-auth renderer supplies
+ * the agent-owned credential projection outside the driver contract.
  */
-export interface AgentProviderRuntimeConfiguration {
-  readonly providerId: ProviderId;
-  readonly apiProtocolId: ProviderApiProtocolId;
-  readonly providerDialectId: ProviderDialectId;
-  readonly broker: RuntimeBrokerCapability;
-  /**
-   * Profile-allowed models intersected with the exact dialect manifest and live
-   * policy. Pi receives these explicit values instead of discovering models.
-   */
-  readonly models: readonly [
-    OpenAIChatCompletionsModelSpec,
-    ...OpenAIChatCompletionsModelSpec[],
-  ];
-  /**
-   * Explicit projection used by Pi instead of base-URL origin inference. It
-   * contains protocol behavior only, never the real upstream origin.
-   */
-  readonly compatibility: OpenAIChatCompletionsAgentCompatibility;
-}
+export type AgentProviderRuntimeConfiguration =
+  | {
+      readonly kind: "brokered";
+      readonly providerConnectionId: ProviderConnectionId;
+      readonly providerId: ProviderId;
+      readonly transportMode: Exclude<InferenceExecutionMode, "agent-native">;
+      readonly bridgeId: InferenceTransportBridgeId;
+      readonly broker: RuntimeBrokerCapability;
+      readonly models: readonly [
+        ProviderModelManifest,
+        ...ProviderModelManifest[],
+      ];
+      readonly transportConfiguration: SanitizedInferenceTransportConfiguration;
+    }
+  | {
+      readonly kind: "agent-native";
+      readonly providerConnectionId: ProviderConnectionId;
+      readonly providerId: ProviderId;
+      readonly transportMode: "agent-native";
+      readonly credentialLeaseId: CredentialLeaseId;
+      readonly credentialCustody: "agent-runtime";
+      readonly models: readonly [
+        ProviderModelManifest,
+        ...ProviderModelManifest[],
+      ];
+      readonly transportConfiguration: SanitizedInferenceTransportConfiguration;
+    };
 
 export interface AgentTurnProviderCatalog {
   readonly providerId: ProviderId;

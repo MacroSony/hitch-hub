@@ -24,8 +24,8 @@ import type {
   JsonObject,
   ModelId,
   PrincipalId,
+  ProviderConnectionId,
   ProviderCredentialBindingId,
-  ProviderDialectId,
   ProviderId,
   SandboxPath,
   SessionId,
@@ -59,8 +59,8 @@ export type ProviderModelAllowance = AllProviderModels | ExplicitProviderModels;
 
 export interface AgentProviderAllowance {
   readonly providerId: ProviderId;
-  /** Exact immutable built-in compatibility manifest for this provider. */
-  readonly providerDialectId: ProviderDialectId;
+  /** Exact immutable transport/model connection published by the installation. */
+  readonly providerConnectionId: ProviderConnectionId;
   readonly models: ProviderModelAllowance;
 }
 
@@ -156,8 +156,8 @@ export type TurnModelSelection =
  * Portable reasoning intent. `agent-default` is an explicit choice, not an
  * omitted Turn field. At the provider boundary it means exact omission of a
  * reasoning override, so an explicit agent/provider override is rejected. A
- * requested effort must be supported by both the driver and broker adapter;
- * v2.0 never silently downgrades it.
+ * requested effort must be supported by both the driver and selected inference
+ * transport; v2.0 never silently downgrades it.
  */
 export type TurnReasoningSelection =
   | { readonly kind: "agent-default" }
@@ -274,7 +274,9 @@ export interface ExtensionRevision {
 /**
  * An immutable capability grant for one exact extension revision. Capability
  * definitions are driver-specific. Extension code is part of the trusted
- * worker computing base: it shares the agent's broker and sandbox capabilities.
+ * worker computing base: it shares the agent's local inference and sandbox
+ * capabilities. Under `agent-native`, it also joins the credential trust
+ * boundary.
  */
 export interface ExtensionGrantSnapshot {
   readonly id: ExtensionGrantSnapshotId;
@@ -299,6 +301,7 @@ export interface ExtensionGrantSnapshot {
  */
 export interface SessionProviderBinding {
   readonly providerId: ProviderId;
+  readonly providerConnectionId: ProviderConnectionId;
   readonly credentialBindingId: ProviderCredentialBindingId;
 }
 

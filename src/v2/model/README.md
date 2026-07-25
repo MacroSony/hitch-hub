@@ -18,21 +18,26 @@ Current decisions:
   extension grants are append-only revisions or snapshots.
 - Standard Pi profiles can enable pinned skills/templates/themes and exact
   granted extensions. Ambient discovery and hot reload remain disabled;
-  executable extensions share the worker's sandbox and broker authority.
+  executable extensions share the worker's sandbox and local inference
+  authority.
 - Agent profile revisions explicitly name their resource/grant snapshots.
-- Agent profiles pin a provider dialect and allow either all or an explicit
-  list of that provider's models.
+- Agent profiles pin an immutable provider connection and allow either all or
+  an explicit list of that connection's models.
 - Agent profiles define an explicit default reasoning intent; admission resolves
   both model and reasoning defaults before creating a Turn.
 - Every turn records either a resolved allowed provider/model or an explicit
   agent-selected choice (optionally constrained to one allowed provider), plus
   an explicit agent-default or portable reasoning-effort intent.
-- Provider credentials remain broker-owned and are referenced, never copied into a snapshot.
-- Secure runners receive only local, worker/provider-scoped broker capabilities.
-  Hitch-managed provider secrets never enter agent arguments, environment,
-  mounts, configuration, logs, or transcripts.
-- The first provider contract is an OpenAI-compatible Chat Completions codec
-  bound to one reviewed fixed-origin dialect and exact model/image catalog.
+- Provider credentials are referenced, never copied into a snapshot. Brokered
+  connections use Hitch control-plane custody; `agent-native` connections
+  explicitly move the native runtime into the credential trust boundary.
+- Secure runners receive only local, worker/connection-scoped broker
+  capabilities. Hitch-managed provider secrets never enter agent arguments,
+  environment, mounts, configuration, logs, or transcripts.
+- The first secure inference path reuses Pi's version-pinned `ModelRuntime`,
+  provider catalog, auth refresh, and native streaming implementations in a
+  trusted sidecar. Native wire gateways and Hitch-authored codecs are later
+  transport modes, not one adapter per upstream.
 - Connector and local-client destinations are modeled as `Endpoint` records.
 - Endpoints connect through mutable, suspendable, and revocable `SessionEndpointBinding` records.
 - V2.0 bindings are private only. Shared endpoints may be recognized by ingress
@@ -45,8 +50,9 @@ Current decisions:
 - Provider calls consume durable per-Turn request/token reservations attributed
   to the current worker fence. Interaction waits close the broker gate, and all
   in-flight requests drain or abort before the next Turn dispatches.
-- Upstream credential injection requires an opaque authorization proving the
-  exact request fingerprint's reservation is durably `forwarding`.
+- Native provider invocation or upstream credential injection requires opaque
+  authorization proving the exact request fingerprint's reservation is durably
+  `forwarding`.
 
 Identity and authorization decisions:
 
@@ -114,9 +120,10 @@ Turn and dispatch decisions:
 - A possibly accepted prompt is never replayed automatically. Exact driver reconciliation may resolve it; otherwise
   worker loss produces an `unknown` result and an explicit retry creates a new turn.
 - Resolved-model Turns are projected explicitly into the agent and enforced by
-  the broker. Agent-selected Turns pin the first accepted provider/model choice
-  as an immutable inference resolution and cannot switch models mid-Turn. Their
-  exposed catalog is filtered to combinations that support the requested
+  the selected inference control mode. Agent-selected Turns pin the first
+  accepted provider/model choice as an immutable inference resolution and
+  cannot switch models mid-Turn. Their exposed catalog is filtered to
+  combinations supported by the exact driver/transport revision and requested
   reasoning intent.
 - Requesters may cancel their own queued turns by immutable Turn ID.
   Operators/owners may cancel any queued turn. The repository removes it only
@@ -143,26 +150,28 @@ Turn and dispatch decisions:
 - Turn completion and outbound delivery are separate state machines; delivery failure never rewrites a completed result.
 
 Structural invariants such as non-empty allowlists, unique providers, valid
-default models, exact provider-dialect pins, compatible profile/session resource
-lists, compatible workspace grants, one provider binding per selected provider,
-private binding to a private Endpoint controlled by the expected principal,
-positive timing values, invitation expiry and single-use claims, origin-scoped
-idempotency, one active turn, one durable dispatch-attempt ID through active
-lifecycle states, atomic FIFO claims and complete cancellation transitions, one
-matching inference resolution per Turn, positive finite inference ceilings,
-request-fingerprint reservation/forward authorization, reservation/ledger
-conservation, drain-before-Turn handoff, positive worker fencing tokens,
-terminal immutability, driver-protocol-to-Hitch ID allocation, payload-derived
-event durability, launch-time mount identity/destination validation, and
-active-grant reauthorization will be enforced by runtime codecs as part of the
-first vertical slice.
+default models, exact provider-connection and transport-bridge pins, compatible
+profile/session resource lists, compatible workspace grants, one provider
+binding per selected connection, private binding to a private Endpoint
+controlled by the expected principal, positive timing values, invitation expiry
+and single-use claims, origin-scoped idempotency, one active turn, one durable
+dispatch-attempt ID through active lifecycle states, atomic FIFO claims and
+complete cancellation transitions, one matching inference resolution per Turn,
+positive finite inference ceilings, request-fingerprint reservation/forward
+authorization, reservation/ledger conservation, drain-before-Turn handoff,
+positive worker fencing tokens, terminal immutability,
+driver-protocol-to-Hitch ID allocation, payload-derived event durability,
+launch-time mount identity/destination validation, and active-grant
+reauthorization will be enforced by runtime codecs as part of the first vertical
+slice.
 
 Runtime validation also rejects duplicate entries for one provider, conflicting
-dialects, dialect/model mismatches, profile/SessionSpec resource drift, replayed
-forward authorizations, and image history beyond the exact model manifest.
+connections, connection/model/native-stack or credential-custody mismatches,
+profile/SessionSpec resource drift, replayed forward authorizations,
+request-selected origins, and image history beyond the exact model manifest.
 
 The execution trust boundary, credential leases, broker request rules, sanitized
 agent configuration, and ephemeral supervisor launch authorization are
 specified in `docs/v2-execution-security-design.md`. The driver, resource, prompt
-submission, and provider adapter contract is specified in
+submission, and inference transport contract is specified in
 `docs/v2-agent-runtime-provider-design.md`.

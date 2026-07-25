@@ -21,6 +21,7 @@ import type {
   SandboxPath,
   TurnId,
 } from "./primitives.js";
+import type { InferenceExecutionMode } from "./provider-broker.js";
 import type {
   AgentRuntimeResource,
   AgentTurnInferenceConfiguration,
@@ -52,6 +53,18 @@ export interface AgentDriverCapabilities {
   readonly interactions: {
     readonly approval: "safe-once" | "unsupported";
     readonly structuredInput: "supported" | "unsupported";
+  };
+  readonly inference: {
+    readonly executionModes: readonly [
+      InferenceExecutionMode,
+      ...InferenceExecutionMode[],
+    ];
+    /**
+     * Whether the driver can project a secret-free native provider bridge into
+     * the worker. Pi supports this through an exact generated provider
+     * extension; other drivers may expose only wire or agent-native modes.
+     */
+    readonly credentialFreeNativeBridge: "supported" | "unsupported";
   };
   readonly resources: {
     readonly skills: "explicit-pinned" | "unsupported";

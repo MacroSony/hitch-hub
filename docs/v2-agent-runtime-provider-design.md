@@ -1,16 +1,21 @@
-# Hitch v2 agent runtime and provider adapter contract
+# Hitch v2 agent runtime and inference transport contract
 
 Date: 2026-07-25
 
-Status: accepted contract; the first fixed provider origin and exact model
-manifest still require selection before broker implementation.
+Status: accepted architecture; the Pi native-transport feasibility spike is the
+implementation gate.
 
 ## Decisions
 
 - The first agent protocol is Pi RPC.
-- The first provider wire protocol is OpenAI-compatible Chat Completions.
-- Provider support is a reusable protocol codec plus a reviewed, fixed-origin
-  dialect manifest. It is not an arbitrary base-URL proxy.
+- The first secure inference path reuses Pi's version-pinned `ModelRuntime` and
+  native provider implementations in a trusted sidecar.
+- Provider execution is selected per immutable connection:
+  `native-library-sidecar`, `native-wire-gateway`, `agent-native`, or
+  `hitch-protocol-adapter`.
+- Hitch-authored provider protocol adapters are a fallback, not the default.
+- A connection may target any deliberately registered upstream supported by its
+  selected native stack. An agent request cannot supply an origin.
 - Standard Pi profiles expose pinned skills, prompt templates, themes, and
   granted extensions as first-class options.
 - Pi global and project auto-discovery remains disabled. Project declarative
@@ -23,9 +28,8 @@ manifest still require selection before broker implementation.
 - A durable `submission-armed` state closes the database/pipe atomicity gap
   before the driver may write the first prompt byte.
 
-The compile-only forms of these choices are in
-`src/v2/model/agent-runtime.ts`, `provider-broker.ts`, `session.ts`, and
-`runtime-security.ts`.
+The compile-only forms of these choices are in `src/v2/model/agent-runtime.ts`,
+`provider-broker.ts`, `session.ts`, and `runtime-security.ts`.
 
 ## Runtime ownership
 
@@ -49,10 +53,13 @@ AgentTurnRun
   -> respond to an interaction, cancel, or reconcile
 ```
 
-The driver never receives process-spawn authority, canonical host paths, an
-upstream provider secret, repository access, event visibility/durability
-control, or connector delivery authority. It receives an already launched
-supervisor-owned transport and explicit sandbox paths.
+The driver never receives process-spawn authority, canonical host paths,
+repository access, event visibility/durability control, or connector delivery
+authority. In brokered modes it also never receives an upstream provider
+secret; it receives an already launched supervisor-owned transport, explicit
+sandbox paths, and a revocable local inference capability. `agent-native` is a
+separate lower-assurance mode in which the native runtime owns provider
+credentials.
 
 A launch projection names a supervisor-owned `AgentDriverLaunchProfileId`.
 That ID selects a reviewed executable and fixed base arguments. Profile data
@@ -178,10 +185,13 @@ execution policy still decides whether any model-facing tool can execute such a
 script; a skill grant does not add process authority.
 
 Extensions execute arbitrary code inside the worker and share all of its
-sandbox and broker authority. The broker cannot distinguish extension requests
-from core Pi requests. An allowed extension is therefore a reviewed trusted
-worker component, although Hitch continues to treat the entire worker as
-untrusted relative to the host control plane.
+sandbox and local inference authority. The control plane cannot distinguish an
+extension request from core Pi merely by capability possession. An allowed
+extension is therefore a reviewed trusted worker component, although brokered
+modes continue to treat the worker as untrusted relative to credentials and the
+host control plane. In `agent-native` mode, approved executable extensions also
+join the credential trust boundary; that weaker claim must be visible in the
+profile.
 
 Pi can acknowledge a prompt that an extension handled without exposing whether
 the normal agent loop ran. The first supported extension subset is therefore
@@ -197,94 +207,171 @@ the normal agent loop ran. The first supported extension subset is therefore
 A later lifecycle-aware extension contract may add explicit disposition and
 work identity. It cannot be inferred from Pi's current success response.
 
-## Provider adapter structure
+## Inference control-plane structure
 
 The selected structure is:
 
 ```text
-OpenAIChatCompletionsCodec
-  + reviewed OpenAIChatCompletionsDialectSpec
-  + exact model specs and token estimator
-  = one fixed-origin ProviderBrokerAdapter
+Hitch Turn authorization, leases, budgets, reservations, and audit
+  -> immutable ProviderConnectionSpec
+  -> selected inference execution mode
+  -> agent/native provider transport
+  -> registered upstream
 ```
 
-Alternatives rejected for the first slice:
+The four modes are:
 
-- an arbitrary OpenAI-compatible base URL, because it turns the broker into an
-  SSRF-capable forward proxy and makes compatibility/security behavior mutable;
-- one monolithic adapter per provider, because it duplicates the common Chat
-  Completions parser and validation boundary;
-- Anthropic Messages first, because it is not the user's primary provider shape
-  and provides less cross-provider leverage here;
-- OpenAI Responses first, because Chat Completions is the broader compatibility
-  target for the first non-Anthropic adapter. Responses can be a separate future
-  codec.
+| Mode | Provider serialization/parsing | Credential custody | Assurance |
+|---|---|---|---|
+| `native-library-sidecar` | version-pinned native provider library in a trusted sidecar | Hitch control plane | secure default where a library seam exists |
+| `native-wire-gateway` | agent's native client; gateway inspects then forwards bytes | Hitch control plane | secure when the inspector can enforce the required limits |
+| `agent-native` | complete native agent runtime | agent runtime | trusted-runtime compatibility mode |
+| `hitch-protocol-adapter` | Hitch-authored codec | Hitch control plane | fallback when native reuse is unavailable |
 
-The first dialect manifest pins:
+This avoids one Hitch implementation per upstream without turning the broker
+into a request-selected forward proxy. Installation configuration publishes an
+immutable `ProviderConnectionSpec` that pins:
 
-- exact HTTPS origin and `POST /v1/chat/completions`;
-- bearer authentication reconstructed by the broker;
-- exact supported model IDs, context/output limits, image/tool support, and
-  reasoning efforts;
-- exact image MIME allowlist, per-request count, per-image decoded bytes, and
-  total decoded image bytes for each image-capable model (the Hitch Turn
-  projection separately permits at most one new image);
-- `max_tokens` versus `max_completion_tokens`;
-- developer-role handling and reasoning-field encoding;
-- streaming and whether final usage is requested or the full reservation is
-  charged because that dialect cannot report it;
-- a reviewed request-header/body-field allowlist;
-- one conservative token estimator per model; and
-- explicit Pi compatibility values.
+- provider and execution mode;
+- versioned bridge, native stack/catalog digest, or protocol inspector;
+- deliberately registered upstream origins;
+- credential resolver/custody;
+- exact model manifests, context/output limits, image/tool support, portable
+  reasoning efforts, and conservative token estimator;
+- secret-free native compatibility metadata; and
+- an integrity digest used by sessions, audit, and fixtures.
 
-The HTTP boundary preserves ordered raw header pairs until duplicate
-authorization/authority/framing checks finish; it never merges those fields
-before smuggling validation. The codec rejects absolute-form targets, alternate
-routes/origins, redirects, unknown fields, mismatched listener authorities,
-proxy/forwarding headers, unsupported model aliases, unsupported features,
-non-streaming requests, and missing/non-finite output limits. The agent's
-authorization header carries only the local broker capability; it is consumed
-and never forwarded. Exact SDK-generated telemetry headers from the pinned
-Pi/OpenAI client may be validated and stripped. Only semantic headers on the
-dialect allowlist are reconstructed upstream with the real provider
-authentication. A dialect that supports `stream_options.include_usage` requires
-it; a reviewed dialect that cannot report streaming usage conservatively
-charges the full reservation.
+Changing an origin, native stack revision, inspector, credential custody, or
+model behavior publishes a new connection. The agent receives only connections
+allowed by its profile and `SessionSpec`; it never submits a base URL.
 
-A validated request is still not forwardable. The trusted broker boundary first
-atomically rechecks live authority and creates a durable token reservation tied
-to the request fingerprint. Immediately before upstream I/O, it durably moves
-that same reservation to `forwarding` and returns an opaque forward
-authorization. Only the exact request/forward-authorization pair permits the
-adapter to inject the real upstream credential and build a sendable request.
+## Pi native library sidecar
 
-Standard OpenAI client function-tool and image content shapes are enabled only
-when the exact model manifest supports them. Provider routing, storage,
-metadata, arbitrary `extra_body`, and provider-specific fields are denied
-unless a later reviewed manifest adds an exact field and validation rule.
+The first secure path reuses the exact Pi package revision used by the Pi
+driver. The trusted sidecar owns Pi's `ModelRuntime`, provider/model catalog,
+credential store, OAuth refresh behavior, and native `streamSimple` provider
+implementations:
 
-Pi sees the loopback broker as its base URL, so Pi's origin-based compatibility
-inference cannot identify the real upstream dialect. The driver must project
-the manifest's output-token field, developer-role behavior, reasoning encoding,
-streaming-usage behavior, image support, tool support, and exact profile-allowed
-model metadata/effort maps explicitly. Pi model discovery is not used.
+```text
+sandboxed Pi RPC worker
+  -> Hitch-generated, explicitly pinned provider bridge extension
+  -> versioned structured request over a supervisor-owned local endpoint
+  -> live Turn/lease/model/budget authorization
+  -> durable reservation and one-shot forwarding transition
+  -> trusted Pi ModelRuntime/provider implementation
+  -> registered upstream
+  -> Pi-native stream events back to the worker
+```
 
-## Remaining manifest selection
+The bridge extension receives only a local capability and the exact allowed
+model projection. It does not load Pi's real `auth.json`, provider environment,
+or upstream token. The sidecar may use a trusted Pi-compatible
+`CredentialStore` backed initially by the operator's existing Pi auth storage.
+OAuth refresh runs through the native provider implementation, with serialized
+credential updates and no secret crossing the bridge.
 
-The contract is implementation-ready, but the real-provider adapter cannot be
-built until these deployment values are chosen together:
+The structured bridge protocol is versioned independently from Pi. Every
+payload is untrusted input: the sidecar validates its schema, size, exact
+connection/model/reasoning selection, output limit, image limits, and active
+Turn before reservation. Native catalog discovery occurs only in the control
+plane; the worker receives a non-empty authorized projection.
 
-| Value | State |
-|---|---|
-| provider ID and fixed HTTPS origin | pending user selection |
-| exact model ID | pending user selection |
-| model context and maximum output limits | derived from selected model |
-| reasoning/developer/tool/image compatibility and image limits | derived and fixture-tested |
-| token estimator | selected for the exact model tokenizer |
+Provider compatibility, request construction, streaming parsing,
+provider-specific headers, and OAuth are Pi's responsibility. The first secure
+bridge sets Pi's native `maxRetries` to zero: each retry is a fresh Hitch
+attempt with its own reservation and forwarding authorization. Hitch owns that
+retry boundary, authorization, connection/model pinning, finite request/token
+ceilings, cancellation registration, usage settlement, and audit.
 
-This is not runtime custom-provider configuration. The chosen values become one
-reviewed built-in manifest and deterministic test fixture. Supporting a second
-origin means publishing and reviewing a second dialect manifest.
+## Native wire gateway
+
+When an agent supports a custom base URL but has no reusable library seam, it
+may serialize its native protocol to a local gateway. The gateway:
+
+- binds a capability to one immutable connection rather than trusting a URL,
+  authority, provider, or model from the request;
+- preserves ordered raw headers until authority/authentication/framing
+  ambiguity is rejected;
+- denies `CONNECT`, absolute-form targets, redirects, request-selected origins,
+  proxy headers, unsafe hop-by-hop fields, oversized bodies, and unsupported
+  routes;
+- uses a small versioned protocol inspector to extract model, reasoning, output
+  limit, features, and usage needed for policy;
+- strips the local capability and injects control-plane authentication only
+  after the durable forwarding transition; and
+- returns the sanitized HTTP status, headers, and streaming body without
+  reimplementing the agent's parser.
+
+An inspector is intentionally smaller than a provider adapter. It validates
+only the protocol facts required by Hitch and never performs compatibility
+rewrites. If it cannot establish a safe token bound or observe usage, the
+connection either charges the full conservative reservation or is incompatible
+with secure mode.
+
+## Agent-native execution
+
+Some native subscription/OAuth paths expose no supported external transport
+seam. An `agent-native` connection lets the version-pinned agent own its auth
+and provider transport while Hitch integrates through the agent protocol, such
+as Codex app-server or a future Claude Code driver.
+
+This mode is useful and supported, but it has a deliberately weaker claim:
+
+- the native agent and approved executable extensions/plugins are
+  credential-trusted;
+- Hitch can pin the process, model configuration, Turn lifetime, and observed
+  usage, but cannot prove per-request reservation or prevent a compromised
+  runtime from using its credential outside the broker gate;
+- reported usage supports audit and soft limits, not broker-enforced hard token
+  ceilings; and
+- secure unattended or mutually untrusted multi-user profiles cannot silently
+  substitute this mode for a brokered connection.
+
+Codex app-server is therefore a natural agent-native driver. API-key-backed
+Codex custom providers may instead use the native wire gateway. The same split
+applies to Claude Code when its gateway/base-URL configuration is available.
+
+## Durable forwarding boundary
+
+In brokered modes, a validated request is still not invocable. The control
+plane atomically rechecks live authority and creates a durable token reservation
+tied to the request fingerprint. Immediately before native-library invocation
+or upstream wire I/O, it durably moves that reservation to `forwarding` and
+returns opaque one-shot authorization. The exact
+request/forward-authorization pair may start at most one send.
+
+Cancellation after `forwarding` is best effort. Missing usage charges the full
+reservation. A native final-usage event or reviewed wire inspector may reconcile
+the held amount. No request or response body is durably logged.
+
+## Feasibility gate
+
+Before the repository/runtime implementation starts, a narrow Pi spike must
+prove:
+
+1. a trusted sidecar can construct Pi `ModelRuntime` with an injected
+   credential store and a network-frozen model catalog;
+2. DeepSeek and OpenAI Codex execute through their native Pi transports using
+   the existing saved credential entries;
+3. streaming text, reasoning, tools, images where supported, usage, errors,
+   cancellation, and OAuth refresh remain representable across a versioned
+   local bridge;
+4. the sandboxed Pi worker has no real provider credential or direct
+   authenticated upstream path;
+5. a stale/mismatched capability, Turn, connection, model, native-stack
+   revision, or replayed forwarding authorization fails closed; and
+6. `maxRetries: 0` reaches both native transports, so one forwarding
+   authorization cannot cause a hidden second upstream attempt.
+
+The spike may use a deterministic fake provider before opt-in real calls. Its
+purpose is to validate the seam, not implement repositories or production
+broker behavior.
+
+The initial spike pins the currently installed Pi 0.82.0 package set. It uses
+DeepSeek to exercise Pi's OpenAI-completions transport and `openai-codex` to
+exercise Pi's distinct Codex Responses/OAuth transport. Saved credential
+contents are never printed or copied into fixtures. Kimi Coding and OpenCode Go
+are follow-on compatibility cases after the two-protocol seam is proven.
 
 ## What can wait
 
@@ -295,6 +382,7 @@ origin means publishing and reviewing a second dialect manifest.
 - project `AGENTS.md`/`CLAUDE.md` snapshot and composition semantics
 - user-supplied MCP servers
 - provider/model discovery and model switching
-- a second provider protocol or origin
-- configurable custom origins
-- OpenAI Responses and Anthropic Messages codecs
+- management UI for registering provider connections
+- production `native-wire-gateway` and protocol inspectors
+- production `agent-native` Codex/Claude Code drivers
+- Hitch-authored Chat Completions, Responses, or Anthropic Messages codecs

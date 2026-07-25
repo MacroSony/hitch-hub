@@ -43,6 +43,7 @@ export type AgentProfileId = Id<"AgentProfile">;
 export type AgentProfileRevisionId = Id<"AgentProfileRevision">;
 export type AgentResourceSnapshotId = Id<"AgentResourceSnapshot">;
 export type ProviderId = Id<"Provider">;
+export type ProviderConnectionId = Id<"ProviderConnection">;
 export type ModelId = Id<"Model">;
 export type ProviderCredentialBindingId = Id<"ProviderCredentialBinding">;
 
@@ -74,10 +75,15 @@ export type AgentProtocolInteractionOptionId =
 export type AgentProtocolPermissionOptionKind =
   BrandedString<"AgentProtocolPermissionOptionKind">;
 export type ProviderApiProtocolId = BrandedString<"ProviderApiProtocolId">;
-export type ProviderDialectId = BrandedString<"ProviderDialectId">;
+export type InferenceTransportBridgeId =
+  BrandedString<"InferenceTransportBridgeId">;
+export type InferenceProtocolInspectorId =
+  BrandedString<"InferenceProtocolInspectorId">;
+export type ProviderCredentialResolverId =
+  BrandedString<"ProviderCredentialResolverId">;
 export type ProviderTokenEstimatorId = BrandedString<"ProviderTokenEstimatorId">;
 export type IntegrityDigest = BrandedString<"IntegrityDigest">;
-export type TrustedHttpsOrigin = BrandedString<"TrustedHttpsOrigin">;
+export type TrustedUpstreamOrigin = BrandedString<"TrustedUpstreamOrigin">;
 export type Base64Payload = BrandedString<"Base64Payload">;
 export type BrokerEndpoint = BrandedString<"BrokerEndpoint">;
 export type BrokerCapabilityToken = BrandedString<"BrokerCapabilityToken">;
