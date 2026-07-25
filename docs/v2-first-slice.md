@@ -467,5 +467,8 @@ implementation fixture is Pi 0.82.0 with the native-library sidecar; determinist
 tests pin the bridge behavior, while real DeepSeek and OpenAI Codex calls prove
 the two initial native transport/auth paths.
 
+The reviewed commit-sized work and acceptance mapping are maintained in
+[`v2-implementation-plan.md`](./v2-implementation-plan.md).
+
 Any proposed capability not required by an acceptance scenario stays outside
 the executable model or in `v2-deferred-design.md`.

@@ -32,6 +32,7 @@ scope, `docs/v2-agent-runtime-provider-design.md` for the Pi/resource/inference
 transport contract, `docs/v2-design-roadmap.md` for its remaining design gates,
 `spikes/pi-native-sidecar/README.md` for the completed native-provider
 feasibility proof,
+`docs/v2-implementation-plan.md` for the reviewed task/dependency sequence,
 `implementation_steps.md` for v1 rollout/maintenance status, and
 `docs/completed-work.md` for finished v1 checkpoint history.
 

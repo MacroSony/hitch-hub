@@ -162,7 +162,9 @@ The Pi `ModelRuntime` sidecar feasibility gate is satisfied by
 the Pi 0.82.0 first fixture and proves native DeepSeek and OpenAI Codex
 transport, credential isolation, structured events and usage, cancellation,
 request replay denial, and constrained sidecar egress. The first vertical-slice
-implementation may begin.
+foundation may begin. The reviewed implementation tasks, dependency graph, and
+production sidecar-egress gate are maintained in
+[`v2-implementation-plan.md`](./v2-implementation-plan.md).
 
 Future-facing contracts move into `v2-deferred-design.md` until implementation
 evidence justifies promoting them into the active model.
