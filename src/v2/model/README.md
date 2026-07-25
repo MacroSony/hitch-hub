@@ -51,6 +51,39 @@ Current decisions:
   reusable write authority.
 - Attachment commands carry a connector-minted bounded intake handle, never a
   host path, caller-selected durable ID, or unbounded in-memory byte array.
+- Attachment storage stages one bounded, MIME-sniffed and hashed Hitch-owned
+  copy before admission, then finalizes only a matching admitted Attachment or
+  rolls the stage back. Orphan recovery requires closed ingress, drained
+  admission/stage-resolution work, a store-owned generation claim, and a
+  persistence-backed sealed finalize/cleanup decision. Ingress reopens only
+  after the store proves every claim and resolution authorization was consumed.
+- Supervisor launch, broker-listener registration, native-sidecar startup, and
+  local delivery consume separate sealed one-use authorizations. A duplicate
+  after success returns the existing resource; replay after a non-running
+  outcome is rejected. Neither repeats process, credential, upstream, or
+  connector I/O.
+- Sidecar, listener, worker, and Pi-runtime discovery is keyed by the exact
+  Session/worker-lease/fence tuple. Uncertain start, shutdown, inspection, or
+  attachment returns an opaque recovery handle with a direct trusted cleanup
+  operation; absence is otherwise explicit.
+- Every external start revalidates live lease, fence, configuration, and
+  credential authority at its immediately-before-effect linearization point.
+  Startup cleanup is an exact ordered resource plan, not a partial discard.
+- The supervisor owns sandbox/process cancellation, bounded termination, and
+  descendant cleanup. The Pi driver attaches only to its supervisor-owned
+  transport and reuses the existing `AgentRuntime` and `AgentTurnRun`.
+- Worker, listener, and sidecar authority is session/worker-fence scoped and
+  reusable across serialized Turns; the first slice rejects anything other
+  than its one pinned credential/connection pair.
+- Native sidecar invocation accepts only a durable
+  `SendStartedProviderInvocation`; local delivery accepts only a currently
+  authorized in-progress attempt and immutable terminal response. Neither
+  boundary accepts caller-selected origins or destinations.
+- A binding revoked after delivery-attempt creation produces sealed evidence
+  consumed by the atomic suppression unit. Delivery atomically compares the
+  hidden binding generation while consuming its one-use token immediately
+  before the first write; late denial writes nothing and is never misreported
+  as a transport failure.
 - Ready provider invocations and interaction responses must cross a separate
   durable send-started compare-and-swap before their external bridge/driver
   accepts them. The external boundary rejects replayed dispatch IDs, and

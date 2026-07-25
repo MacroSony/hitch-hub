@@ -8,6 +8,7 @@ import type {
   ConnectorCommandResponse,
   ConnectorCommand,
   DeliveryAttemptUnitOfWork,
+  DeliveryAuthorizationRevocationEvidence,
   FirstSliceTransactionPort,
   IdSource,
   InferenceForwardingUnitOfWork,
@@ -364,6 +365,23 @@ type _DeliveryTransportCannotAuthorEndTime = Assert<
 >;
 type _DeliveryTransportCannotAuthorRetrySchedule = Assert<
   Equal<HasKey<DeliveryOutcomeInput, "nextAttemptAt">, false>
+>;
+type _LateDeliveryRevocationHasAtomicSuppression = Assert<
+  Equal<
+    HasKey<DeliveryAttemptUnitOfWork, "recordDeliveryAuthorizationRevoked">,
+    true
+  >
+>;
+type _CallerCannotForgeDeliveryRevocationEvidence = Assert<
+  Equal<
+    {
+      readonly deliveryAttemptId: DeliveryAuthorizationRevocationEvidence["deliveryAttemptId"];
+      readonly reason: DeliveryAuthorizationRevocationEvidence["reason"];
+    } extends DeliveryAuthorizationRevocationEvidence
+      ? true
+      : false,
+    false
+  >
 >;
 
 type _BootstrapPublishesStableWorkspaceIdentity = Assert<

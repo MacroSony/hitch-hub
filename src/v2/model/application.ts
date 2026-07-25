@@ -119,6 +119,7 @@ declare const authenticatedConnectorContextBrand: unique symbol;
 declare const trustedServiceAuthorizationContextBrand: unique symbol;
 declare const boundedConnectorImageUploadBrand: unique symbol;
 declare const preparedAttachmentAdmissionBrand: unique symbol;
+declare const deliveryAuthorizationRevocationBrand: unique symbol;
 
 /** Audit envelopes narrowed to the semantic action owned by a unit of work. */
 export type AuditEnvelopeFor<Action extends AuditAction> = Extract<
@@ -1446,6 +1447,13 @@ export type DeliveryTransportOutcome =
         | "send-failed";
     };
 
+/** Sealed immediately-before-send evidence that live delivery authority ended. */
+export interface DeliveryAuthorizationRevocationEvidence {
+  readonly [deliveryAuthorizationRevocationBrand]: true;
+  readonly deliveryAttemptId: TurnResponseDeliveryAttemptId;
+  readonly reason: "binding-inactive" | "recipient-no-longer-authorized";
+}
+
 export type DeliveryAttemptOutcomeResultFor<
   Outcome extends DeliveryTransportOutcome,
 > = Outcome extends { readonly status: "delivered" }
@@ -1545,6 +1553,35 @@ export interface DeliveryAttemptUnitOfWork {
     readonly deliveryAttemptId: TurnResponseDeliveryAttemptId;
     readonly outcome: Outcome;
   }): Promise<DeliveryAttemptOutcomeResultFor<Outcome>>;
+  recordDeliveryAuthorizationRevoked(input: {
+    readonly context: DeliveryServiceContext;
+    readonly revocation: DeliveryAuthorizationRevocationEvidence;
+  }): Promise<
+    | {
+        readonly status: "suppressed";
+        readonly delivery: TurnResponseDelivery & {
+          readonly state: Extract<
+            TurnResponseDeliveryState,
+            { readonly status: "suppressed" }
+          >;
+        };
+        readonly attempt: TurnResponseDeliveryAttempt & {
+          readonly state: Extract<
+            TurnResponseDeliveryAttemptState,
+            { readonly status: "suppressed" }
+          >;
+        };
+        readonly auditEvents: RequiredAuditEventsFor<
+          "response-delivery-attempt-recorded"
+        >;
+      }
+    | {
+        readonly status: "not-in-progress";
+        readonly auditEvents: AuditEventsFor<
+          "response-delivery-attempt-recorded"
+        >;
+      }
+  >;
   /**
    * Restart-only closure for an attempt left in-progress when its external
    * transport observation was lost. Persistence derives retry scheduling or
