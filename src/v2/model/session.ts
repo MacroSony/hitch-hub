@@ -10,6 +10,7 @@ import type {
   AgentDriverId,
   AgentProfileId,
   AgentProfileRevisionId,
+  AgentResourceSnapshotId,
   AgentResumeHandleId,
   CanonicalHostPath,
   ExecutionPolicyId,
@@ -18,11 +19,13 @@ import type {
   ExtensionGrantSnapshotId,
   ExtensionId,
   ExtensionRevisionId,
+  IntegrityDigest,
   IsoTimestamp,
   JsonObject,
   ModelId,
   PrincipalId,
   ProviderCredentialBindingId,
+  ProviderDialectId,
   ProviderId,
   SandboxPath,
   SessionId,
@@ -56,7 +59,55 @@ export type ProviderModelAllowance = AllProviderModels | ExplicitProviderModels;
 
 export interface AgentProviderAllowance {
   readonly providerId: ProviderId;
+  /** Exact immutable built-in compatibility manifest for this provider. */
+  readonly providerDialectId: ProviderDialectId;
   readonly models: ProviderModelAllowance;
+}
+
+export type AgentDeclarativeResourceMode =
+  | {
+      /** No resource of this kind is projected into the agent runtime. */
+      readonly mode: "disabled";
+    }
+  | {
+      /**
+       * Only immutable resources named by the profile or SessionSpec are
+       * projected. The agent's normal global/project discovery is disabled.
+       */
+      readonly mode: "pinned";
+      readonly projectResources: "disabled" | "snapshot-at-session-creation";
+    };
+
+export type AgentExtensionResourceMode =
+  | {
+      readonly mode: "disabled";
+    }
+  | {
+      /**
+       * Executable extension code must have an exact revision, integrity
+       * digest, and ExtensionGrantSnapshot. Package resolution occurs before
+       * publication; runtimes receive explicit sandbox paths only.
+       */
+      readonly mode: "granted-only";
+      readonly discovery: "explicit-only";
+      readonly hotReload: false;
+      /**
+       * The first Pi driver permits only extensions that preserve the normal
+       * agent-loop lifecycle for every submitted Turn.
+       */
+      readonly promptLifecycle: "agent-loop-preserving";
+    };
+
+/**
+ * Resource loading is explicit profile policy, not an ambient agent behavior.
+ * The standard Pi profile enables pinned declarative resources and granted
+ * extensions while disabling project auto-discovery unless separately chosen.
+ */
+export interface AgentResourcePolicy {
+  readonly skills: AgentDeclarativeResourceMode;
+  readonly promptTemplates: AgentDeclarativeResourceMode;
+  readonly themes: AgentDeclarativeResourceMode;
+  readonly extensions: AgentExtensionResourceMode;
 }
 
 /**
@@ -73,6 +124,13 @@ export interface AgentProfileRevision {
   readonly providers: readonly AgentProviderAllowance[];
   readonly defaultModel?: ModelRef;
   readonly defaultReasoning: TurnReasoningSelection;
+  readonly resourcePolicy: AgentResourcePolicy;
+  /**
+   * Exact resources selected by this profile. SessionSpec repeats the resolved
+   * list and may add only policy-permitted project snapshots.
+   */
+  readonly agentResourceSnapshotIds: readonly AgentResourceSnapshotId[];
+  readonly extensionGrantSnapshotIds: readonly ExtensionGrantSnapshotId[];
   readonly configuration: JsonObject;
   readonly createdAt: IsoTimestamp;
 }
@@ -174,14 +232,63 @@ export interface ExecutionPolicySnapshot {
   readonly createdAt: IsoTimestamp;
 }
 
+export type AgentDeclarativeResourceKind =
+  | "skill"
+  | "prompt-template"
+  | "theme";
+
+/**
+ * Immutable declarative content loaded from a trusted profile publication or
+ * snapshotted from the workspace at session creation. The snapshot ID resolves
+ * through trusted storage; no host path is part of the session model.
+ */
+export interface AgentResourceSnapshot {
+  readonly id: AgentResourceSnapshotId;
+  readonly kind: AgentDeclarativeResourceKind;
+  readonly source:
+    | { readonly kind: "profile" }
+    | {
+        readonly kind: "project-snapshot";
+        readonly workspaceRevisionId: WorkspaceRevisionId;
+      };
+  readonly displayName: string;
+  readonly integrityDigest: IntegrityDigest;
+  readonly createdAt: IsoTimestamp;
+}
+
+/** Exact published executable artifact; package resolution has already ended. */
+export interface ExtensionRevision {
+  readonly id: ExtensionRevisionId;
+  readonly extensionId: ExtensionId;
+  readonly revision: number;
+  readonly displayName: string;
+  readonly integrityDigest: IntegrityDigest;
+  /**
+   * Schema for reviewed extension-specific values. It cannot authorize raw
+   * arguments, environment entries, host paths, or credential material.
+   */
+  readonly configurationSchema: JsonObject;
+  readonly createdAt: IsoTimestamp;
+}
+
 /**
  * An immutable capability grant for one exact extension revision. Capability
- * definitions will be designed separately; this record contains no secret.
+ * definitions are driver-specific. Extension code is part of the trusted
+ * worker computing base: it shares the agent's broker and sandbox capabilities.
  */
 export interface ExtensionGrantSnapshot {
   readonly id: ExtensionGrantSnapshotId;
   readonly extensionId: ExtensionId;
   readonly extensionRevisionId: ExtensionRevisionId;
+  readonly integrityDigest: IntegrityDigest;
+  readonly loading: "explicit-pinned";
+  /** Validated against the exact revision's configuration schema. */
+  readonly configuration: JsonObject;
+  /**
+   * The first Pi slice excludes extensions that fully handle a prompt, create
+   * background inference, or otherwise hide Turn disposition from the driver.
+   */
+  readonly promptLifecycle: "agent-loop-preserving";
   readonly capabilities: readonly ExtensionCapabilityId[];
   readonly createdAt: IsoTimestamp;
 }
@@ -203,6 +310,7 @@ export interface SessionSpec {
   readonly workspaceRevisionId: WorkspaceRevisionId;
   readonly executionPolicySnapshotId: ExecutionPolicySnapshotId;
   readonly turnPolicySnapshotId: TurnPolicySnapshotId;
+  readonly agentResourceSnapshotIds: readonly AgentResourceSnapshotId[];
   readonly extensionGrantSnapshotIds: readonly ExtensionGrantSnapshotId[];
   readonly providerBindings: readonly SessionProviderBinding[];
   readonly createdAt: IsoTimestamp;

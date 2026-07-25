@@ -8,7 +8,9 @@
 
 import type {
   AccessGrantId,
+  AgentDispatchAttemptId,
   AgentDriverPermissionMediationId,
+  AgentProtocolInteractionId,
   AgentProtocolInteractionOptionId,
   AgentProtocolMessageId,
   AgentProtocolPermissionOptionKind,
@@ -431,36 +433,57 @@ export type TurnLifecycleState =
   | { readonly status: "queued" }
   | {
       readonly status: "dispatching";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly attempt: number;
       readonly startedAt: IsoTimestamp;
     }
   | {
-      /** Transport write succeeded, but no agent acceptance evidence exists. */
+      /**
+       * Durably committed before a driver may attempt to submit protocol bytes.
+       * The broker gate remains closed. Recovery assumes submission may have
+       * occurred unless a live driver proves that no byte could have been sent.
+       */
+      readonly status: "submission-armed";
+      readonly attemptId: AgentDispatchAttemptId;
+      readonly attempt: number;
+      readonly armedAt: IsoTimestamp;
+    }
+  | {
+      /**
+       * A complete protocol frame may have reached the agent, but no prompt
+       * acceptance evidence exists.
+       */
       readonly status: "submitted-unconfirmed";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly attempt: number;
       readonly submittedAt: IsoTimestamp;
     }
   | {
       readonly status: "accepted";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly acceptedAt: IsoTimestamp;
       readonly evidence: PromptAcceptanceEvidence;
     }
   | {
       readonly status: "running";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly startedAt: IsoTimestamp;
     }
   | {
       readonly status: "waiting-for-approval";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly interactionId: TurnInteractionId;
       readonly waitingSince: IsoTimestamp;
     }
   | {
       readonly status: "waiting-for-input";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly interactionId: TurnInteractionId;
       readonly waitingSince: IsoTimestamp;
     }
   | {
       readonly status: "cancelling";
+      readonly attemptId: AgentDispatchAttemptId;
       readonly requestedAt: IsoTimestamp;
       readonly requestedBy: AuditActorRef;
       readonly reason: TurnCancellationReason;
@@ -687,6 +710,8 @@ export type TurnInteractionState<
 interface TurnInteractionBase {
   readonly id: TurnInteractionId;
   readonly turnId: TurnId;
+  /** Agent/driver-local correlation only; Hitch still assigns `id`. */
+  readonly protocolInteractionId: AgentProtocolInteractionId;
   readonly requestedAt: IsoTimestamp;
   readonly expiresAt: IsoTimestamp;
 }
@@ -813,8 +838,9 @@ export type DurableTurnEventPayload =
 export type TurnEventVisibility = "internal" | "requester" | "session-readers";
 
 /**
- * Hitch assigns IDs and sequence after validating a driver event. Driver-
- * supplied IDs are optional correlation metadata and are never domain identity.
+ * Hitch assigns IDs, sequence, and visibility after validating a driver event.
+ * Driver-supplied IDs are optional correlation metadata and are never domain
+ * identity. A driver never selects an event's audience.
  *
  * Durability is deliberately absent from the event. The storage boundary
  * derives transient/checkpoint/durable handling exhaustively from payload.kind,

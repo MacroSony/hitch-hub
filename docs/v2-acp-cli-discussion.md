@@ -2,6 +2,10 @@
 
 日期：2026-07-23
 
+状态：架构讨论存档。首个可执行切片的实现顺序已由
+[`v2-first-slice.md`](./v2-first-slice.md) 取代：先实现本地结构化 CLI +
+Pi RPC；PTY 和 ACP 均延后。
+
 ---
 
 ## 一、ACP 协议定位
@@ -82,9 +86,13 @@ Pi 的 RPC 模式不支持 `custom()`、编辑器组件、主题等 TUI 专属�
 
 ## 四、下一步建议
 
-1. **先做 CLI PTY 模式**——最小成本验证 hitch 作为"安全启动器"的价值
-2. **增加 ACP AgentDriver**——先 v1，与 Pi RPC 原生 driver 并存，逐步跟进 v2
-3. **CLI structured 模式**——复用统一 dispatch service，按 profile 选择 ACP 或原生 driver
-4. **统一 dispatch service**——按已有 roadmap phase 5-9
+以下顺序是讨论时的原始建议，现已被首个可执行切片取代，不是当前实施计划：
 
-优先级：PTY 模式最快出价值，ACP 集成是长期架构优化。
+1. ~~先做 CLI PTY 模式~~
+2. ~~增加 ACP AgentDriver~~
+3. ~~CLI structured 模式~~
+4. ~~统一 dispatch service~~
+
+当前顺序：先完成切片所需的最小 `AgentDriver` / supervisor
+契约和固定 provider broker adapter，再实现结构化 CLI 纵向路径。PTY 需要独立的
+`InteractiveRun` 生命周期与安全声明；ACP 仍是长期互操作目标。

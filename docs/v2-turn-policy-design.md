@@ -71,6 +71,9 @@ queued
 dispatching
   |
   v
+submission-armed
+  |
+  v
 submitted-unconfirmed
   |-- explicit acknowledgement --> accepted --> running
   |-- first attributable event ----------------> running
@@ -78,8 +81,17 @@ submitted-unconfirmed
   `-- worker/connection loss -------------------> terminal/unknown
 ```
 
-Transport write success means only that bytes reached a pipe or socket. It does
-not prove that the agent parsed, recorded, or began the prompt.
+One opaque `AgentDispatchAttemptId` is allocated and persisted when dispatch
+starts, then carried through every non-terminal active lifecycle state.
+`submission-armed` is committed before the driver may attempt the first protocol
+prompt byte. The provider gate is still closed, but recovery treats the exact
+attempt as possibly submitted unless a live driver proves that no byte could
+have been written. This durable identity and conservative state close the
+database/transport atomicity gap.
+
+Complete protocol-frame write moves to `submitted-unconfirmed`. It means only
+that bytes reached a pipe or socket; it does not prove that the agent parsed,
+recorded, or began the prompt.
 
 Acceptance evidence is limited to:
 
@@ -108,6 +120,7 @@ causal guarantee. An uncorrelated update is never acceptance evidence.
 |---|---|
 | queued | dispatch normally |
 | dispatch failed before write | retry within the before-acceptance limit |
+| submission armed | do not replay unless the live driver proves no byte was written |
 | submitted but unconfirmed | do not replay; reconcile or mark unknown |
 | explicitly accepted | resume/reconnect; do not replay |
 | running | resume/reconnect; do not replay |
@@ -144,8 +157,12 @@ Queue-control authority:
 - a content-blind administrator may cancel/clear queued work without reading it
   through `turn.admin.cancel`
 - authority loss automatically cancels affected queued work
-- once claiming/dispatch begins, queued cancellation fails; active cancellation uses
-  session-control authority
+- once claiming/dispatch begins, queued cancellation fails
+- the requester may cancel their own active Turn through `turn.cancel`
+- a session operator or owner may cancel any active Turn through
+  `session.control`
+- a content-blind administrator may cancel active work through
+  `turn.admin.cancel`
 
 Cancellation is addressed to an immutable Turn ID and succeeds only while that
 Turn remains pending. A retry that observes the resulting terminal cancellation
@@ -159,7 +176,7 @@ Portable controls:
 
 - list queue
 - cancel by Turn ID or short display ID
-- cancel the active turn separately
+- cancel the active Turn by immutable Turn ID
 
 CLI commands, IM commands, and connector-native buttons are projections of the
 same application-service operations. Queue views reveal prompt content only
@@ -336,7 +353,8 @@ The preferred ACP v1 mapping is:
 |---|---|
 | queue head | one `session/prompt` request |
 | content blocks | capability-filtered ACP `ContentBlock[]` |
-| submitted-unconfirmed | prompt written, no attributable update |
+| submission-armed | durable authorization to call `session/prompt` |
+| submitted-unconfirmed | prompt request submitted, no attributable update |
 | running evidence | causally attributable `session/update` |
 | message/tool correlation | optional opaque ACP IDs |
 | terminal result | `PromptResponse.stopReason` plus Hitch-only failures |

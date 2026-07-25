@@ -1,6 +1,9 @@
 # Security, Sandbox, and Automation Roadmap
 
-Status: phases 0-4 and the credential-containment follow-up are implemented and reviewed on 2026-07-16; restricted live soak and Pi compatibility protection precede phase 5 unified dispatch.
+Status: historical v1 roadmap. Phases 0-4 and the credential-containment
+follow-up are implemented; later v1 phases are frozen. The clean replacement is
+governed by [`v2-first-slice.md`](./v2-first-slice.md) and
+[`v2-design-roadmap.md`](./v2-design-roadmap.md).
 
 This document records the intended order for per-principal authorization, persistent agent state, Linux Bubblewrap isolation, generic proactive triggers, and scheduled agent work. It also reconciles this direction with the older broad roadmap in [`plan.md`](../plan.md).
 
@@ -209,7 +212,10 @@ Implementation note (2026-07-16): complete for the isolation MVP. Pi now launche
 
 Credential-containment follow-up (2026-07-16): required mode now provisions and attests only Hitch's guard, limits model-facing tools to workspace file operations and an authenticated native media adapter, scans command-backed credential configuration, and validates both raw and Pi-normalized paths. Session media is intersected with active mounts and global export roots and delivered from a private immutable snapshot. The remaining provider credential exposure is explicitly the Pi controller/config boundary, not the model tool surface.
 
-### 5. Extract a single session-dispatch service
+### 5. Frozen v1 proposal: extract a single session-dispatch service
+
+This phase is retained as historical input to the v2 Turn and application
+service designs. It is not an active v1 implementation task.
 
 Refactor chat-driven prompt execution into one internal path:
 
@@ -302,9 +308,10 @@ Follow-up work beyond the minimum unattended profile:
 - stronger isolation for third-party extension/helper code
 - richer enforcement receipts and quota-usage diagnostics
 
-## Remaining Work After the Implemented Foundation
+## Historical Remaining Work After the Implemented Foundation
 
-Principal ownership, persistent state, and Bubblewrap are complete. The remaining merge order is:
+Principal ownership, persistent state, and Bubblewrap are complete. The
+following was the proposed v1 merge order before the v2 replacement was chosen:
 
 ```text
 unified dispatch

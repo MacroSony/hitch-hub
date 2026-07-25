@@ -11,18 +11,21 @@
 import type {
   AgentDriverId,
   AgentProfileRevisionId,
+  AgentResourceSnapshotId,
   BrokerCapabilityToken,
   BrokerEndpoint,
   CanonicalHostPath,
   CredentialLeaseId,
   ExecutionPolicySnapshotId,
   ExtensionGrantSnapshotId,
+  IntegrityDigest,
   InstallationId,
   IsoTimestamp,
   JsonObject,
   ModelId,
   ProviderApiProtocolId,
   ProviderCredentialBindingId,
+  ProviderDialectId,
   ProviderId,
   SandboxPath,
   SessionId,
@@ -33,6 +36,10 @@ import type {
   WorkspaceRevisionId,
 } from "./primitives.js";
 import type { AuditActorRef } from "./identity-access.js";
+import type {
+  OpenAIChatCompletionsAgentCompatibility,
+  OpenAIChatCompletionsModelSpec,
+} from "./provider-broker.js";
 import type {
   ProviderModelAllowance,
   TurnModelSelection,
@@ -118,6 +125,7 @@ export interface CredentialLease {
   readonly workerFencingToken: number;
   readonly credentialBindingId: ProviderCredentialBindingId;
   readonly providerId: ProviderId;
+  readonly providerDialectId: ProviderDialectId;
   readonly allowedModels: ProviderModelAllowance;
   readonly state: CredentialLeaseState;
   readonly issuedAt: IsoTimestamp;
@@ -134,6 +142,7 @@ export interface RuntimeBrokerCapability {
   readonly credentialLeaseId: CredentialLeaseId;
   readonly providerId: ProviderId;
   readonly apiProtocolId: ProviderApiProtocolId;
+  readonly providerDialectId: ProviderDialectId;
   readonly endpoint: BrokerEndpoint;
   readonly bearerToken: BrokerCapabilityToken;
 }
@@ -148,7 +157,11 @@ export interface VerifiedSupervisorLaunchMount {
   readonly canonicalHostPath: CanonicalHostPath;
   readonly sandboxPath: SandboxPath;
   readonly access: WorkspaceAccess;
-  readonly purpose: "workspace" | "state" | "agent-runtime" | "extension";
+  readonly purpose:
+    | "workspace"
+    | "state"
+    | "agent-runtime"
+    | "agent-resource";
 }
 
 /**
@@ -159,7 +172,21 @@ export interface VerifiedSupervisorLaunchMount {
 export interface AgentProviderRuntimeConfiguration {
   readonly providerId: ProviderId;
   readonly apiProtocolId: ProviderApiProtocolId;
+  readonly providerDialectId: ProviderDialectId;
   readonly broker: RuntimeBrokerCapability;
+  /**
+   * Profile-allowed models intersected with the exact dialect manifest and live
+   * policy. Pi receives these explicit values instead of discovering models.
+   */
+  readonly models: readonly [
+    OpenAIChatCompletionsModelSpec,
+    ...OpenAIChatCompletionsModelSpec[],
+  ];
+  /**
+   * Explicit projection used by Pi instead of base-URL origin inference. It
+   * contains protocol behavior only, never the real upstream origin.
+   */
+  readonly compatibility: OpenAIChatCompletionsAgentCompatibility;
 }
 
 export interface AgentTurnProviderCatalog {
@@ -198,13 +225,42 @@ export type AgentTurnInferenceConfiguration =
     };
 
 /**
+ * Explicit resources projected into one runtime. A driver receives only
+ * verified sandbox paths. Declarative resources may influence the model;
+ * extensions additionally execute with the worker's full sandbox authority.
+ */
+export type AgentRuntimeResource =
+  | {
+      readonly kind: "skill" | "prompt-template" | "theme";
+      readonly trust: "agent-instruction";
+      readonly snapshotId: AgentResourceSnapshotId;
+      readonly integrityDigest: IntegrityDigest;
+      readonly sandboxPath: SandboxPath;
+    }
+  | {
+      readonly kind: "extension";
+      readonly trust: "worker-executable";
+      readonly grantSnapshotId: ExtensionGrantSnapshotId;
+      readonly integrityDigest: IntegrityDigest;
+      readonly sandboxPath: SandboxPath;
+      readonly loading: "explicit-pinned";
+      readonly promptLifecycle: "agent-loop-preserving";
+      /** Secret-free, host-path-free values validated at publication/launch. */
+      readonly configuration: JsonObject;
+    };
+
+/**
  * The only launch-time configuration projection an AgentDriver may give the
  * agent.
  */
 export interface SanitizedAgentRuntimeConfiguration {
   readonly driverId: AgentDriverId;
   readonly workingDirectory: SandboxPath;
-  readonly providers: readonly AgentProviderRuntimeConfiguration[];
+  readonly providers: readonly [
+    AgentProviderRuntimeConfiguration,
+    ...AgentProviderRuntimeConfiguration[],
+  ];
+  readonly resources: readonly AgentRuntimeResource[];
   readonly profileConfiguration: SanitizedAgentProfileConfiguration;
 }
 
@@ -221,6 +277,7 @@ export interface SupervisorLaunchAuthorization {
   readonly agentProfileRevisionId: AgentProfileRevisionId;
   readonly workspaceRevisionId: WorkspaceRevisionId;
   readonly executionPolicySnapshotId: ExecutionPolicySnapshotId;
+  readonly agentResourceSnapshotIds: readonly AgentResourceSnapshotId[];
   readonly extensionGrantSnapshotIds: readonly ExtensionGrantSnapshotId[];
   readonly mounts: readonly VerifiedSupervisorLaunchMount[];
   readonly credentialLeases: readonly CredentialLease[];

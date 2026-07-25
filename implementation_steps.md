@@ -20,7 +20,11 @@ Status legend:
 
 The reliability, durable delivery, principal ownership, private runtime state, Linux Bubblewrap, credential guard, and guarded native media milestones are implemented. The live single-principal profile is ready for a restricted workspace soak; explicit direct execution remains an unsafe configuration-only mode.
 
-After the restricted soak and Pi-version compatibility follow-up, the next production code change should extract one internal session-dispatch path before adding triggers or schedules. Chat handling already has the semantics that unattended work will need; those semantics should be centralized instead of duplicated.
+V1 is now a frozen maintenance baseline. Do not perform the previously planned
+v1 unified-dispatch refactor or add triggers, schedules, channels, or backends to
+it. The canonical v2 implementation scope is
+[docs/v2-first-slice.md](docs/v2-first-slice.md), with the remaining design order
+in [docs/v2-design-roadmap.md](docs/v2-design-roadmap.md).
 
 ## Immediate Rollout: Restricted Sandbox and Multi-User Preparation
 
@@ -46,9 +50,11 @@ Rollout note (2026-07-19): the clean branch was published, CI and one aggregate 
 
 Residual boundary: provider credentials still exist in Pi's controller process/config mount. This containment prevents model-facing tools from reaching them; it does not replace a provider broker or protect against a compromised Pi/controller runtime.
 
-## Next Iteration: Unified Session Dispatch
+## Superseded V1 Proposal: Unified Session Dispatch
 
-Goal: make chat and future trigger producers call one owned, re-authorized prompt runner without changing current chat behavior.
+Status: frozen; retained only as historical context. Its required semantics are
+captured by the clean v2 Turn/application-service design instead of being added
+to the v1 hub.
 
 Checklist:
 

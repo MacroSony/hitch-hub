@@ -1,8 +1,12 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a broad architecture roadmap, not the verified implementation inventory. The Telegram/Pi proof of concept, WeChat adapter, sessions, approvals, inbound/outbound media, multi-channel routing, durable delivery, hard turn deadlines, principal authorization, private runtime state, and fail-closed Bubblewrap isolation have landed. See `README.md` for the implemented surface, `implementation_steps.md` for active work, `docs/completed-work.md` for checkpoint history, and `docs/security-sandbox-automation-roadmap.md` for the current order covering unified dispatch, trigger durability, unattended-execution safeguards, and scheduling. Where this older broad roadmap differs on those topics, the focused follow-on document records the current decision and unresolved conflicts.
+> Current-state note: this is a historical broad architecture roadmap, not the verified implementation inventory or current implementation order. V1 is frozen as a maintenance baseline. See `README.md` for the implemented v1 surface, `implementation_steps.md` for rollout/maintenance status, `docs/completed-work.md` for checkpoint history, and `docs/v2-first-slice.md` for the canonical first executable v2 scope.
 
-## Current Roadmap Reset (July 2026)
+## Historical V1 Roadmap Reset (July 2026)
+
+The order below is preserved as context and is not the active implementation
+plan. Its unified-dispatch, trigger, and scheduling phases were superseded by
+the clean v2 replacement.
 
 The original milestones correctly prioritized proving Telegram + Pi, but the implementation has moved beyond that sequence: WeChat arrived before Discord and a second backend, while live delivery behavior exposed operability gaps that matter more than adding breadth.
 
@@ -1008,10 +1012,12 @@ remote-agent-hub/
 
 ## 21. Recommended Immediate Next Step
 
-The reliability, delivery-evidence, principal-ownership, Bubblewrap, and credential-guard foundations are complete.
-The immediate rollout step is a fresh single-principal restricted WeChat soak after attesting the installed Pi path
-resolver against Hitch's credential guard. The next production code slice is the owned, re-authorized unified session
-dispatch service described in `docs/security-sandbox-automation-roadmap.md`.
+The reliability, delivery-evidence, principal-ownership, Bubblewrap, and
+credential-guard foundations are complete and frozen in v1. The immediate
+design work is to select the exact fixed provider origin/model manifest required
+by `docs/v2-agent-runtime-provider-design.md`. After that manifest and the
+current contracts pass review, implementation begins with the clean v2
+repository/transaction skeleton consumed by `docs/v2-first-slice.md`.
 
-Do not add triggers, schedules, Discord, a second backend, or group-shared sessions in this slice. Unattended work
-still requires explicit resource, credential, network, temporary-storage, output, and extension safeguards.
+Do not add triggers, schedules, new IM channels, a second backend, PTY, ACP, or
+group-shared sessions to the first slice.

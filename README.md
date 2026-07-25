@@ -26,7 +26,12 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Explicit session-scoped `hitch.send_media` hub tool/MCP path for outbound media, with path auto-discovery disabled by default
 - Basic text chunking, summarized tool-output delivery, and timeout handling
 
-See `implementation_steps.md` for the current iteration checklist, `docs/completed-work.md` for finished checkpoint history, and `docs/hub-tools-mcp.md` for the explicit outbound media/tool design.
+V1 is frozen as a maintenance baseline while v2 is developed as a clean
+replacement. See `docs/v2-first-slice.md` for the canonical first executable v2
+scope, `docs/v2-agent-runtime-provider-design.md` for the Pi/resource/provider
+contract, `docs/v2-design-roadmap.md` for its remaining design gates,
+`implementation_steps.md` for v1 rollout/maintenance status, and
+`docs/completed-work.md` for finished v1 checkpoint history.
 
 ## Requirements
 

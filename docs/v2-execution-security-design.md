@@ -2,8 +2,8 @@
 
 Date: 2026-07-24
 
-Status: accepted domain design; runtime codecs, broker adapters, and services are
-not implemented.
+Status: accepted domain and adapter contract; runtime codecs, concrete provider
+manifest, broker, and services are not implemented.
 
 ## Security claim
 
@@ -61,8 +61,19 @@ therefore confined to the same worker, active-Turn lifecycle window,
 provider/model, and usage limits. The broker cannot distinguish an extension
 from the main agent process or prove which in-process task caused a request.
 Extensions that embed, request, or require an upstream credential are
-incompatible with secure mode. Optional extensions remain disabled in the first
-secure vertical slice until their integrity and capability behavior are tested.
+incompatible with secure mode.
+
+The first slice permits only exact, integrity-pinned extension revisions with an
+immutable grant. Pi ambient/project discovery and hot reload are disabled; the
+driver supplies explicit sandbox paths. Because Pi's prompt acknowledgement
+does not distinguish a fully extension-handled prompt from its normal agent
+loop, first-slice extension grants must be `agent-loop-preserving` and forbid
+hidden terminal handling or background inference. These extensions are reviewed
+worker components and share the worker's authority; they are not isolated
+plugins. Pinned skills, prompt templates, and themes are declarative
+agent-instruction resources and do not grant process authority. The full
+contract is in
+[`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md).
 
 ## Records and runtime material
 
@@ -123,10 +134,13 @@ so Hitch does not claim it can redact every malicious disclosure.
 ```text
 agent provider client
   -> local broker endpoint + scoped capability
+  -> validate raw authority/framing/header pairs before canonicalization
   -> authenticate CredentialLease
   -> verify current WorkerLease ID and fencing token
   -> require one active authorized Turn for the session
   -> validate API protocol, provider, model, reasoning, and limits
+  -> atomically reserve request/tokens for the normalized request fingerprint
+  -> durably mark that reservation forwarding
   -> inject broker-owned upstream credential
   -> trusted HTTPS provider origin
   -> stream the provider response to the agent
@@ -147,10 +161,13 @@ arbitrary destination URL, or HTTP `CONNECT`. Each adapter:
 - allowlists methods, routes, headers, and provider API versions
 - parses origin-form request targets only and rejects alternate schemes,
   authorities, encoded traversal, and ambiguous encodings
-- reconstructs upstream authentication rather than forwarding agent-supplied
-  authorization
-- rejects `CONNECT`, agent-supplied `Host`, authorization, proxy, forwarding,
-  cookie, and hop-by-hop headers
+- consumes the exact local broker authorization capability and reconstructs
+  upstream authentication rather than forwarding it
+- requires the HTTP authority to match the loopback listener and rejects
+  `CONNECT`, alternate/malformed `Host`, proxy, forwarding, cookie, and unsafe
+  hop-by-hop headers
+- preserves ordered raw header pairs until duplicate `Host`, `Authorization`,
+  `Content-Length`, `Transfer-Encoding`, and framing ambiguity are rejected
 - enforces fixed header, request-body, response-body, and concurrency ceilings
 - never follows redirects or accepts a destination outside the configured
   provider
@@ -158,9 +175,18 @@ arbitrary destination URL, or HTTP `CONNECT`. Each adapter:
 - supports streaming without logging request or response bodies
 - normalizes sanitized status, usage, latency, and failure metadata for audit
 
-The first adapter uses a built-in fixed provider origin. Custom/configurable
-origins are unsupported until a separately reviewed installation allowlist also
-rejects loopback, private, link-local, and otherwise unsafe resolved addresses.
+The first adapter uses the reusable OpenAI-compatible Chat Completions codec
+bound to one built-in, reviewed `OpenAIChatCompletionsDialectSpec`. The dialect
+fixes `POST /v1/chat/completions`, bearer authentication, models, token limits,
+reasoning/developer behavior, tool/image support and exact image limits, request
+fields, streaming usage behavior, token estimation, and the upstream HTTPS
+origin. A dialect that cannot report final streaming usage charges the full
+reservation. The broker never accepts an origin or compatibility option from
+the agent request. The concrete first origin and model are still pending
+selection.
+Custom/configurable origins are unsupported until a separately reviewed
+installation allowlist also rejects loopback, private, link-local, and otherwise
+unsafe resolved addresses.
 
 Agents may still use permitted host-network access for non-provider internet
 traffic. Hitch-provisioned direct provider calls are unauthenticated because real
@@ -174,8 +200,8 @@ Before forwarding every provider request, the broker must verify:
 2. The referenced `ProviderCredentialBinding` is active and still belongs to
    the expected installation and provider.
 3. The exact `WorkerLease` ID and fencing token still own the session runtime.
-4. The session has one current active Turn whose prompt write is durably
-   `submitted-unconfirmed`, `accepted`, or `running`.
+4. The session has one current active Turn whose protocol prompt submission is
+   durably `submitted-unconfirmed`, `accepted`, or `running`.
 5. The requester, configuration-use grants, session binding, profile revision,
    workspace revision, execution policy, and installation ceilings remain
    authorized.
@@ -192,10 +218,13 @@ maximum output allowance must be a provider-adapter-supported upper bound; an
 adapter that cannot establish a safe bound rejects the request.
 
 The transaction that creates the reservation is the request's authorization
-point. Revocation after that commit may race with upstream submission and cannot
-undo already spent tokens or side effects. The broker registers and cancels
-in-flight streams best-effort. A reservation may be released only when the
-broker proves it never began upstream I/O. Once forwarding may have begun,
+point, but does not yet permit upstream I/O. A second durable transition marks
+the same request fingerprint and reservation `forwarding`. Only the resulting
+opaque forward authorization permits upstream credential injection and network
+send. Revocation after that transition may race with upstream submission and
+cannot undo already spent tokens or side effects. The broker registers and
+cancels in-flight streams best-effort. A reservation may be released only when
+the broker proves it never reached `forwarding`. Once forwarding may have begun,
 missing usage charges the full reservation; reported final usage reconciles the
 held amount. Cancellation cannot guarantee the provider stops generation or
 billing.
@@ -204,12 +233,15 @@ Monetary cost is an observation in v2.0, not an enforceable budget. Configurable
 request-rate policies are also deferred; fixed concurrency, request-size, and
 failed-authentication limits remain mandatory broker safeguards.
 
-The broker gate remains closed while a Turn is queued or `dispatching`, including
-during worker startup. It opens only after the prompt write is durably recorded
-as `submitted-unconfirmed`; a request racing that commit may wait briefly for the
-state transition but cannot bypass it. A broker request is not prompt-acceptance
-evidence by itself unless the AgentDriver separately guarantees causal
-attribution to that exact Turn.
+The broker gate remains closed while a Turn is queued, `dispatching`, or
+`submission-armed`, including during worker startup. `submission-armed` is
+committed before the driver may write the first protocol prompt byte and remains
+non-replayable after an uncertain write or restart. The gate opens only after
+submission is durably recorded as `submitted-unconfirmed`, or after stronger
+correlated acceptance evidence is durable; a request racing that commit may wait
+briefly for the state transition but cannot bypass it. A broker request is not
+prompt-acceptance evidence by itself unless the AgentDriver separately
+guarantees causal attribution to that exact Turn.
 
 The gate closes again in `waiting-for-approval`, `waiting-for-input`,
 `cancelling`, and `terminal`. It reopens only after an interaction resolution
@@ -299,7 +331,8 @@ driver's schema. Launch revalidates it and produces the branded
 - canonical host paths
 - arbitrary commands or loader injection
 - provider endpoints outside the broker projection
-- unsupported extensions or configuration fields
+- ungranted resource paths, ambient discovery, hot reload, or unsupported
+  configuration fields
 
 The trusted supervisor constructs one ephemeral
 `SupervisorLaunchAuthorization`:
@@ -309,6 +342,7 @@ immutable SessionSpec
   -> live authorization and hard-ceiling checks
   -> fenced WorkerLease
   -> launch-time verified sandbox mount sources and destinations
+  -> pinned declarative resources and exact extension grants
   -> one CredentialLease per enabled provider binding
   -> runtime broker capabilities
   -> sanitized AgentDriver configuration
@@ -317,9 +351,10 @@ immutable SessionSpec
 
 The authorization may contain canonical host paths and raw broker capabilities,
 so it is never persisted. Only the supervisor receives the whole object. It is
-not yet an executable process specification; the AgentDriver boundary will add
-the constrained supervisor-owned command, arguments, environment projection,
-sandbox resources, and lifecycle operations. The AgentDriver receives
+not an executable process specification. The AgentDriver projects a semantic
+`AgentDriverLaunchProfileId`, generated sandbox configuration, and explicit
+resources; a trusted supervisor renderer owns the reviewed executable, fixed
+base arguments, environment, and process lifetime. The AgentDriver receives
 `SanitizedAgentRuntimeConfiguration`, using sandbox paths and broker
 capabilities but no host paths or upstream secrets.
 
@@ -333,8 +368,9 @@ immediate device/inode revalidation; any change fails closed.
 
 The supervisor, not the driver, owns process launch, sandbox selection,
 environment construction, capability injection, lease renewal, revocation, and
-cleanup. Driver design will define only how sanitized configuration is projected
-into a particular agent.
+cleanup. The accepted driver contract defines only how sanitized configuration
+is projected into a particular agent and how a driver speaks over a
+supervisor-owned transport.
 
 ## Revocation and failures
 
@@ -378,6 +414,8 @@ The first secure provider adapter must prove:
 - supported drivers serialize Turns and disable known background model features
 - request and token reservations enforce their finite per-Turn ceilings under
   concurrent requests, recovery, cancellation, and missing usage
+- one reservation/forward authorization can start at most one upstream send;
+  replaying the same authorization cannot duplicate inference
 - resolved model mismatches are denied without rewriting
 - agent-selected inference is pinned once and cannot switch mid-Turn
 - agent-selected catalogs contain only reasoning-compatible combinations and
@@ -386,8 +424,10 @@ The first secure provider adapter must prove:
 - bearer tokens have sufficient entropy, constant-time verifier checks,
   immediate redaction registration, and failed-authentication rate limiting
 - absolute-form targets, alternate origins/schemes, `CONNECT`, encoded path
-  traversal, redirects, unsafe methods/routes/query forms, injected
-  host/authorization/hop-by-hop headers, and oversized headers/bodies are denied
+  traversal, redirects, unsafe methods/routes/query forms, mismatched listener
+  authorities, duplicate authority/authorization/framing fields, alternate
+  authorization, unsafe hop-by-hop headers, and oversized headers/bodies are
+  denied
 - custom origins and loopback/private/link-local upstream destinations are
   unavailable in the first adapter
 - symlink swaps, filesystem aliases, nested/overlapping destinations, and mount

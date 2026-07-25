@@ -7,6 +7,11 @@ identity, authorization, endpoint, and binding model. The goal is to settle the
 cross-component contracts that would otherwise force expensive rewrites, not to
 fully specify every future product feature before implementation begins.
 
+The canonical first executable product and acceptance boundary is
+[`v2-first-slice.md`](./v2-first-slice.md). V1 is a frozen maintenance baseline;
+the first slice is a clean structured Pi RPC path through a private local CLI,
+not a v1 dispatch refactor, PTY path, or ACP integration.
+
 ## Design order
 
 ### 1. Turn and dispatch model (MVP contract modeled)
@@ -38,25 +43,31 @@ Define how an immutable `SessionSpec` becomes a revalidated launch plan:
 - per-Turn request/token reservation and drain-before-handoff behavior
 - credential revocation at every privileged boundary
 - launch-time mount identity, destination-shadowing, and network-mode checks
-- explicit rejection of unsupported raw-credential or extension requirements
+- explicit rejection of raw-credential, ambient-discovery, or ungranted
+  extension requirements
 - network behavior and fail-closed sandbox guarantees
 
 The accepted design is recorded in
 [`v2-execution-security-design.md`](./v2-execution-security-design.md).
 
-### 3. Minimal agent runtime boundary (next)
+### 3. Minimal agent runtime boundary (MVP contract modeled)
 
 Derive only the `AgentDriver` operations required by the first vertical slice:
 
 - capability discovery needed to validate a configured profile
 - runtime start, resume, close, and opaque resume handles
-- turn submission and canonical event streaming
+- durable submission arming, protocol prompt submission, correlated acceptance,
+  and canonical event streaming
 - approval, elicitation, cancellation, and terminal-result handling
+- explicit pinned declarative resources and exact granted extensions
 - Pi RPC mapping first, with the boundary shaped for later ACP and PTY drivers
 
 The worker supervisor, not an agent driver, owns process launch, sandboxing,
 broker-capability injection, environment construction, lease fencing, and
 cleanup.
+
+The accepted design is recorded in
+[`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md).
 
 ### 4. Private connector and delivery slice
 
@@ -130,10 +141,10 @@ These do not block the first v2 implementation:
 
 ## Implementation threshold
 
-Implementation begins with one vertical slice. Agent runtime, launch planning,
+Implementation begins with the vertical slice fixed in
+[`v2-first-slice.md`](./v2-first-slice.md). Agent runtime, launch planning,
 private connector ingress, persistence, and application-service interfaces
-should be introduced only when the slice consumes them. The first slice must
-exercise:
+should be introduced only when that slice consumes them. It must exercise:
 
 - immutable `SessionSpec` loading and live reauthorization
 - private turn admission, idempotency, bounded FIFO, and cancellation by Turn ID
@@ -142,6 +153,12 @@ exercise:
   adapter
 - prompt acceptance evidence, safe recovery, and immutable terminal results
 - approval safety and independently authorized delivery
+
+The minimal agent runtime, explicit resource-loading, and OpenAI-compatible Chat
+Completions adapter contracts are accepted in
+[`v2-agent-runtime-provider-design.md`](./v2-agent-runtime-provider-design.md).
+The first built-in provider manifest still needs its fixed origin and exact
+model selection before broker implementation.
 
 Future-facing contracts move into `v2-deferred-design.md` until implementation
 evidence justifies promoting them into the active model.
