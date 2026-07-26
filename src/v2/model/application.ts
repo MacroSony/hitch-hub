@@ -10,19 +10,28 @@
 import type {
   AgentDispatchAttemptId,
   AgentProfileId,
+  AgentResourceSnapshotId,
   AgentResumeHandleId,
+  AuthenticationSubjectId,
   AuthenticationRequestId,
   ConfigurationReference,
   CredentialLeaseId,
   EndpointId,
   ExecutionPolicyId,
   ExtensionId,
+  ExtensionRevisionId,
   Id,
+  IdentityBindingId,
   InferenceForwardingAttemptId,
   InferenceRequestReservationId,
+  InferenceTransportBridgeId,
   InstallationId,
+  IntegrityDigest,
   IsoTimestamp,
+  LocalEndpointId,
+  LocalHostId,
   OriginMessageId,
+  PrincipalId,
   ProviderConnectionId,
   SessionId,
   TurnPolicyId,
@@ -34,6 +43,7 @@ import type {
   TurnResponseDeliveryId,
   WorkerLeaseId,
   WorkspaceId,
+  WorkspaceRevisionId,
 } from "./primitives.js";
 import type {
   AuditSystemComponent,
@@ -600,6 +610,73 @@ export interface ExtensionResourceIdentity {
   readonly createdAt: IsoTimestamp;
 }
 
+/**
+ * Durable lookup aliases used to make bootstrap publication idempotent without
+ * treating configuration references as caller-selected durable IDs.
+ */
+export interface BootstrapPublicationReferenceBindings {
+  readonly installation: {
+    readonly reference: ConfigurationReference;
+    readonly installationId: InstallationId;
+    readonly displayName: string;
+  };
+  readonly owner: {
+    readonly reference: ConfigurationReference;
+    readonly principalId: PrincipalId;
+  };
+  readonly localHost: {
+    readonly reference: ConfigurationReference;
+    readonly localHostId: LocalHostId;
+  };
+  readonly identityBinding: {
+    readonly reference: ConfigurationReference;
+    readonly identityBindingId: IdentityBindingId;
+  };
+  readonly subject: {
+    readonly reference: ConfigurationReference;
+    readonly resolution: ConfigurationReference;
+    readonly authenticationSubjectId: AuthenticationSubjectId;
+  };
+  readonly endpoint: {
+    readonly reference: ConfigurationReference;
+    readonly endpointId: EndpointId;
+    readonly localEndpointId: LocalEndpointId;
+  };
+  readonly workspace: {
+    readonly bindingReference: ConfigurationReference;
+    readonly workspaceId: WorkspaceId;
+    readonly workspaceRevisionId: WorkspaceRevisionId;
+  };
+}
+
+/**
+ * Durable content-addressed lookup metadata. V2-004 retains these bindings in
+ * the same transaction as their snapshots/revisions so a pinned SessionSpec
+ * remains resolvable after the current bootstrap configuration changes.
+ */
+export interface BootstrapPublicationArtifactBindings {
+  readonly declarative: readonly {
+    readonly agentResourceSnapshotId: AgentResourceSnapshotId;
+    readonly artifactReference: ConfigurationReference;
+    readonly integrityDigest: IntegrityDigest;
+    readonly kind: "skill" | "prompt-template" | "theme";
+  }[];
+  readonly extensions: readonly {
+    readonly extensionRevisionId: ExtensionRevisionId;
+    readonly artifactReference: ConfigurationReference;
+    readonly integrityDigest: IntegrityDigest;
+  }[];
+  readonly provider: {
+    readonly providerConnectionId: ProviderConnectionId;
+    readonly bridgeId: InferenceTransportBridgeId;
+    readonly bridgeArtifactDigest: IntegrityDigest;
+    readonly nativeStack: "pi-ai" | "other";
+    readonly nativeStackVersion: string;
+    readonly nativeStackDigest: IntegrityDigest;
+    readonly nativeCatalogDigest: IntegrityDigest;
+  };
+}
+
 /** Complete deterministic bootstrap graph published in one transaction. */
 export interface BootstrapPublicationRecords {
   readonly installation: Installation;
@@ -624,6 +701,8 @@ export interface BootstrapPublicationRecords {
   readonly extensionGrantSnapshots: readonly ExtensionGrantSnapshot[];
   readonly providerConnection: ProviderConnectionSpec;
   readonly providerCredentialBinding: ProviderCredentialBinding;
+  readonly referenceBindings: BootstrapPublicationReferenceBindings;
+  readonly artifactBindings: BootstrapPublicationArtifactBindings;
 }
 
 export interface BootstrapPublicationUnitOfWork {
