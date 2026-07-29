@@ -20,12 +20,13 @@ happen next, and what is blocked.
   `main.ts`.
 - The committed v2 foundation covers the domain model, application/runtime
   ports, deterministic test harness, strict codecs, exact bootstrap
-  configuration and publication projection, and database-root primitives.
-- The working tree also contains candidate implementations for the canonical
-  schema, pure Pi launch planning, and the first typed native-bridge slice.
-  These are review candidates, not completed tasks.
+  configuration and publication projection, database-root primitives, and the
+  canonical first-slice schema.
+- The working tree also contains a candidate implementation for the first
+  typed native-bridge slice. It remains a review candidate, not a completed
+  task.
 - `npm run typecheck` and `npm run test:v2` pass against the current working
-  tree. The v2 suite currently has 122 passing tests.
+  tree. The v2 suite currently has 128 passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
 
@@ -51,6 +52,8 @@ happen next, and what is blocked.
 | V2-002B — exact first-slice configuration decoder | Committed | `a33dd20` |
 | V2-002C — cross-record validation and publication projection | Committed | `b91b18a` |
 | V2-003A — database-root and transaction primitives | Committed | `9b722ec` |
+| V2-003B — canonical schema and initialization | Committed | `e42be93` |
+| V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 
 ## Working-tree review candidates
 
@@ -58,8 +61,6 @@ These tasks must remain separate review and commit units.
 
 | Task | State | Current files | Review gate |
 | --- | --- | --- | --- |
-| V2-003B — canonical schema and initialization | Review candidate | `src/v2/persistence/schema.ts`, `initialize.ts`, `schema.test.ts` | Trace every durable table and accepted discriminant to the first-slice scenarios; remove or justify deferred surface; keep the pre-release schema revisable until the walking skeleton validates it |
-| V2-005 — pure Pi launch/resource planning | Review candidate | `src/v2/runtime/launch-plan/` | Verify the projection accepts only already-authorized sandbox paths and fixed Pi 0.82 flags, without acquiring launch or host-resolution authority |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Review candidate | `src/v2/bridges/pi-native/` | Review frame bounds, correlation, stream termination, generated-source authority, and the exact Pi/native-stack pins independently from later sidecar behavior |
 
 Passing deterministic tests is necessary but does not by itself move these
@@ -70,7 +71,7 @@ tasks to `Committed`.
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Ready, security-critical | Start now; accepted ADR and adversarial containment tests are required |
-| V2-004 — bootstrap publication and foundational repositories | Waiting | Commit V2-003B |
+| V2-004 — bootstrap publication and foundational repositories | Ready | V2-003B is committed |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Waiting | Commit V2-006A1 |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
@@ -79,7 +80,7 @@ tasks to `Committed`.
 | V2-009A — session creation and private binding | Waiting | V2-004 and V2-008 application seam |
 | V2-009B — attachment staging and private storage | Waiting | V2-003B and storage ports |
 | V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Waiting | V2-009A/B |
-| V2-010A1 — mount verification and Bubblewrap rendering | Waiting | Commit V2-003B and V2-005 |
+| V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
 | V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
 | V2-010B — secure worker/sidecar launch composition | Blocked | V2-E01, V2-006B, V2-010A, and broker readiness |
 | V2-011A–C — credential broker and forward-once reservations | Blocked | V2-E01, V2-004, V2-006B, V2-009, and V2-010A |
@@ -94,7 +95,7 @@ tasks to `Committed`.
 The dependency graph in the implementation plan remains useful, but delivery
 should expose integration problems earlier than the original wave ordering.
 
-1. Review and commit V2-003B, V2-005, and V2-006A1 independently.
+1. Review and commit V2-006A1 independently. V2-003B and V2-005 are complete.
 2. Begin V2-E01 immediately and do not make a secure sidecar/runtime claim
    until its ADR and adversarial tests pass.
 3. Implement V2-004, V2-008, V2-009, and V2-014A as an early deterministic
@@ -106,13 +107,14 @@ should expose integration problems earlier than the original wave ordering.
      -> bootstrap and authentication
      -> session creation
      -> Turn admission
-     -> test-owned deterministic fake coordinator
-     -> structured response/query projection
+     -> test-owned deterministic no-op coordinator
+     -> durable receipt and nonterminal query projection
    ```
 
    This checkpoint validates protocol composition, bootstrap/admission
    transactions, and application ports. The fake may not write production
-   terminal or delivery state owned by V2-012/V2-013. It is not a secure
+   terminal or delivery state owned by V2-012/V2-013, so it produces neither a
+   terminal assistant response nor delivery evidence. It is not a secure
    production-runtime claim.
 4. Complete V2-006A2/A3, V2-007, and V2-010A while Runtime Gate E is being
    resolved.
@@ -143,7 +145,7 @@ the first slice is accepted.
 | Decision | Required outcome |
 | --- | --- |
 | Production sidecar egress | V2-E01 selects one enforceable process/network topology and proves origin, redirect, proxy, DNS, and private-address denial |
-| First schema boundary | V2-003B review removes or justifies tables and discriminants outside the accepted first slice; the schema is frozen only after integration validates it |
+| First schema validation | Keep the committed pre-release schema revisable until the walking skeleton and repository/coordinator integration validate it |
 | Pi artifact coexistence | V1's verified Pi 0.80.10 and v2's pinned Pi 0.82.0 use explicit trusted artifact roots rather than one ambiguous `PATH` installation |
 | SQLite runtime support | Either pin and continuously test the accepted Node 24 `DatabaseSync` runtime or replace it before production if its experimental behavior is unacceptable |
 | Post-slice product path | Select the first chat connector and define minimum v1 parity plus retirement/coexistence criteria |
