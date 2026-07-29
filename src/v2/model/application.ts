@@ -251,6 +251,14 @@ export type TrustedAuthorizationContext =
   | AuthenticatedConnectorContext
   | TrustedServiceAuthorizationContext;
 
+/** Background components allowed to receive runtime service authority. */
+export type BackgroundServiceAuthorizationComponent =
+  | "turn-coordinator"
+  | "supervisor"
+  | "broker"
+  | "delivery"
+  | "recovery";
+
 export type ConnectorAuthenticationResult =
   | { readonly status: "authenticated"; readonly context: AuthenticatedConnectorContext }
   | {
@@ -520,7 +528,7 @@ export type LiveAuthorizationSubject<Action extends LiveAuthorizationAction> =
  * disconnect or reconstruct one from a persisted principal ID.
  */
 export interface ServiceAuthorizationContextPort {
-  forComponent<Component extends AuditSystemComponent>(
+  forComponent<Component extends BackgroundServiceAuthorizationComponent>(
     component: Component,
   ): Promise<TrustedServiceAuthorizationContext<Component>>;
 }

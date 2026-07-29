@@ -2,6 +2,7 @@
 
 import type {
   AuthenticatedConnectorContext,
+  BackgroundServiceAuthorizationComponent,
   AuditEnvelopeFor,
   AgentProfileResourceIdentity,
   BootstrapPublicationRecords,
@@ -19,6 +20,7 @@ import type {
   ProtocolSubmissionResultFor,
   PreparedAttachmentAdmission,
   SessionCreationUnitOfWork,
+  ServiceAuthorizationContextPort,
   SessionStopUnitOfWork,
   StartupRecoveryDecision,
   StartupRecoveryResultFor,
@@ -66,6 +68,12 @@ type _ConnectorCommandCannotForgeSessionSpec = Assert<
 >;
 type _ConnectorCommandCannotCarryAuthorization = Assert<
   Equal<HasKey<ConnectorCommand, "authorization">, false>
+>;
+type _ServiceIssuerIsLimitedToBackgroundComponents = Assert<
+  Equal<
+    Parameters<ServiceAuthorizationContextPort["forComponent"]>[0],
+    BackgroundServiceAuthorizationComponent
+  >
 >;
 type _PromptHasOnlyTrustedAttachmentReference = Assert<
   Equal<HasKey<SubmitTurnConnectorCommand, "sourcePath">, false>
