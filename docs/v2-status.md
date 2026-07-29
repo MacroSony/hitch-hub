@@ -26,10 +26,12 @@ happen next, and what is blocked.
   Pi extension generator. V2-004a adds production time/identifier sources and
   the exact schema-aware bootstrap foundation row projection. V2-004b adds
   atomic, idempotent foundation/audit publication with a fail-closed durable
-  row ledger.
-- There are no uncommitted v2 review candidates.
+  row ledger. V2-004c adds process-local connector/service trust, atomic local
+  authentication evidence, and transaction-scoped live identity, grant,
+  configuration-resource, and stable-reference reads.
+- The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 152
+  source plus this status reconciliation. The v2 suite currently has 166
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -59,6 +61,7 @@ happen next, and what is blocked.
 | V2-003B — canonical schema and initialization | Committed | `e42be93` |
 | V2-004a — repository mappings, production clock, and cryptographic IDs | Committed | `886085d`, `ae3b7a6` |
 | V2-004b — idempotent bootstrap publication and audit | Committed | `90c6c8b` |
+| V2-004c — local authentication and live authorization reads | Committed | `aeba780`, `603e14d`, `8099425` |
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 
@@ -73,12 +76,11 @@ verification, and its own commit.
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Ready, security-critical | Start now; accepted ADR and adversarial containment tests are required |
-| V2-004c — local authentication and live authorization reads | Ready, current | V2-004b is committed |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008a — bounded private local protocol codecs | Waiting | V2-004c application inputs |
+| V2-008a — bounded private local protocol codecs | Ready, current | V2-004c is committed |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Waiting | V2-004c identity binding |
 | V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
 | V2-009A — session creation and private binding | Waiting | V2-004c authorization and V2-008a command shapes |
