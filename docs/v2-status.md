@@ -24,10 +24,12 @@ happen next, and what is blocked.
   canonical first-slice schema. It now also includes pure Pi launch planning,
   the bounded native-bridge frame contract, and the content-addressed reviewed
   Pi extension generator. V2-004a adds production time/identifier sources and
-  the exact schema-aware bootstrap foundation row projection.
+  the exact schema-aware bootstrap foundation row projection. V2-004b adds
+  atomic, idempotent foundation/audit publication with a fail-closed durable
+  row ledger.
 - There are no uncommitted v2 review candidates.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 145
+  source plus this status reconciliation. The v2 suite currently has 152
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -56,6 +58,7 @@ happen next, and what is blocked.
 | V2-003A — database-root and transaction primitives | Committed | `9b722ec` |
 | V2-003B — canonical schema and initialization | Committed | `e42be93` |
 | V2-004a — repository mappings, production clock, and cryptographic IDs | Committed | `886085d`, `ae3b7a6` |
+| V2-004b — idempotent bootstrap publication and audit | Committed | `90c6c8b` |
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 
@@ -70,8 +73,7 @@ verification, and its own commit.
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Ready, security-critical | Start now; accepted ADR and adversarial containment tests are required |
-| V2-004b — idempotent bootstrap publication and audit | Ready, current | V2-004a is committed |
-| V2-004c — local authentication and live authorization reads | Waiting | V2-004b |
+| V2-004c — local authentication and live authorization reads | Ready, current | V2-004b is committed |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
