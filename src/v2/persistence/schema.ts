@@ -1096,6 +1096,7 @@ const HITCH_V2_SCHEMA_DDL_UNQUALIFIED = [
     outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'denied', 'failed')),
     action TEXT NOT NULL CHECK (action IN ('installation-published', 'authentication-recorded', 'identity-binding-state-changed', 'configuration-grant-state-changed', 'session-created', 'session-creation-denied', 'session-runtime-stop-recorded', 'session-lifecycle-state-changed', 'attachment-admitted', 'turn-admitted', 'turn-state-transitioned', 'turn-queue-handoff-recorded', 'turn-dispatched', 'turn-recovery-recorded', 'turn-message-finalized', 'interaction-recorded', 'interaction-resolved', 'interaction-response-dispatch-recorded', 'worker-lease-state-changed', 'credential-lease-state-changed', 'resume-handle-state-changed', 'inference-reserved', 'inference-reservation-denied', 'inference-forwarding-recorded', 'inference-forwarding-denied', 'inference-send-started', 'inference-send-completed', 'inference-send-outcome-unknown', 'inference-settled', 'inference-charged-reservation', 'inference-released', 'inference-release-denied', 'turn-terminalized', 'response-delivery-created', 'response-delivery-attempt-recorded', 'response-delivery-expired')),
     authentication_request_id TEXT REFERENCES authentication_requests(id),
+    identity_binding_id TEXT REFERENCES identity_bindings(id),
     access_grant_id TEXT REFERENCES access_grants(id),
     session_id TEXT REFERENCES sessions(id),
     session_spec_id TEXT REFERENCES session_specs(id),
@@ -1115,6 +1116,14 @@ const HITCH_V2_SCHEMA_DDL_UNQUALIFIED = [
     delivery_attempt_id TEXT REFERENCES turn_response_delivery_attempts(id),
     occurred_at TEXT NOT NULL,
     CHECK ((actor_kind = 'bootstrap' AND actor_principal_id IS NULL AND system_component IS NULL) OR (actor_kind = 'principal' AND actor_principal_id IS NOT NULL AND system_component IS NULL) OR (actor_kind = 'system' AND actor_principal_id IS NULL AND system_component IS NOT NULL))
+  )`,
+  `CREATE TABLE bootstrap_publication_rows (
+    table_name TEXT NOT NULL,
+    primary_key_json TEXT NOT NULL CHECK (json_valid(primary_key_json)),
+    row_digest TEXT NOT NULL CHECK (length(row_digest) = 71 AND substr(row_digest, 1, 7) = 'sha256:'),
+    first_published_audit_id TEXT NOT NULL REFERENCES audit_envelopes(id),
+    last_published_audit_id TEXT NOT NULL REFERENCES audit_envelopes(id),
+    PRIMARY KEY (table_name, primary_key_json)
   )`,
   `CREATE UNIQUE INDEX uq_installations_first_slice_singleton ON installations ((1))`,
   `CREATE UNIQUE INDEX uq_principals_single_active_human ON principals (installation_id) WHERE state = 'active'`,

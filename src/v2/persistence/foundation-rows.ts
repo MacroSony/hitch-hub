@@ -97,6 +97,106 @@ export const BOOTSTRAP_FOUNDATION_TABLES = Object.freeze([
 export type BootstrapFoundationTable =
   (typeof BOOTSTRAP_FOUNDATION_TABLES)[number];
 
+/**
+ * Canonical primary-key shapes for every table owned by bootstrap publication.
+ * The publisher also uses this reviewed map to validate durable ledger entries
+ * without ever treating database content as a source of SQL identifiers.
+ */
+function freezePrimaryKeyMap<
+  Map extends Readonly<
+    Record<BootstrapFoundationTable, readonly string[]>
+  >,
+>(map: Map): Map {
+  for (const columns of Object.values(map)) Object.freeze(columns);
+  return Object.freeze(map);
+}
+
+export const BOOTSTRAP_FOUNDATION_PRIMARY_KEYS = freezePrimaryKeyMap({
+  installations: ["id"],
+  principals: ["id"],
+  local_hosts: ["id"],
+  identity_bindings: ["id"],
+  endpoints: ["id"],
+  access_grants: ["id"],
+  installation_reference_bindings: ["installation_id"],
+  principal_reference_bindings: ["principal_id"],
+  local_host_reference_bindings: ["local_host_id"],
+  identity_binding_reference_bindings: ["identity_binding_id"],
+  authentication_subject_reference_bindings: ["identity_binding_id"],
+  endpoint_reference_bindings: ["endpoint_id"],
+  workspaces: ["id"],
+  workspace_resources: ["id"],
+  workspace_revisions: ["id"],
+  workspace_revision_resources: [
+    "workspace_revision_id",
+    "workspace_resource_id",
+  ],
+  execution_policies: ["id"],
+  tool_capabilities: ["id"],
+  execution_policy_snapshots: ["id"],
+  execution_policy_resource_grants: [
+    "execution_policy_snapshot_id",
+    "workspace_resource_id",
+  ],
+  execution_policy_tool_capabilities: [
+    "execution_policy_snapshot_id",
+    "tool_capability_id",
+  ],
+  turn_policies: ["id"],
+  turn_policy_snapshots: ["id"],
+  providers: ["id"],
+  models: ["id"],
+  provider_credential_bindings: ["id"],
+  provider_connections: ["id"],
+  provider_connection_origins: ["provider_connection_id", "origin"],
+  provider_model_manifests: ["provider_connection_id", "model_id"],
+  provider_model_image_mime_types: [
+    "provider_connection_id",
+    "model_id",
+    "mime_type",
+  ],
+  provider_model_reasoning_efforts: [
+    "provider_connection_id",
+    "model_id",
+    "effort",
+  ],
+  agent_profiles: ["id"],
+  agent_drivers: ["id"],
+  agent_profile_revisions: ["id"],
+  agent_profile_provider_allowances: [
+    "agent_profile_revision_id",
+    "provider_id",
+  ],
+  agent_profile_allowance_models: [
+    "agent_profile_revision_id",
+    "provider_id",
+    "model_id",
+  ],
+  agent_resource_snapshots: ["id"],
+  extensions: ["id"],
+  extension_revisions: ["id"],
+  extension_grant_snapshots: ["id"],
+  extension_capabilities: ["id"],
+  extension_grant_capabilities: [
+    "extension_grant_snapshot_id",
+    "extension_capability_id",
+  ],
+  agent_profile_resource_snapshots: [
+    "agent_profile_revision_id",
+    "agent_resource_snapshot_id",
+  ],
+  agent_profile_extension_grants: [
+    "agent_profile_revision_id",
+    "extension_grant_snapshot_id",
+  ],
+  workspace_reference_bindings: ["workspace_id"],
+  agent_resource_artifact_bindings: ["agent_resource_snapshot_id"],
+  extension_artifact_bindings: ["extension_revision_id"],
+  provider_artifact_bindings: ["provider_connection_id"],
+} satisfies Readonly<
+  Record<BootstrapFoundationTable, readonly string[]>
+>);
+
 export interface BootstrapFoundationRow {
   readonly table: BootstrapFoundationTable;
   readonly primaryKey: readonly string[];
@@ -231,6 +331,15 @@ function row(
 ): BootstrapFoundationRow {
   const allowed = tableColumns.get(table);
   if (allowed === undefined) return fail(`unknown canonical table ${table}`);
+  const canonicalPrimaryKey = BOOTSTRAP_FOUNDATION_PRIMARY_KEYS[table];
+  if (
+    primaryKey.length !== canonicalPrimaryKey.length ||
+    primaryKey.some(
+      (column, index) => column !== canonicalPrimaryKey[index],
+    )
+  ) {
+    return fail(`${table} row has a noncanonical primary key`);
+  }
   const columns = Object.keys(entries);
   if (columns.length === 0 || new Set(columns).size !== columns.length) {
     return fail(`${table} row has no columns or duplicate columns`);
@@ -1158,7 +1267,7 @@ export function projectBootstrapFoundationRows(
     canonical_host_path: graph.workspaceRevision.root.canonicalHostPath,
     sandbox_path: graph.workspaceRevision.root.sandboxPath,
     maximum_access: "read-write",
-    created_at: graph.workspaceRevision.createdAt,
+    created_at: graph.workspace.createdAt,
   }));
   add(row("workspace_revisions", ["id"], {
     id: graph.workspaceRevision.id,
