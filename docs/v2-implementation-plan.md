@@ -252,6 +252,14 @@ Semantically identical configuration returns the same records. A semantic
 change appends a revision or snapshot and never mutates one pinned by a
 `SessionSpec`.
 
+Subassignments, each reviewed and committed separately:
+
+1. V2-004a: exact repository row mappings plus production `Clock` and
+   cryptographic `IdSource` implementations;
+2. V2-004b: atomic, idempotent bootstrap publication and allowlisted audit;
+3. V2-004c: local authentication recording plus live identity/grant/
+   configuration authorization reads.
+
 Scenarios: 1–3, 7, 19.
 
 #### V2-005 — Pure Pi launch/resource planning
@@ -342,6 +350,15 @@ only when later work admits multiple operating-system users.
 
 This task depends on the V2-001B1 application command port plus the
 V2-004-published identity/binding. It does not call repositories directly.
+
+Subassignments, each reviewed and committed separately:
+
+1. V2-008a: bounded, versioned request/response codecs that contain no
+   caller-selected identity, origin, spec, grant, or authorization result;
+2. V2-008b: data-root/run-directory/socket verification, owner-only socket
+   lifecycle, connection acceptance, framing, and graceful shutdown;
+3. V2-008c: authenticated application dispatch adapter, after the V2-009
+   command services exist.
 
 Scenarios: 2, 16–17.
 
@@ -636,10 +653,12 @@ Do not add API placeholders for:
 
 ## Current execution decision
 
-The contract and codec foundation is implemented. Current working-tree tasks
-must be reviewed independently, Runtime Gate E should begin immediately, and
-the next application work should build the deterministic V2-004/V2-008/V2-009/
-V2-014A walking skeleton before the secure runtime is integrated.
+The contract, codec, launch-planning, and V2-006A1 bridge foundation is
+committed. Runtime Gate E can proceed independently, while the current
+application path builds the deterministic V2-004/V2-008/V2-009/V2-014A
+walking skeleton before the secure runtime is integrated. The bounded
+subassignments and exact current step are tracked in
+[`v2-status.md`](./v2-status.md).
 
 V2-E01 must still select, implement, and prove production sidecar egress before
 V2-006B, V2-010B, or V2-011 can be declared secure. See

@@ -21,12 +21,13 @@ happen next, and what is blocked.
 - The committed v2 foundation covers the domain model, application/runtime
   ports, deterministic test harness, strict codecs, exact bootstrap
   configuration and publication projection, database-root primitives, and the
-  canonical first-slice schema.
-- The working tree also contains a candidate implementation for the first
-  typed native-bridge slice. It remains a review candidate, not a completed
-  task.
-- `npm run typecheck` and `npm run test:v2` pass against the current working
-  tree. The v2 suite currently has 128 passing tests.
+  canonical first-slice schema. It now also includes pure Pi launch planning,
+  the bounded native-bridge frame contract, and the content-addressed reviewed
+  Pi extension generator.
+- There are no uncommitted v2 review candidates.
+- `npm run typecheck` and `npm run test:v2` pass against the current committed
+  source plus this status reconciliation. The v2 suite currently has 135
+  passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
 
@@ -54,30 +55,30 @@ happen next, and what is blocked.
 | V2-003A — database-root and transaction primitives | Committed | `9b722ec` |
 | V2-003B — canonical schema and initialization | Committed | `e42be93` |
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
+| V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 
 ## Working-tree review candidates
 
-These tasks must remain separate review and commit units.
-
-| Task | State | Current files | Review gate |
-| --- | --- | --- | --- |
-| V2-006A1 — typed bridge frames and reviewed extension generator | Review candidate | `src/v2/bridges/pi-native/` | Review frame bounds, correlation, stream termination, generated-source authority, and the exact Pi/native-stack pins independently from later sidecar behavior |
-
-Passing deterministic tests is necessary but does not by itself move these
-tasks to `Committed`.
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
+verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Ready, security-critical | Start now; accepted ADR and adversarial containment tests are required |
-| V2-004 — bootstrap publication and foundational repositories | Ready | V2-003B is committed |
-| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Waiting | Commit V2-006A1 |
+| V2-004a — repository mappings, production clock, and cryptographic IDs | Ready, current | V2-003B is committed |
+| V2-004b — idempotent bootstrap publication and audit | Waiting | V2-004a |
+| V2-004c — local authentication and live authorization reads | Waiting | V2-004b |
+| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008 — private local connector | Waiting | V2-004 publication and identity binding |
-| V2-009A — session creation and private binding | Waiting | V2-004 and V2-008 application seam |
+| V2-008a — bounded private local protocol codecs | Waiting | V2-004c application inputs |
+| V2-008b — secure Unix socket lifecycle and authenticated framing | Waiting | V2-004c identity binding |
+| V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
+| V2-009A — session creation and private binding | Waiting | V2-004c authorization and V2-008a command shapes |
 | V2-009B — attachment staging and private storage | Waiting | V2-003B and storage ports |
 | V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Waiting | V2-009A/B |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
@@ -95,11 +96,22 @@ tasks to `Committed`.
 The dependency graph in the implementation plan remains useful, but delivery
 should expose integration problems earlier than the original wave ordering.
 
-1. Review and commit V2-006A1 independently. V2-003B and V2-005 are complete.
-2. Begin V2-E01 immediately and do not make a secure sidecar/runtime claim
+1. Implement the CLI walking skeleton in independently reviewed commits:
+
+   ```text
+   V2-004a -> V2-004b -> V2-004c
+     -> V2-008a -> V2-008b
+     -> V2-009A -> V2-009B -> V2-009C
+     -> V2-008c -> V2-014A
+     -> two-process restart/idempotency/FIFO verification
+   ```
+
+   V2-004a includes the missing production `Clock` and cryptographic
+   `IdSource`. V2-014A owns trusted startup configuration, daemon shutdown, the
+   CLI process, and an explicitly test/development-only no-op coordinator.
+2. Begin V2-E01 independently and do not make a secure sidecar/runtime claim
    until its ADR and adversarial tests pass.
-3. Implement V2-004, V2-008, V2-009, and V2-014A as an early deterministic
-   walking skeleton:
+3. The walking skeleton target is:
 
    ```text
    CLI client
@@ -112,10 +124,14 @@ should expose integration problems earlier than the original wave ordering.
    ```
 
    This checkpoint validates protocol composition, bootstrap/admission
-   transactions, and application ports. The fake may not write production
-   terminal or delivery state owned by V2-012/V2-013, so it produces neither a
-   terminal assistant response nor delivery evidence. It is not a secure
-   production-runtime claim.
+   transactions, and application ports. It is not a secure production-runtime
+   claim.
+   The gate requires separate daemon and CLI processes over the real private
+   socket and SQLite; bootstrap, `session create`, `prompt`, and `turn show`;
+   durable restart, origin-scoped idempotency, and one-active/three-queued FIFO
+   behavior; rejection of unsafe roots and oversized/malformed frames; and no
+   caller-selected principal, origin, `SessionSpec`, or authorization result.
+   The fake writes neither terminal/delivery state nor an assistant response.
 4. Complete V2-006A2/A3, V2-007, and V2-010A while Runtime Gate E is being
    resolved.
 5. Complete V2-006B, V2-011, and V2-010B only after E01 fixes the production
