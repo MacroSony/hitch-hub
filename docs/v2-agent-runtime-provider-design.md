@@ -3,7 +3,8 @@
 Date: 2026-07-25
 
 Status: accepted architecture; the Pi native-transport feasibility gate is
-satisfied and implementation may begin.
+satisfied and implementation is underway. Current progress lives in
+[`v2-status.md`](./v2-status.md).
 
 ## Decisions
 

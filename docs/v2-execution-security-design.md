@@ -2,8 +2,10 @@
 
 Date: 2026-07-25
 
-Status: accepted domain and transport-bridge contract; the Pi native-library
-sidecar feasibility spike, broker, and services are not implemented.
+Status: accepted domain and transport-bridge contract. The Pi native-library
+sidecar feasibility spike is complete; production egress containment, broker,
+and services remain pending. Current progress lives in
+[`v2-status.md`](./v2-status.md).
 
 ## Security claim
 

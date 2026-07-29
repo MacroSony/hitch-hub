@@ -1,10 +1,17 @@
 # Hub Tools and MCP Design
 
-This document defines the target design for agent-facing Hitch tools. MCP is the preferred long-term transport, but the product contract is the hub tool API itself.
+Status: v1 design/reference. The first `hitch.send_media` service and bridge
+path are implemented; later tools remain deferred. Outbound media is outside
+the accepted v2 first slice.
+
+This document defines the target design for agent-facing Hitch tools. MCP is
+the preferred long-term transport, but the product contract is the hub tool API
+itself.
 
 ## Problem
 
-Outbound media currently relies on best-effort path discovery from assistant text. That is ambiguous:
+The original outbound-media prototype relied on best-effort path discovery
+from assistant text. That was ambiguous:
 
 - A generated image is not sent unless the final response includes the exact local path.
 - A normal file may be uploaded accidentally if the final response mentions an allowed path.
@@ -241,7 +248,13 @@ The hub starts a session-scoped outbox pump with each active worker, validates r
 
 For MCP-capable agents, the standalone `@hitch-hub/session-mcp` package starts a stdio server that exposes `hitch.send_media` and uses the same outbox/result protocol. Install the package below Pi's agent package directory and launch its compiled `dist/server.js` from the sandbox-visible `/agent-config/npm/node_modules` mount. The agent inherits the session-scoped `HITCH_TOOL_*` environment variables from its hub-started worker; the Hitch repository and channel credentials remain unmounted.
 
-The current attended rollout uses `config_scope: system`, so one installation under the configured Pi directory is shared by that single-principal profile. A future `config_scope: hitch` multi-user rollout must provision the MCP adapter, server package, and `mcp.json` separately in each principal-owned `/agent-config`. Credential-isolated Pi currently starts with extensions disabled, so that mode must continue using Hitch's native guarded media tool rather than this adapter until an isolated extension strategy exists.
+The 2026-07 attended rollout used `config_scope: system`, so one installation
+under the configured Pi directory was shared by that single-principal profile.
+A future `config_scope: hitch` multi-user rollout must provision the MCP
+adapter, server package, and `mcp.json` separately in each principal-owned
+`/agent-config`. Credential-isolated Pi starts with extensions disabled, so
+that mode uses Hitch's native guarded media tool rather than this adapter until
+an isolated extension strategy exists.
 
 The same server also exposes the MCP prompt `hitch.outbound_media`. That prompt is the agent-facing guidance for generated media:
 

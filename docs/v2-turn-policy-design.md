@@ -2,7 +2,9 @@
 
 Date: 2026-07-23
 
-Status: accepted domain design; runtime codecs and services are not implemented.
+Status: accepted domain design. Boundary codecs are implemented; application
+services remain pending. Current progress lives in
+[`v2-status.md`](./v2-status.md).
 
 ## Boundary
 

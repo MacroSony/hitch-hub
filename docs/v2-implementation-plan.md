@@ -2,12 +2,17 @@
 
 Date: 2026-07-25
 
-Status: foundation ready; secure runtime completion is blocked on Runtime Gate E
+Status: accepted task catalog and dependency reference
 
 This document turns the accepted v2 contracts and the successful Pi native
 sidecar spike into commit-sized implementation work. It does not reopen the
 product scope in [`v2-first-slice.md`](./v2-first-slice.md), and it does not
 reuse the frozen v1 runtime as a compatibility layer.
+
+Current task state, reviewed execution order, and blockers live in
+[`v2-status.md`](./v2-status.md). The waves below group capabilities and
+dependencies; they are not a live status board or a requirement to postpone
+all integration until the final wave.
 
 ## Delivery rules
 
@@ -26,10 +31,9 @@ reuse the frozen v1 runtime as a compatibility layer.
   broker, and sandbox tests pass.
 - No migration, dual-write, compatibility table, automatic reset, or production
   v1 cutover is implemented in this slice.
-- A Terra implementation agent receives one bounded task with explicit file
-  ownership. A separate Sol reviewer performs a read-only security/correctness
-  review. The root agent applies corrections, runs integration checks, and
-  creates the commit.
+- One implementer owns a bounded task with explicit files. An independent
+  reviewer performs a read-only security/correctness review. Corrections and
+  repository-wide verification happen before the task is committed.
 
 ## Module ownership
 
@@ -65,7 +69,7 @@ Adapters never accept caller-selected principal IDs, endpoint ownership,
 `SessionSpec`, authorization outcomes, host paths, provider origins, raw
 credentials, or event durability.
 
-## Implementation waves
+## Task catalog and capability waves
 
 ### Wave 0: close the executable contract spine
 
@@ -213,8 +217,8 @@ Scenarios: 1, 18.
 
 #### V2-003B — Complete canonical schema manifest and initialization
 
-Owns: `src/v2/persistence/schema.ts`, `initialize.ts`, and schema tests. No
-later task changes first-slice DDL.
+Owns: `src/v2/persistence/schema.ts`, `initialize.ts`, and schema tests.
+Repositories never create or silently alter tables.
 
 After V2-001A–B2 and V2-002B–C fix every executable record and transactional
 port, define all first-slice tables, constraints, indexes, and schema metadata
@@ -222,7 +226,12 @@ once. Stamp and validate SQLite `application_id`, `user_version`, and singleton
 metadata. A new root initializes atomically; v1, unknown, partial, mismatched,
 older, or newer roots fail without mutation.
 
-Repositories consume this schema and never create tables.
+The schema remains an explicitly versioned pre-release manifest until the
+walking skeleton and repository/coordinator integration validate it. Before
+that freeze gate, a required schema correction returns to the schema owner,
+updates the manifest/digest/tests deliberately, and may recreate only
+disposable v2 roots. After the freeze gate, any DDL change requires a new
+schema version; no later repository owns ad hoc DDL.
 
 ### Wave 2: durable bootstrap and independent runtime seams
 
@@ -278,7 +287,7 @@ Port the successful spike into typed modules:
 This task exposes a trusted `invoke()` seam. It does not decide Turn authority,
 accept raw worker capabilities, or own durable reservations.
 
-Terra subassignments, each reviewed and committed separately:
+Subassignments, each reviewed and committed separately:
 
 1. V2-006A1: bridge frame codecs and reviewed extension generator;
 2. V2-006A2: deterministic sidecar/artifact/catalog/credential-store behavior;
@@ -358,7 +367,7 @@ active private binding are one transaction. Attachment staging is finalized
 with admission or rolled back/orphan-cleaned. Admission, idempotency, capacity,
 input snapshot, queue insertion, and receipt are one transaction.
 
-Terra subassignments, each reviewed and committed separately:
+Subassignments, each reviewed and committed separately:
 
 1. V2-009A: live authorization, session creation, and private binding;
 2. V2-009B: attachment staging/private store/finalization;
@@ -380,7 +389,7 @@ ports.
 Confirm descendant cleanup and old-sandbox death before issuing a successor
 lease. An unconfirmed old sandbox quarantines the session.
 
-Terra subassignments, each reviewed and committed separately:
+Subassignments, each reviewed and committed separately:
 
 1. V2-010A1: pure mount verification and deterministic Bubblewrap renderer;
 2. V2-010A2: worker lifecycle, fencing repository, quarantine, and cleanup.
@@ -444,7 +453,7 @@ old-Turn requests before handoff. Immediately before reserving/forwarding,
 recompute accumulated image history and reject requests exceeding the exact
 model manifest's count, MIME, per-image, or total-byte limits.
 
-Terra subassignments, each reviewed and committed separately:
+Subassignments, each reviewed and committed separately:
 
 1. V2-011A: capability authentication, redaction, live gate, and credential
    lease;
@@ -486,7 +495,7 @@ the old worker is dead, use exact live reconciliation when available, otherwise
 record `unknown/worker-lost-after-dispatch`. Release only reservations proven
 not forwarded; charge unknown forwarded usage.
 
-Terra subassignments, each reviewed and committed separately:
+Subassignments, each reviewed and committed separately:
 
 1. V2-012A: queue claim, dispatch attempt, submission, and acceptance;
 2. V2-012B: trusted events, execution policy, and interaction mediation;
@@ -509,14 +518,31 @@ unfinished deliveries independently at startup.
 
 Scenarios: 16–17, 19.
 
-#### V2-014 — Structured service and CLI
+#### V2-014A — Structured local protocol and CLI shell
 
-Owns: `src/v2/main.ts`, `src/v2/cli/`, service composition.
+Owns: the versioned service/client framing, `src/v2/cli/`, and the initial
+`src/v2/main.ts` command shell.
+
+Implement the private structured request/response protocol and the `serve`,
+`session create`, `prompt`, and `turn show` client surfaces early enough to
+exercise V2-004/V2-008/V2-009 through a test-owned deterministic fake
+coordinator. The CLI generates a cryptographically random idempotency key by
+default and never opens SQLite or launches Pi.
+
+This walking-skeleton composition is test-only and makes no secure production
+runtime claim. Its test-owned fake coordinator may not write terminal or
+delivery state owned by V2-012/V2-013. Production startup must fail closed
+until V2-014B supplies every required runtime dependency.
+
+Scenarios: incremental portions of 1–6 and 16.
+
+#### V2-014B — Production service composition and complete CLI
+
+Owns: final `src/v2/main.ts` composition and the remaining CLI operations.
 
 Implement `serve`, `session create`, `prompt`, `turn show`, `turn cancel`,
 `session stop`, `interaction approve`, and `interaction deny`. The CLI
-generates a cryptographically random idempotency key by default and never opens
-SQLite or launches Pi.
+continues to open neither SQLite nor Pi directly.
 
 Compose startup recovery for queued Turns, quarantined/unknown workers,
 reservations, and delivery; the CLI itself never performs recovery.
@@ -536,13 +562,13 @@ scenario tests.
 Run all 21 scenarios. DeepSeek and OpenAI Codex are separate opt-in
 configurations using the same production sidecar/sandbox path.
 
-## Dependency graph and parallel assignments
+## Capability dependency graph
 
 ```text
 V2-001A ─ V2-001B1 ─ V2-001B2 ─ V2-001C
     ├─────────── V2-002A ─ V2-002B ─ V2-002C ─┬─ V2-005 ─ V2-010A ─┐
     └─────────── V2-003A ─────── V2-003B ─ V2-004 ─ V2-009 ────────┤
-                                               └─ V2-008            │
+                                               └─ V2-008 ─ V2-014A │
 V2-003B ────────────────────────────────────────> V2-010A           │
 V2-001B2 + V2-002A ────────────────────── V2-007 ───────────────────┤
 V2-002A/B ──────────────────────────────── V2-006A ─ V2-E01 ─ V2-006B
@@ -554,56 +580,45 @@ V2-006B + V2-010A + V2-011 ─────────────────�
                                                                     │
                                                                V2-013
                                                                     │
-V2-008 ──────────────────────────────────────────────────────── V2-014
+                                                               V2-014B
 
 Every task adds acceptance tests ──────────────────────────────> V2-015
 ```
 
-Recommended Terra assignments:
-
-1. V2-001A alone.
-2. After review, V2-001B1 alone. Follow with V2-001B2 and V2-001C as separate
-   assignments; production code never imports the V2-001C test support.
-3. V2-002A/B/C and V2-003A/B in dependency-aware, file-disjoint assignments;
-   V2-003B is the only schema owner.
-4. V2-004, V2-005, V2-006A1–A3, and V2-007 in dependency-aware pairs.
-5. V2-E01 is an independent reviewed runtime-security assignment; V2-006B,
-   V2-010B, and V2-011 cannot complete before it.
-6. V2-008, V2-009A–C, and V2-010A1–A2 are application and supervisor tracks.
-   V2-011A–C follow published identity/connection, active Turn state, and the
-   worker fence; V2-010B follows broker capability/redaction readiness.
-7. V2-012A–D through V2-015 are mostly sequential because they integrate every
-   earlier boundary.
-
 Each completed assignment receives:
 
-- one independent Sol security/correctness review;
-- for cross-module tasks V2-009 through V2-015, a second Sol integration and
+- one independent security/correctness review;
+- for cross-module tasks V2-009 through V2-015, a second integration and
   acceptance-coverage review;
-- root-agent correction and repository-wide verification before commit.
+- correction and repository-wide verification before commit.
+
+File-disjoint work may proceed in parallel, but the reviewed delivery order is
+maintained in [`v2-status.md`](./v2-status.md). Runtime Gate E is an independent
+security assignment and blocks V2-006B, V2-010B, and V2-011 regardless of
+parallel progress elsewhere.
 
 ## Acceptance coverage
 
 | Scenario | Primary tasks |
 |---:|---|
-| 1 | V2-001A–C, V2-002B–C, V2-003A–B, V2-004, V2-014 |
+| 1 | V2-001A–C, V2-002B–C, V2-003A–B, V2-004, V2-014A–B |
 | 2 | V2-004, V2-008–009 |
 | 3 | V2-002B–C, V2-004, V2-009 |
 | 4–5 | V2-009 |
-| 6 | V2-009, V2-010A–B, V2-011–012, V2-014 |
+| 6 | V2-009, V2-010A–B, V2-011–012, V2-014A–B |
 | 7 | V2-004–005, V2-009–012 |
 | 8 | V2-007, V2-010A–B, V2-012 |
 | 9–10 | V2-002A/C, V2-007, V2-012 |
-| 11 | V2-007, V2-012, V2-014 |
+| 11 | V2-007, V2-012, V2-014B |
 | 12 | V2-002A–C, V2-006A–B, V2-009, V2-011–012 |
 | 13 | V2-005, V2-009, V2-010A–B |
 | 14 | V2-005, V2-006A–B, V2-010A–B, V2-011 |
 | 15 | V2-006A–B, V2-E01, V2-011–012 |
-| 16–17 | V2-008, V2-012–014 |
-| 18 | V2-003A–B, V2-009–014, V2-015 |
-| 19 | V2-002A–C, V2-004, V2-008–015 |
+| 16–17 | V2-008, V2-012–013, V2-014A–B |
+| 18 | V2-003A–B, V2-009–013, V2-014B, V2-015 |
+| 19 | V2-002A–C, V2-004, V2-008–013, V2-014B, V2-015 |
 | 20 | V2-002A–C, V2-006A–B, V2-007, V2-010A–B, V2-011, V2-015 |
-| 21 | V2-006A–B, V2-007, V2-010A–B, V2-011, V2-014–015 |
+| 21 | V2-006A–B, V2-007, V2-010A–B, V2-011, V2-014B, V2-015 |
 
 ## Deferred work
 
@@ -619,14 +634,13 @@ Do not add API placeholders for:
   alternative sandbox engines, or a general-purpose egress proxy;
 - v1 import, migration, dual-write, reset/cutover, or automatic rollback.
 
-## Ready-to-start decision
+## Current execution decision
 
-Foundation implementation can start with V2-001A immediately, followed by the
-V2-001B/C contract-and-harness assignment. There is no remaining
-provider-adapter contract decision blocking that work.
+The contract and codec foundation is implemented. Current working-tree tasks
+must be reviewed independently, Runtime Gate E should begin immediately, and
+the next application work should build the deterministic V2-004/V2-008/V2-009/
+V2-014A walking skeleton before the secure runtime is integrated.
 
-The secure first slice as a whole is not yet implementation-ready: V2-E01 must
-select, implement, and prove production sidecar egress before V2-006B,
-V2-010B, or V2-011 can be declared secure. This gate does not block the model,
-codec, database, bootstrap, application, deterministic bridge, driver, or
-supervisor-primitive assignments.
+V2-E01 must still select, implement, and prove production sidecar egress before
+V2-006B, V2-010B, or V2-011 can be declared secure. See
+[`v2-status.md`](./v2-status.md) for the exact current state and next task.

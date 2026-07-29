@@ -1,6 +1,10 @@
 # Lightweight Remote Coding Agent Hub — Project Plan
 
-> Current-state note: this is a historical broad architecture roadmap, not the verified implementation inventory or current implementation order. V1 is frozen as a maintenance baseline. See `README.md` for the implemented v1 surface, `implementation_steps.md` for rollout/maintenance status, `docs/completed-work.md` for checkpoint history, and `docs/v2-first-slice.md` for the canonical first executable v2 scope.
+> Historical document: this is the original broad architecture roadmap, not
+> the verified implementation inventory or current implementation order. See
+> the [documentation map](docs/README.md), the active
+> [v2 status tracker](docs/v2-status.md), and the canonical
+> [first-slice scope](docs/v2-first-slice.md).
 
 ## Historical V1 Roadmap Reset (July 2026)
 

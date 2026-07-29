@@ -4,6 +4,10 @@ Date: 2026-07-25
 
 Status: accepted implementation scope
 
+Current task state and execution order are maintained in
+[`v2-status.md`](./v2-status.md). This document defines scope and acceptance,
+not implementation progress.
+
 This document is the canonical product and acceptance boundary for the first
 executable Hitch v2 vertical slice. It narrows the broader domain and security
 designs to one end-to-end path. When another roadmap or discussion note suggests

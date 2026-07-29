@@ -27,14 +27,13 @@ Hitch is early. The current implementation focuses on the first useful control p
 - Basic text chunking, summarized tool-output delivery, and timeout handling
 
 V1 is frozen as a maintenance baseline while v2 is developed as a clean
-replacement. See `docs/v2-first-slice.md` for the canonical first executable v2
-scope, `docs/v2-agent-runtime-provider-design.md` for the Pi/resource/inference
-transport contract, `docs/v2-design-roadmap.md` for its remaining design gates,
-`spikes/pi-native-sidecar/README.md` for the completed native-provider
-feasibility proof,
-`docs/v2-implementation-plan.md` for the reviewed task/dependency sequence,
-`implementation_steps.md` for v1 rollout/maintenance status, and
-`docs/completed-work.md` for finished v1 checkpoint history.
+replacement. Start with the [documentation map](docs/README.md). The
+[v2 status tracker](docs/v2-status.md) records current task state, reviewed
+execution order, and blockers; the
+[first-slice specification](docs/v2-first-slice.md) remains the canonical
+product and acceptance boundary. The
+[implementation plan](docs/v2-implementation-plan.md) defines task ownership
+and completion criteria without acting as a live status board.
 
 ## Requirements
 

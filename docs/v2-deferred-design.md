@@ -6,9 +6,10 @@ Status: preserved design considerations; not part of the v2.0 executable
 contract.
 
 This document keeps decisions that may be useful after the first private
-vertical slice. They are deliberately absent from `src/v2/model`: no adapter,
-service, or repository should imply support for them until their authorization,
-persistence, and recovery behavior has been tested end to end.
+vertical slice. The broader compile-only model may describe some of their
+discriminants, but first-slice codecs, adapters, services, and repositories
+must reject them until their authorization, persistence, and recovery behavior
+has been tested end to end.
 
 ## Shared endpoint bindings
 

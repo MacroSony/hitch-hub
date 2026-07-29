@@ -2,6 +2,10 @@
 
 Date: 2026-07-24
 
+Status: historical design-gate checklist; the required first-slice contracts
+were accepted and implementation is underway. Current status and ordering live
+in [`v2-status.md`](./v2-status.md).
+
 This document records the remaining design gates after the initial v2 session,
 identity, authorization, endpoint, and binding model. The goal is to settle the
 cross-component contracts that would otherwise force expensive rewrites, not to

@@ -1,7 +1,10 @@
 # Completed Work
 
-This file archives completed implementation checkpoints so
-[implementation_steps.md](../implementation_steps.md) can stay focused on active work.
+This file archives completed v1 implementation checkpoints and dated
+verification evidence. It does not describe the current configuration of a
+live deployment. See the [documentation map](./README.md) for current sources
+of truth and [implementation_steps.md](../implementation_steps.md) for the
+remaining v1 maintenance checklist.
 
 ## Checkpoint Summary
 
@@ -92,7 +95,7 @@ This file archives completed implementation checkpoints so
 
 ## Verification Snapshot
 
-Latest local verification from the review pass:
+Verification snapshot recorded by the final v1 review pass:
 
 - `npm run typecheck`: passed.
 - `npm run build`: passed.
@@ -128,7 +131,12 @@ The outbound artifact prototype proved that channel upload plumbing works, but f
 
 Artifact delivery now uses the explicit, session-scoped `hitch.send_media` hub tool path as the primary design, with legacy path scanning disabled by default. See [hub-tools-mcp.md](hub-tools-mcp.md).
 
-The current attended rollout deliberately uses one writable system Pi config with credential isolation disabled so trusted Pi extensions and the MCP adapter can load. This is not the final multi-user profile: Hitch-scoped multi-user operation needs per-principal package/config provisioning, and credential-isolated Pi currently disables the MCP adapter and continues to use the native guarded media tool.
+At the time of this archived checkpoint, the attended rollout used one writable
+system Pi config with credential isolation disabled so trusted Pi extensions
+and the MCP adapter could load. A later rollout note recorded a transition to
+required credential isolation and the native guarded media tool. Neither note
+proves the current state of an ignored live configuration; verify that state on
+the deployment host.
 
 ## Historical Commit Notes
 

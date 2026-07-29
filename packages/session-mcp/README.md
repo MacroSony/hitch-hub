@@ -1,6 +1,10 @@
 # `@hitch-hub/session-mcp`
 
-Session-scoped MCP tools for a Hitch-managed Pi worker. The package is deliberately independent of the Hitch source tree so it can be installed in the Pi package directory that Bubblewrap mounts at `/agent-config`. The mount mode follows Hitch's execution profile; the current attended system-config profile requires read/write access for Pi's own state.
+Session-scoped MCP tools for a Hitch-managed Pi worker. The package is
+deliberately independent of the Hitch source tree so it can be installed in the
+Pi package directory that Bubblewrap mounts at `/agent-config`. The mount mode
+follows Hitch's execution profile; system-config profiles require read/write
+access for Pi's own state.
 
 The server exposes:
 
