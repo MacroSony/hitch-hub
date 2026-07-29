@@ -150,7 +150,7 @@ function decodeDisplayName(input: unknown, path: CodecPath): string {
   return value;
 }
 
-function decodeTurnContentBlock(
+export function decodeTurnContentBlock(
   input: unknown,
   path: CodecPath = [],
 ): TurnContentBlock {
@@ -545,7 +545,7 @@ function decodeTurnFailure(
   }) as TurnFailure;
 }
 
-function decodeTurnResult(
+export function decodeTurnResult(
   input: unknown,
   path: CodecPath = [],
 ): TurnResult {
@@ -1212,7 +1212,7 @@ function decodeInputRequest(
   }) as TurnInputInteractionRequest;
 }
 
-function decodeTurnInteractionRequest(
+export function decodeTurnInteractionRequest(
   input: unknown,
   path: CodecPath = [],
 ): TurnInteractionRequest {
