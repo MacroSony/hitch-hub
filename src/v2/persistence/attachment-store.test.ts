@@ -226,6 +226,35 @@ test("staging rejects empty, oversized, and unsupported uploads", async () => {
         status: "rejected",
         reason: "unsupported-image-type",
       });
+      const soiOnly = await store.stageBoundedImage(
+        intake.seal({
+          bytes: Buffer.from([0xff, 0xd8, 0xff]),
+          authenticationRequestId,
+        }),
+      );
+      assert.equal(soiOnly.status, "staged");
+      if (soiOnly.status === "staged") {
+        assert.equal(
+          soiOnly.stage.preparedAdmission.attachment.mimeType,
+          "image/jpeg",
+        );
+      }
+      const atCeiling = Buffer.alloc(8 * 1024 * 1024);
+      PNG.copy(atCeiling);
+      const ceilingStage = await store.stageBoundedImage(
+        intake.seal({ bytes: atCeiling, authenticationRequestId }),
+      );
+      assert.equal(ceilingStage.status, "staged");
+      if (ceilingStage.status === "staged") {
+        assert.equal(
+          ceilingStage.stage.preparedAdmission.attachment.byteLength,
+          8 * 1024 * 1024,
+        );
+        assert.equal(
+          ceilingStage.stage.preparedAdmission.attachment.integrityDigest,
+          sha256(atCeiling),
+        );
+      }
       const riffButNotWebp = await store.stageBoundedImage(
         intake.seal({
           bytes: Buffer.from([
@@ -299,6 +328,89 @@ test("[V2-S12/attachment-store-finalization] finalization verifies the staged co
         reason: "integrity-mismatch",
       });
       assert.equal(existsSync(tamperedPaths.final), false);
+
+      const tamperedAttachment = tampered.stage.preparedAdmission.attachment;
+      writeFileSync(tamperedPaths.staged, GIF, { mode: 0o600 });
+      chmodSync(tamperedPaths.staged, 0o644);
+      await assert.rejects(
+        store.finalizeAdmittedImage({
+          stage: tampered.stage,
+          admission: admittedWith(tamperedAttachment),
+        }),
+        AttachmentStoreIntegrityError,
+      );
+      chmodSync(tamperedPaths.staged, 0o600);
+
+      const rolledBack = await store.rollbackUnfinalizedImage({
+        stage: staged.stage,
+        reason: "application-aborted",
+      });
+      assert.deepEqual(rolledBack, { status: "already-resolved" });
+    } finally {
+      database.close();
+    }
+  });
+});
+
+test("finalization never clobbers a final blob and tolerates a completed crash-window link", async () => {
+  await withDisposableDataRoot(async (root) => {
+    const database = openCanonicalHitchV2Database({
+      dataRoot: root.resolve("state"),
+    });
+    try {
+      const { authenticationRequestId } =
+        await publishAndAuthenticate(database);
+      const intake = createLocalImageIntakeVault();
+      const store = createStore(database, intake);
+
+      const staged = await store.stageBoundedImage(
+        intake.seal({ bytes: PNG, authenticationRequestId }),
+      );
+      assert.equal(staged.status, "staged");
+      if (staged.status !== "staged") return;
+      const { attachment } = staged.stage.preparedAdmission;
+      const paths = stagePaths(database, attachment);
+
+      // A crashed previous attempt linked the final file but never unlinked
+      // the stage: the matching content completes instead of clobbering.
+      const { linkSync: link } = await import("node:fs");
+      link(paths.staged, paths.final);
+      const completed = await store.finalizeAdmittedImage({
+        stage: staged.stage,
+        admission: admittedWith(attachment),
+      });
+      assert.deepEqual(completed, {
+        status: "finalized",
+        attachmentId: attachment.id,
+      });
+      assert.equal(existsSync(paths.staged), false);
+      assert.equal(lstatSync(paths.final).mode & 0o777, 0o600);
+
+      const foreign = await store.stageBoundedImage(
+        intake.seal({ bytes: GIF, authenticationRequestId }),
+      );
+      assert.equal(foreign.status, "staged");
+      if (foreign.status !== "staged") return;
+      const foreignAttachment = foreign.stage.preparedAdmission.attachment;
+      const foreignPaths = stagePaths(database, foreignAttachment);
+      writeFileSync(foreignPaths.final, JPEG, { mode: 0o600 });
+      await assert.rejects(
+        store.finalizeAdmittedImage({
+          stage: foreign.stage,
+          admission: admittedWith(foreignAttachment),
+        }),
+        AttachmentStoreIntegrityError,
+      );
+      assert.equal(
+        sha256(
+          Buffer.from(
+            await import("node:fs/promises").then((fs) =>
+              fs.readFile(foreignPaths.final),
+            ),
+          ),
+        ),
+        sha256(JPEG),
+      );
     } finally {
       database.close();
     }

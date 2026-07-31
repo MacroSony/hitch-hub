@@ -17,16 +17,17 @@
 
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
+  fchmodSync,
   fsyncSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
-  renameSync,
-  statSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -148,6 +149,12 @@ export function createLocalImageIntakeVault(): LocalImageIntakeVault {
   });
 }
 
+/**
+ * Content-only sniffing of the sealed bytes. The `mime-content-mismatch`
+ * staging reason is reserved for a future connector-declared MIME that this
+ * store would verify against the sniffed type; today the bytes are the only
+ * authority, so an unrecognized signature is simply unsupported.
+ */
 function sniffImageMimeType(
   bytes: Uint8Array,
 ): AgentImageMimeType | undefined {
@@ -272,9 +279,16 @@ function prepareBlobDirectories(
   revalidateV2DataRoot(database.root);
   const blobPath = join(database.root.path, BLOB_DIRECTORY);
   const stagePath = join(blobPath, STAGE_DIRECTORY);
-  for (const path of [blobPath, stagePath]) {
+  for (const [path, parent] of [
+    [blobPath, database.root.path],
+    [stagePath, blobPath],
+  ] as const) {
     try {
       mkdirSync(path, { mode: PRIVATE_IMAGE_LIMITS.blobDirectoryMode });
+      // Creation modes are umask-dependent; pin the exact mode and make the
+      // directory entry durable before it anchors staged content.
+      chmodSync(path, PRIVATE_IMAGE_LIMITS.blobDirectoryMode);
+      fsyncDirectory(parent);
     } catch (error) {
       if (!isNodeError(error, "EEXIST")) {
         throw new AttachmentStoreIntegrityError(
@@ -311,8 +325,32 @@ function writeFileExclusive(path: string, bytes: Uint8Array): void {
     PRIVATE_IMAGE_LIMITS.blobFileMode,
   );
   try {
-    writeSync(descriptor, bytes, 0, bytes.length, 0);
+    // Creation modes are umask-dependent; pin the exact mode explicitly.
+    fchmodSync(descriptor, PRIVATE_IMAGE_LIMITS.blobFileMode);
+    let written = 0;
+    while (written < bytes.length) {
+      const count = writeSync(
+        descriptor,
+        bytes,
+        written,
+        bytes.length - written,
+        written,
+      );
+      if (count <= 0) {
+        throw new AttachmentStoreIntegrityError(
+          "short write while staging a private blob",
+        );
+      }
+      written += count;
+    }
     fsyncSync(descriptor);
+  } catch (error) {
+    try {
+      unlinkSync(path);
+    } catch {
+      // Preserve the original failure; the orphan is recovery-visible.
+    }
+    throw error;
   } finally {
     closeSync(descriptor);
   }
@@ -333,7 +371,22 @@ function readFileBounded(path: string, maximumBytes: number): Buffer {
       );
     }
     const buffer = Buffer.alloc(stat.size);
-    readSync(descriptor, buffer, 0, stat.size, 0);
+    let received = 0;
+    while (received < stat.size) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        received,
+        stat.size - received,
+        received,
+      );
+      if (count <= 0) {
+        throw new AttachmentStoreIntegrityError(
+          "short read while verifying a private blob",
+        );
+      }
+      received += count;
+    }
     return buffer;
   } finally {
     closeSync(descriptor);
@@ -424,11 +477,16 @@ export class LocalPrivateAttachmentStore {
           { cause: error },
         );
       }
+      if (error instanceof AttachmentStoreIntegrityError) throw error;
       return Object.freeze({
         status: "rejected" as const,
         reason: "private-storage-unavailable" as const,
       });
     }
+    // A returned stage is durable: the copy is fsynced and its directory
+    // entry survives a crash, so later admission rows never reference a
+    // blob whose stage has no name anywhere.
+    fsyncDirectory(directories.stagePath);
     requireIdentity(
       requireBlobDirectory(directories.stagePath),
       directories.stageIdentity,
@@ -486,15 +544,31 @@ export class LocalPrivateAttachmentStore {
       );
     } catch (error) {
       if (isNodeError(error, "ENOENT")) {
+        // Repeat finalization is valid only when the exact staged content
+        // already occupies the final path.
         try {
-          statSync(finalPath);
-          return Object.freeze({ status: "already-resolved" as const });
-        } catch {
+          const existing = readFileBounded(
+            finalPath,
+            PRIVATE_IMAGE_LIMITS.maximumImageBytes,
+          );
+          if (
+            existing.length === attachment.byteLength &&
+            sha256Digest(existing) === attachment.integrityDigest
+          ) {
+            return Object.freeze({ status: "already-resolved" as const });
+          }
+        } catch (readError) {
+          if (readError instanceof AttachmentStoreIntegrityError) {
+            throw readError;
+          }
           throw new AttachmentStoreIntegrityError(
             "private blob stage resolved before its finalization",
             { cause: error },
           );
         }
+        throw new AttachmentStoreIntegrityError(
+          "final private blob path carries unexpected content",
+        );
       }
       if (error instanceof AttachmentStoreIntegrityError) throw error;
       return Object.freeze({
@@ -512,14 +586,47 @@ export class LocalPrivateAttachmentStore {
       });
     }
     try {
-      renameSync(stagedPath, finalPath);
-      fsyncDirectory(directories.blobPath);
-    } catch {
+      // link(2) never clobbers: a pre-existing final path means a completed
+      // crash-window link from a previous attempt or foreign content.
+      linkSync(stagedPath, finalPath);
+    } catch (error) {
+      if (isNodeError(error, "EEXIST")) {
+        const existing = readFileBounded(
+          finalPath,
+          PRIVATE_IMAGE_LIMITS.maximumImageBytes,
+        );
+        if (
+          existing.length === attachment.byteLength &&
+          sha256Digest(existing) === attachment.integrityDigest
+        ) {
+          unlinkSync(stagedPath);
+          fsyncDirectory(directories.stagePath);
+          return Object.freeze({
+            status: "finalized" as const,
+            attachmentId: attachment.id,
+          });
+        }
+        throw new AttachmentStoreIntegrityError(
+          "final private blob path carries foreign content",
+        );
+      }
       return Object.freeze({
         status: "finalization-failed" as const,
         reason: "private-storage-unavailable" as const,
       });
     }
+    try {
+      unlinkSync(stagedPath);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) {
+        return Object.freeze({
+          status: "finalization-failed" as const,
+          reason: "private-storage-unavailable" as const,
+        });
+      }
+    }
+    fsyncDirectory(directories.blobPath);
+    fsyncDirectory(directories.stagePath);
     requireIdentity(
       requireBlobDirectory(directories.blobPath),
       directories.blobIdentity,
