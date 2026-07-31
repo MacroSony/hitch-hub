@@ -49,7 +49,7 @@ happen next, and what is blocked.
   startup-recovery slice.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 203
+  source plus this status reconciliation. The v2 suite currently has 204
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -85,7 +85,7 @@ happen next, and what is blocked.
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
-| V2-009B — attachment staging and private storage | Committed | `62f06f9` |
+| V2-009B — attachment staging and private storage | Committed | `62f06f9`, `55ddf6d` |
 
 ## Working-tree review candidates
 
@@ -191,6 +191,8 @@ the first slice is accepted.
 | Grant re-issuance lifecycle | Resolved for the first slice: configuration-use grant replacement is an operator transaction that deletes the revoked row and inserts its successor together; `readConfigurationUse` intentionally hard-fails on active-plus-revoked ambiguity, and out-of-band revocation intentionally conflicts with the next bootstrap publication's digest check. A grant-management service redesigns this post-slice |
 | First-slice configuration cardinality | Resolved as intended posture: exactly one installation, active principal, execution/turn policy, profile provider allowance, and per-provider credential binding are hard integrity requirements (schema-enforced or session-creation-enforced) until multi-policy/multi-provider support arrives as one deliberate schema-plus-command package |
 | Publication provenance depth | Resolved under the trusted-local-DB threat model: `assertPublishedRow` proves PK-existence plus bootstrap audit chain, not current row content; content drift is detected fail-closed at re-publication, mutable state columns remain the intended revocation channel, and launch-time integrity verification (V2-010) owns artifact/grant digest enforcement |
+| Attachment durability ordering | Resolved for the first slice: a returned stage is durable (file and directory fsynced) before the Turn-admission transaction may commit rows referencing it; finalization promotes via no-clobber `linkSync` and verifies content on every repeat/crash-window path; startup recovery must treat "rows plus final file, no stage" as idempotent success |
+| Connector-declared attachment MIME | Deferred: staging derives MIME solely from sealed bytes today, so the port's `mime-content-mismatch` reason is unreachable; it is reserved for a future connector-declared MIME the store would verify against the sniffed type |
 
 ## First-slice completion gate
 
