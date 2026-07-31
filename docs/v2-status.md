@@ -35,10 +35,14 @@ happen next, and what is blocked.
   socket lifecycle: canonical run-directory and socket identity validation,
   proven-stale recovery, bounded concurrent connections, authenticated
   one-request framing with LF-terminator detection, an optional absolute
-  request deadline, and bounded idempotent shutdown.
+  request deadline, and bounded idempotent shutdown. V2-009A adds atomic
+  private session creation: live identity revalidation, reference resolution,
+  current-revision and first-slice policy selection, fixed-order
+  configuration-use rechecks, exact SessionSpec pinning, private endpoint
+  binding, and creation/denial audit in one transaction.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 187
+  source plus this status reconciliation. The v2 suite currently has 195
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -73,6 +77,7 @@ happen next, and what is blocked.
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
+| V2-009A — session creation and private binding | Committed | `8198b3f` |
 
 ## Working-tree review candidates
 
@@ -90,8 +95,7 @@ verification, and its own commit.
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
 | V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
-| V2-009A — session creation and private binding | Ready, current | V2-004c authorization and V2-008a command shapes are committed |
-| V2-009B — attachment staging and private storage | Waiting | V2-003B and storage ports |
+| V2-009B — attachment staging and private storage | Ready, current | V2-003B and storage ports are committed |
 | V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Waiting | V2-009A/B |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
 | V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
@@ -154,15 +158,15 @@ should expose integration problems earlier than the original wave ordering.
 
 ## Acceptance status
 
-The deterministic suite has registered partial cases for 12 of 21 scenario
+The deterministic suite has registered partial cases for 13 of 21 scenario
 IDs:
 
-`V2-S01`, `V2-S02`, `V2-S07`, `V2-S09`, `V2-S10`, `V2-S12`, `V2-S13`, `V2-S14`,
-`V2-S15`, `V2-S18`, `V2-S19`, and `V2-S20`.
+`V2-S01`, `V2-S02`, `V2-S03`, `V2-S07`, `V2-S09`, `V2-S10`, `V2-S12`, `V2-S13`,
+`V2-S14`, `V2-S15`, `V2-S18`, `V2-S19`, and `V2-S20`.
 
 The following scenarios have no registered implementation case yet:
 
-`V2-S03`–`V2-S06`, `V2-S08`, `V2-S11`, `V2-S16`, `V2-S17`, and `V2-S21`.
+`V2-S04`–`V2-S06`, `V2-S08`, `V2-S11`, `V2-S16`, `V2-S17`, and `V2-S21`.
 
 All registered scenarios remain `in-progress` by design. A green
 `npm run test:v2` verifies the implemented foundation; it does not mean that
