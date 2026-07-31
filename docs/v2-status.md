@@ -47,9 +47,17 @@ happen next, and what is blocked.
   Durable `private_blobs`/`attachments` rows remain owned by the future
   Turn-admission transaction; orphan recovery claims remain with the
   startup-recovery slice.
+- V2-009C adds Turn admission and cancellation intent: owner-scoped session
+  resolution, binding/lifecycle recheck, exact idempotent replay by
+  `(endpoint_id, idempotency_key)` with conflict fail-closed denial, pinned
+  `max_queued_turns` capacity, immutable input snapshots plus durable
+  attachment rows, resolved-model inference resolution, FIFO queue insertion
+  and receipts, compare-and-remove queued cancellation with terminal
+  response/delivery/audit, and active cancellation intent recorded on the
+  runtime projection without touching worker authority.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 204
+  source plus this status reconciliation. The v2 suite currently has 211
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -86,6 +94,7 @@ happen next, and what is blocked.
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
 | V2-009B — attachment staging and private storage | Committed | `62f06f9`, `55ddf6d` |
+| V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Committed | `b397ddc` |
 
 ## Working-tree review candidates
 
@@ -102,8 +111,8 @@ verification, and its own commit.
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
-| V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Ready, current | V2-009A and V2-009B are committed |
+| V2-008c — local connector/application dispatch adapter | Ready, current | V2-009A/B/C application services are committed |
+| V2-014A — first-slice CLI shell over the local socket | Waiting | V2-008c |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
 | V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
 | V2-010B — secure worker/sidecar launch composition | Blocked | V2-E01, V2-006B, V2-010A, and broker readiness |
@@ -193,6 +202,9 @@ the first slice is accepted.
 | Publication provenance depth | Resolved under the trusted-local-DB threat model: `assertPublishedRow` proves PK-existence plus bootstrap audit chain, not current row content; content drift is detected fail-closed at re-publication, mutable state columns remain the intended revocation channel, and launch-time integrity verification (V2-010) owns artifact/grant digest enforcement |
 | Attachment durability ordering | Resolved for the first slice: a returned stage is durable (file and directory fsynced) before the Turn-admission transaction may commit rows referencing it; finalization promotes via no-clobber `linkSync` and verifies content on every repeat/crash-window path; startup recovery must treat "rows plus final file, no stage" as idempotent success |
 | Connector-declared attachment MIME | Deferred: staging derives MIME solely from sealed bytes today, so the port's `mime-content-mismatch` reason is unreachable; it is reserved for a future connector-declared MIME the store would verify against the sniffed type |
+| First-slice response delivery parameters | Resolved pending a published delivery policy: cancelled-turn deliveries use pinned `maximum_attempts = 3` and a 300-second deadline (`FIRST_SLICE_RESPONSE_DELIVERY`); a future delivery-policy record replaces the constants |
+| Cancellation intent idempotency | Resolved: repeating active cancellation against an already-cancelling Turn returns `not-active` (intent already recorded), and queued cancellation of a terminal-cancelled Turn returns `already-cancelled`; neither emits duplicate audit |
+| Idempotency-key or origin-message conflict | Resolved fail-closed: reusing an idempotency key with different content, or an origin message with a different key, is denied without new state or audit (no conflict variant exists on the admission result union) |
 
 ## First-slice completion gate
 
