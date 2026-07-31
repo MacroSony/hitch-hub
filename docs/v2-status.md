@@ -30,10 +30,15 @@ happen next, and what is blocked.
   authentication evidence, and transaction-scoped live identity, grant,
   configuration-resource, and stable-reference reads. V2-008a adds the closed,
   versioned local request/response/event protocol object codecs, including
-  bounded canonical image transfer and authority-injection rejection.
+  bounded canonical image transfer and authority-injection rejection, plus the
+  strict LF-terminated JSONL wire framing. V2-008b adds the owner-only Unix
+  socket lifecycle: canonical run-directory and socket identity validation,
+  proven-stale recovery, bounded concurrent connections, authenticated
+  one-request framing with LF-terminator detection, an optional absolute
+  request deadline, and bounded idempotent shutdown.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 172
+  source plus this status reconciliation. The v2 suite currently has 187
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -66,7 +71,8 @@ happen next, and what is blocked.
 | V2-004c — local authentication and live authorization reads | Committed | `aeba780`, `603e14d`, `8099425` |
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
-| V2-008a — bounded private local protocol codecs | Committed | `6a9538d` |
+| V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
+| V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 
 ## Working-tree review candidates
 
@@ -83,9 +89,8 @@ verification, and its own commit.
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008b — secure Unix socket lifecycle and authenticated framing | Ready, current | V2-004c and V2-008a are committed |
 | V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
-| V2-009A — session creation and private binding | Waiting | V2-004c authorization and V2-008a command shapes |
+| V2-009A — session creation and private binding | Ready, current | V2-004c authorization and V2-008a command shapes are committed |
 | V2-009B — attachment staging and private storage | Waiting | V2-003B and storage ports |
 | V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Waiting | V2-009A/B |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
