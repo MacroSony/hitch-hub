@@ -181,6 +181,9 @@ the first slice is accepted.
 | Pi artifact coexistence | V1's verified Pi 0.80.10 and v2's pinned Pi 0.82.0 use explicit trusted artifact roots rather than one ambiguous `PATH` installation |
 | SQLite runtime support | Either pin and continuously test the accepted Node 24 `DatabaseSync` runtime or replace it before production if its experimental behavior is unacceptable |
 | Post-slice product path | Select the first chat connector and define minimum v1 parity plus retirement/coexistence criteria |
+| Grant re-issuance lifecycle | Resolved for the first slice: configuration-use grant replacement is an operator transaction that deletes the revoked row and inserts its successor together; `readConfigurationUse` intentionally hard-fails on active-plus-revoked ambiguity, and out-of-band revocation intentionally conflicts with the next bootstrap publication's digest check. A grant-management service redesigns this post-slice |
+| First-slice configuration cardinality | Resolved as intended posture: exactly one installation, active principal, execution/turn policy, profile provider allowance, and per-provider credential binding are hard integrity requirements (schema-enforced or session-creation-enforced) until multi-policy/multi-provider support arrives as one deliberate schema-plus-command package |
+| Publication provenance depth | Resolved under the trusted-local-DB threat model: `assertPublishedRow` proves PK-existence plus bootstrap audit chain, not current row content; content drift is detected fail-closed at re-publication, mutable state columns remain the intended revocation channel, and launch-time integrity verification (V2-010) owns artifact/grant digest enforcement |
 
 ## First-slice completion gate
 
