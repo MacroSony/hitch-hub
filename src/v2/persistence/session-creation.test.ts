@@ -14,7 +14,10 @@ import {
 import { withDisposableDataRoot } from "../test-support/disposable-data-root.js";
 import { SQLiteBootstrapPublicationUnitOfWork } from "./bootstrap-publication.js";
 import type { V2Database } from "./database.js";
-import { UntrustedAuthorizationContextError } from "./foundational-authorization.js";
+import {
+  FoundationalAuthorizationIntegrityError,
+  UntrustedAuthorizationContextError,
+} from "./foundational-authorization.js";
 import { openCanonicalHitchV2Database } from "./initialize.js";
 import {
   SessionCreationInputError,
@@ -576,6 +579,45 @@ test("[V2-S03/session-creation-use-grant-enforcement] session creation rejects a
   });
 });
 
+test("session creation rejects a revoked credential-binding resource", async () => {
+  await withDisposableDataRoot(async (root) => {
+    const database = openCanonicalHitchV2Database({
+      dataRoot: root.resolve("state"),
+    });
+    try {
+      const records = createBootstrapPublicationRecords();
+      const { trust, context } = await publishAndAuthenticate(database);
+      database.transaction((transaction) =>
+        transaction.run(
+          `UPDATE provider_credential_bindings
+            SET state = 'revoked',
+              revoked_at = ?,
+              revoked_actor_kind = 'system',
+              revoked_actor_system_component = 'authorization'
+            WHERE id = ?`,
+          ["2026-07-29T12:04:00.000Z", "openai-codex-pi-auth-v1"],
+        ),
+      );
+      const denied = await sessionCreation(
+        database,
+        trust,
+      ).createPrivateSession({
+        context,
+        profileReference: records.agentProfile.reference,
+        workspaceReference: records.workspace.reference,
+      });
+      assert.equal(denied.status, "denied");
+      if (denied.status !== "denied") return;
+      assert.equal(denied.reason, "required-configuration-use-revoked");
+      if (denied.reason !== "required-configuration-use-revoked") return;
+      assert.equal(denied.resourceKind, "provider-credential-binding");
+      assert.equal(countRows(database, "sessions"), 0);
+    } finally {
+      database.close();
+    }
+  });
+});
+
 test("[V2-S02/session-creation-authority-exclusion] session creation rejects forged, cloned, and service authority", async () => {
   await withDisposableDataRoot(async (root) => {
     const database = openCanonicalHitchV2Database({
@@ -622,6 +664,7 @@ test("session creation rolls back every row across a commit fault", async () => 
       const records = createBootstrapPublicationRecords();
       const { trust, context } = await publishAndAuthenticate(database);
       const unitOfWork = sessionCreation(database, trust);
+      const auditBefore = countRows(database, "audit_envelopes");
 
       faults.failNext("before-commit");
       await assert.rejects(
@@ -645,6 +688,7 @@ test("session creation rolls back every row across a commit fault", async () => 
       ]) {
         assert.equal(countRows(database, table), 0, table);
       }
+      assert.equal(countRows(database, "audit_envelopes"), auditBefore);
 
       const created = await unitOfWork.createPrivateSession({
         context,
@@ -696,6 +740,52 @@ test("session creation rejects ambiguous installation policy configuration", asy
   });
 });
 
+test("session creation rejects an unpublished selected revision", async () => {
+  await withDisposableDataRoot(async (root) => {
+    const database = openCanonicalHitchV2Database({
+      dataRoot: root.resolve("state"),
+    });
+    try {
+      const records = createBootstrapPublicationRecords();
+      const { trust, context } = await publishAndAuthenticate(database);
+      database.transaction((transaction) =>
+        transaction.run(
+          `INSERT INTO agent_profile_revisions (
+            id, profile_id, revision, driver_id, display_name,
+            default_provider_id, default_model_id, default_reasoning_kind,
+            default_reasoning_effort, skills_mode, prompt_templates_mode,
+            themes_mode, project_resources_mode, extensions_mode,
+            extension_discovery, extension_hot_reload,
+            extension_prompt_lifecycle, configuration_json, created_at
+          )
+          SELECT
+            'pi-profile-revision-v2', profile_id, 2, driver_id, display_name,
+            default_provider_id, default_model_id, default_reasoning_kind,
+            default_reasoning_effort, skills_mode, prompt_templates_mode,
+            themes_mode, project_resources_mode, extensions_mode,
+            extension_discovery, extension_hot_reload,
+            extension_prompt_lifecycle, configuration_json,
+            '2026-07-29T12:04:00.000Z'
+          FROM agent_profile_revisions
+          WHERE id = 'pi-profile-revision-v1'`,
+          [],
+        ),
+      );
+      await assert.rejects(
+        sessionCreation(database, trust).createPrivateSession({
+          context,
+          profileReference: records.agentProfile.reference,
+          workspaceReference: records.workspace.reference,
+        }),
+        FoundationalAuthorizationIntegrityError,
+      );
+      assert.equal(countRows(database, "sessions"), 0);
+    } finally {
+      database.close();
+    }
+  });
+});
+
 test("session creation rejects an unbounded display name", async () => {
   await withDisposableDataRoot(async (root) => {
     const database = openCanonicalHitchV2Database({
@@ -723,7 +813,23 @@ test("session creation rejects an unbounded display name", async () => {
         }),
         SessionCreationInputError,
       );
-      assert.equal(countRows(database, "sessions"), 0);
+      await assert.rejects(
+        unitOfWork.createPrivateSession({
+          context,
+          profileReference: records.agentProfile.reference,
+          workspaceReference: records.workspace.reference,
+          displayName: "x".repeat(257),
+        }),
+        SessionCreationInputError,
+      );
+      const boundary = await unitOfWork.createPrivateSession({
+        context,
+        profileReference: records.agentProfile.reference,
+        workspaceReference: records.workspace.reference,
+        displayName: "x".repeat(256),
+      });
+      assert.equal(boundary.status, "created");
+      assert.equal(countRows(database, "sessions"), 1);
     } finally {
       database.close();
     }

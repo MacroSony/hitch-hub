@@ -47,6 +47,11 @@ export type LiveConnectorIdentityRead =
   | LiveConnectorIdentity
   | {
       readonly status: "denied";
+      /**
+       * Validated by the durable authentication evidence before denial; safe
+       * for denial-audit attribution even though no live identity exists.
+       */
+      readonly installationId: InstallationId;
       readonly reason: "principal-disabled" | "binding-inactive";
     };
 
@@ -456,6 +461,7 @@ export class SQLiteFoundationalAuthorizationReads {
     ) {
       return Object.freeze({
         status: "denied" as const,
+        installationId,
         reason: "binding-inactive" as const,
       });
     }
@@ -532,12 +538,14 @@ export class SQLiteFoundationalAuthorizationReads {
     ) {
       return Object.freeze({
         status: "denied" as const,
+        installationId,
         reason: "binding-inactive" as const,
       });
     }
     if (principalState === "disabled") {
       return Object.freeze({
         status: "denied" as const,
+        installationId,
         reason: "principal-disabled" as const,
       });
     }

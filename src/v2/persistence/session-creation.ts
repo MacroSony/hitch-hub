@@ -161,15 +161,15 @@ export class SQLiteSessionCreationUnitOfWork
       transaction,
       input.context,
     );
-    const displayName = decodeDisplayName(input.displayName);
     if (identity.status === "denied") {
       return this.#denied(
         transaction,
         input.context,
-        this.#soleInstallationId(transaction),
+        identity.installationId,
         identity.reason,
       );
     }
+    const displayName = decodeDisplayName(input.displayName);
     const installationId = identity.installationId;
 
     const profile = this.#reads.resolveProfileReference(
@@ -247,21 +247,6 @@ export class SQLiteSessionCreationUnitOfWork
       identity,
       displayName,
       selection,
-    );
-  }
-
-  #soleInstallationId(
-    transaction: V2RepositoryTransaction,
-  ): InstallationId {
-    const rows = transaction.all("SELECT id FROM installations", []);
-    if (rows.length !== 1) {
-      throw new SessionCreationIntegrityError(
-        "session creation requires exactly one published installation",
-      );
-    }
-    return decodeServiceId(
-      "Installation",
-      requiredText(rows[0]!, "id", "installation identifier"),
     );
   }
 

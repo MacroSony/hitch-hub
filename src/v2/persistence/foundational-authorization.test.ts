@@ -313,7 +313,11 @@ test("minted connector identity immediately reflects principal, binding, and end
           database.transaction((transaction) =>
             reads.readLiveConnectorIdentity(transaction, context),
           ),
-          { status: "denied", reason: scenario.expected },
+          {
+            status: "denied",
+            installationId: "installation-v1",
+            reason: scenario.expected,
+          },
         );
       } finally {
         database.close();
