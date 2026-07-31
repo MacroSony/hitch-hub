@@ -39,10 +39,17 @@ happen next, and what is blocked.
   private session creation: live identity revalidation, reference resolution,
   current-revision and first-slice policy selection, fixed-order
   configuration-use rechecks, exact SessionSpec pinning, private endpoint
-  binding, and creation/denial audit in one transaction.
+  binding, and creation/denial audit in one transaction. V2-009B adds the
+  private attachment staging store: a one-shot intake vault between the
+  connector and the store, magic-byte MIME sniffing, sha256-hashed bounded
+  private copies under the root-owned `attachments` directory, minted
+  Attachment provenance, and exact finalization/rollback of staged blobs.
+  Durable `private_blobs`/`attachments` rows remain owned by the future
+  Turn-admission transaction; orphan recovery claims remain with the
+  startup-recovery slice.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 197
+  source plus this status reconciliation. The v2 suite currently has 203
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -78,6 +85,7 @@ happen next, and what is blocked.
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
+| V2-009B — attachment staging and private storage | Committed | `62f06f9` |
 
 ## Working-tree review candidates
 
@@ -95,8 +103,7 @@ verification, and its own commit.
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
 | V2-008c — local connector/application dispatch adapter | Waiting | V2-009 application services |
-| V2-009B — attachment staging and private storage | Ready, current | V2-003B and storage ports are committed |
-| V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Waiting | V2-009A/B |
+| V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Ready, current | V2-009A and V2-009B are committed |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
 | V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
 | V2-010B — secure worker/sidecar launch composition | Blocked | V2-E01, V2-006B, V2-010A, and broker readiness |
