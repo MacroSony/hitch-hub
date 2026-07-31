@@ -114,7 +114,7 @@ function decodeAccessGrantId(input: unknown): AccessGrantId {
   return decodeServiceId("AccessGrant", input);
 }
 
-function requiredText(
+export function requiredText(
   row: SQLiteRow,
   column: string,
   label: string,
@@ -147,7 +147,7 @@ function requiredCount(
   return row.count;
 }
 
-function assertPublishedRow(
+export function assertPublishedRow(
   transaction: V2RepositoryTransaction,
   installationId: InstallationId,
   table: BootstrapFoundationTable,
