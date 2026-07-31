@@ -42,7 +42,7 @@ happen next, and what is blocked.
   binding, and creation/denial audit in one transaction.
 - The only uncommitted v2 change is this status reconciliation.
 - `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 195
+  source plus this status reconciliation. The v2 suite currently has 197
   passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
@@ -77,7 +77,7 @@ happen next, and what is blocked.
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
-| V2-009A — session creation and private binding | Committed | `8198b3f` |
+| V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
 
 ## Working-tree review candidates
 
