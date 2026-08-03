@@ -68,7 +68,7 @@ happen next, and what is blocked.
   hardens replay ordering, attachment authentication provenance, invalid-ID
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
-  current working tree. The v2 suite currently has 239 passing tests.
+  current working tree. The v2 suite currently has 246 passing tests.
 - V2-E01 is committed after two-pass independent review. The Pi sidecar
   receives an empty Bubblewrap network namespace, an exact three-entry
   environment, and a fixed
@@ -80,6 +80,15 @@ happen next, and what is blocked.
   The real namespace capability test passes on this Linux host. Runtime Gate E
   is committed as the containment boundary; V2-006B/V2-010B still own its
   verified production composition.
+- V2-006A2 is independently reviewed and committed. The deterministic Pi
+  sidecar now has an exact Pi/package/bridge manifest, a single frozen catalog
+  whose bridge digest covers the complete model policy, regenerated A1
+  artifact verification, a provider-scoped credential store with read-only
+  API keys and a V2-011-owned resource-wide atomic OAuth update port, and a
+  model-aware trusted invoke seam behind a non-forgeable E01 fetch-boundary
+  proof. V2-006A3 still owns native events, cancellation, error/retry/replay,
+  and the OAuth behavior matrix; V2-006B still owns filesystem artifacts and
+  production process integration.
 
 ## Status legend
 
@@ -109,6 +118,7 @@ happen next, and what is blocked.
 | V2-004c — local authentication and live authorization reads | Committed | `aeba780`, `603e14d`, `8099425` |
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
+| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Committed | `17e1419` |
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
@@ -130,8 +140,8 @@ verification, and its own commit.
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Committed | `404e5a3`; downstream verified sidecar/launcher composition remains V2-006B/V2-010B |
-| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
-| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
+| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Committed | `17e1419` |
+| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Ready | V2-006A2 is committed |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
 | V2-008c — local connector/application dispatch adapter | Committed | `b7b55b1` |
@@ -189,8 +199,8 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. Complete V2-006A2/A3, V2-007, and V2-010A; Runtime Gate E is now available
-   to those production integrations.
+4. Complete V2-006A3, V2-007, and V2-010A; Runtime Gate E and V2-006A2 are
+   now available to those production integrations.
 5. Complete V2-006B, V2-011, and V2-010B using E01's committed production
    sidecar topology and containment boundary.
 6. Integrate V2-012, then V2-013 and V2-014B.
