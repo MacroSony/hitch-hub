@@ -151,7 +151,6 @@ interface SessionResolution {
   readonly specId: SessionSpecId;
   readonly turnPolicySnapshotId: TurnPolicySnapshotId;
   readonly profileRevisionId: AgentProfileRevisionId;
-  readonly bindingId: SessionEndpointBindingId;
 }
 
 function requiredText(
@@ -282,7 +281,11 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     );
     const attachment = input.preparedAttachment === undefined
       ? undefined
-      : this.#validatePreparedAttachment(input, identity.installationId);
+      : this.#validatePreparedAttachment(
+          transaction,
+          input,
+          identity,
+        );
 
     const resolution = this.#resolveSession(
       transaction,
@@ -294,6 +297,9 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     }
     const session = resolution.session;
 
+    // Exact idempotency precedes binding/lifecycle gating: a lost-response
+    // retry must still receive its original receipt after a later binding
+    // suspension, while a new submission remains denied.
     const duplicate = this.#readExactReplay(
       transaction,
       identity,
@@ -318,6 +324,16 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       });
     }
 
+    const authorization = this.#authorizeSession(
+      transaction,
+      identity,
+      session,
+    );
+    if (authorization.status !== "authorized") {
+      return Object.freeze({ status: "denied" as const });
+    }
+    const bindingId = authorization.bindingId;
+
     const maximumQueued = this.#readMaximumQueuedTurns(
       transaction,
       session.turnPolicySnapshotId,
@@ -340,18 +356,31 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       return Object.freeze({ status: "queue-capacity-exceeded" as const });
     }
 
-    return this.#insertTurn(transaction, identity, session, input, {
-      text,
-      idempotencyKey,
-      originMessageId,
-      attachment,
-    });
+    return this.#insertTurn(
+      transaction,
+      identity,
+      session,
+      bindingId,
+      input,
+      {
+        text,
+        idempotencyKey,
+        originMessageId,
+        attachment,
+      },
+    );
   }
 
-  /** Defense-in-depth revalidation of a store-minted admission record. */
+  /**
+   * Defense-in-depth revalidation of a store-minted admission record. The
+   * provenance authentication request must exist and belong to the caller's
+   * principal and identity binding; cross-checking the minted stage itself
+   * belongs to the composing adapter, which holds both ports.
+   */
   #validatePreparedAttachment(
+    transaction: V2RepositoryTransaction,
     input: AdmitTurnInput,
-    installationId: InstallationId,
+    identity: LiveConnectorIdentity,
   ): Attachment {
     const prepared = input.preparedAttachment;
     if (
@@ -366,7 +395,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     }
     const attachment = prepared.attachment;
     if (
-      attachment.installationId !== installationId ||
+      attachment.installationId !== identity.installationId ||
       attachment.mediaType !== "image" ||
       !AGENT_IMAGE_MIME_TYPES.has(attachment.mimeType) ||
       !Number.isInteger(attachment.byteLength) ||
@@ -382,10 +411,29 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     }
     decodeServiceId("Attachment", attachment.id);
     decodeServiceId("PrivateBlob", attachment.blob.blobId);
-    decodeServiceId(
+    const authenticationRequestId = decodeServiceId(
       "AuthenticationRequest",
       attachment.admittedFrom.authenticationRequestId,
     );
+    const provenance = transaction.get(
+      `SELECT principal_id, identity_binding_id FROM authentication_requests
+      WHERE id = ?`,
+      [authenticationRequestId],
+    );
+    if (
+      provenance === undefined ||
+      requiredText(provenance, "principal_id", "attachment provenance") !==
+        identity.principalId ||
+      requiredText(
+        provenance,
+        "identity_binding_id",
+        "attachment provenance",
+      ) !== identity.identityBindingId
+    ) {
+      throw new TurnAdmissionIntegrityError(
+        "prepared attachment provenance does not belong to the caller",
+      );
+    }
     return attachment;
   }
 
@@ -396,7 +444,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
   ):
     | { readonly status: "resolved"; readonly session: SessionResolution }
     | {
-        readonly status: "session-not-found" | "session-name-ambiguous" | "denied";
+        readonly status: "session-not-found" | "session-name-ambiguous";
       } {
     let sessionRow;
     if (selector.kind === "session-id") {
@@ -433,29 +481,6 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       requiredText(sessionRow, "spec_id", "session"),
     );
 
-    const bindingRow = transaction.get(
-      `SELECT id, state FROM session_endpoint_bindings
-      WHERE session_id = ? AND endpoint_id = ?`,
-      [sessionId, identity.endpointId],
-    );
-    if (
-      bindingRow === undefined ||
-      requiredText(bindingRow, "state", "session endpoint binding") !==
-        "active"
-    ) {
-      return Object.freeze({ status: "denied" as const });
-    }
-    const lifecycleRow = transaction.get(
-      `SELECT status FROM session_lifecycle WHERE session_id = ?`,
-      [sessionId],
-    );
-    if (
-      lifecycleRow === undefined ||
-      requiredText(lifecycleRow, "status", "session lifecycle") !== "active"
-    ) {
-      return Object.freeze({ status: "denied" as const });
-    }
-
     const specRow = transaction.get(
       `SELECT turn_policy_snapshot_id, agent_profile_revision_id
       FROM session_specs WHERE id = ?`,
@@ -479,11 +504,49 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
           "AgentProfileRevision",
           requiredText(specRow, "agent_profile_revision_id", "session spec"),
         ),
-        bindingId: decodeServiceId(
-          "SessionEndpointBinding",
-          requiredText(bindingRow, "id", "session endpoint binding"),
-        ),
       }),
+    });
+  }
+
+  /** Binding and lifecycle gating for new admissions (after idempotency). */
+  #authorizeSession(
+    transaction: V2RepositoryTransaction,
+    identity: LiveConnectorIdentity,
+    session: SessionResolution,
+  ):
+    | {
+        readonly status: "authorized";
+        readonly bindingId: SessionEndpointBindingId;
+      }
+    | { readonly status: "denied" } {
+    const bindingRow = transaction.get(
+      `SELECT id, state FROM session_endpoint_bindings
+      WHERE session_id = ? AND endpoint_id = ?`,
+      [session.sessionId, identity.endpointId],
+    );
+    if (
+      bindingRow === undefined ||
+      requiredText(bindingRow, "state", "session endpoint binding") !==
+        "active"
+    ) {
+      return Object.freeze({ status: "denied" as const });
+    }
+    const lifecycleRow = transaction.get(
+      `SELECT status FROM session_lifecycle WHERE session_id = ?`,
+      [session.sessionId],
+    );
+    if (
+      lifecycleRow === undefined ||
+      requiredText(lifecycleRow, "status", "session lifecycle") !== "active"
+    ) {
+      return Object.freeze({ status: "denied" as const });
+    }
+    return Object.freeze({
+      status: "authorized" as const,
+      bindingId: decodeServiceId(
+        "SessionEndpointBinding",
+        requiredText(bindingRow, "id", "session endpoint binding"),
+      ),
     });
   }
 
@@ -616,6 +679,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     transaction: V2RepositoryTransaction,
     identity: LiveConnectorIdentity,
     session: SessionResolution,
+    bindingId: SessionEndpointBindingId,
     input: AdmitTurnInput,
     validated: {
       readonly text: string;
@@ -740,7 +804,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
         identity.identityBindingId,
         identity.authenticationRequestId,
         identity.endpointId,
-        session.bindingId,
+        bindingId,
         validated.originMessageId,
         snapshotId,
         session.turnPolicySnapshotId,
@@ -763,6 +827,10 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       `INSERT OR IGNORE INTO turn_queue (session_id, active_turn_id, updated_at)
       VALUES (?, NULL, ?)`,
       [session.sessionId, now],
+    );
+    transaction.run(
+      `UPDATE turn_queue SET updated_at = ? WHERE session_id = ?`,
+      [now, session.sessionId],
     );
     const positionRow = transaction.get(
       `SELECT COALESCE(MAX(queue_position) + 1, 0) AS next_position
@@ -844,7 +912,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       origin: Object.freeze({
         kind: "endpoint" as const,
         endpointId: identity.endpointId,
-        endpointBindingId: session.bindingId,
+        endpointBindingId: bindingId,
         originMessageId:
           validated.originMessageId as Turn["origin"]["originMessageId"],
       }),
@@ -972,8 +1040,7 @@ export class SQLiteTurnCancellationUnitOfWork
       return Object.freeze({ status: "unknown-turn" as const });
     }
     if (verified.kind === "connector") {
-      const principalId = (context as AuthenticatedConnectorContext).actor
-        .principalId;
+      const principalId = verified.context.actor.principalId;
       if (
         requiredText(row, "requester_principal_id", "turn") !== principalId
       ) {
@@ -1003,7 +1070,15 @@ export class SQLiteTurnCancellationUnitOfWork
     transaction: V2RepositoryTransaction,
     input: CancelQueuedInput,
   ): QueuedCancellationResult {
-    const turnId = decodeServiceId("Turn", input.turnId);
+    let turnId: TurnId;
+    try {
+      turnId = decodeServiceId("Turn", input.turnId);
+    } catch {
+      return Object.freeze({
+        status: "not-queued" as const,
+        auditEvents: Object.freeze([]),
+      });
+    }
     const authorization = this.#authorize(transaction, input.context, turnId);
     if (authorization.status === "denied") {
       return Object.freeze({
@@ -1030,10 +1105,12 @@ export class SQLiteTurnCancellationUnitOfWork
     const status = requiredText(runtimeRow, "status", "turn runtime");
     if (status === "terminal") {
       const resultJson = runtimeRow.result_json;
+      const parsed: unknown =
+        typeof resultJson === "string" ? JSON.parse(resultJson) : undefined;
       const cancelled =
-        typeof resultJson === "string" &&
-        (JSON.parse(resultJson) as { readonly outcome?: unknown })
-          .outcome === "cancelled";
+        typeof parsed === "object" &&
+        parsed !== null &&
+        (parsed as { readonly outcome?: unknown }).outcome === "cancelled";
       return Object.freeze({
         status: cancelled
           ? ("already-cancelled" as const)
@@ -1218,7 +1295,15 @@ export class SQLiteTurnCancellationUnitOfWork
     transaction: V2RepositoryTransaction,
     input: ActiveCancellationInput,
   ): ActiveCancellationResult {
-    const turnId = decodeServiceId("Turn", input.turnId);
+    let turnId: TurnId;
+    try {
+      turnId = decodeServiceId("Turn", input.turnId);
+    } catch {
+      return Object.freeze({
+        status: "not-active" as const,
+        auditEvents: Object.freeze([]),
+      });
+    }
     const authorization = this.#authorize(transaction, input.context, turnId);
     if (authorization.status === "denied") {
       return Object.freeze({

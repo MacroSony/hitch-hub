@@ -249,7 +249,33 @@ test("[V2-S04/turn-admission-idempotency] duplicate submission returns the origi
         idempotencyKey: "key-1" as never,
       });
       assert.deepEqual(otherSessionKey, { status: "session-not-found" });
+
+      // The same key against a real second session is a conflict, not a replay.
+      const secondSession = await createSecondSession(
+        database,
+        harness,
+        "Second session",
+        "session-two",
+      );
+      const crossSession = await unitOfWork.admitTurn({
+        ...input,
+        session: { kind: "session-id" as const, sessionId: secondSession },
+        originMessageId: "origin-10" as never,
+        idempotencyKey: "key-1" as never,
+      });
+      assert.deepEqual(crossSession, { status: "denied" });
       assert.equal(countRows(database, "turns"), 1);
+
+      const auditCounts = database.transaction((transaction) => {
+        const row = transaction.get(
+          `SELECT COUNT(*) AS count FROM audit_envelopes
+          WHERE action = 'turn-admitted'`,
+          [],
+        );
+        assert.ok(row !== undefined);
+        return row.count;
+      });
+      assert.equal(auditCounts, 1);
     } finally {
       database.close();
     }
@@ -461,7 +487,7 @@ test("[V2-S12/turn-admission-attachment] admission persists attachment rows exac
           ...staged.stage.preparedAdmission.attachment,
           integrityDigest: "sha256:not-a-digest",
         },
-      } as PreparedAttachmentAdmission;
+      } as unknown as PreparedAttachmentAdmission;
       await assert.rejects(
         unitOfWork.admitTurn({
           context: harness.context,
@@ -473,6 +499,66 @@ test("[V2-S12/turn-admission-attachment] admission persists attachment rows exac
         }),
         TurnAdmissionIntegrityError,
       );
+
+      // Well-shaped but foreign provenance is rejected before persistence.
+      const foreignProvenance = {
+        attachment: {
+          ...staged.stage.preparedAdmission.attachment,
+          id: "store:Attachment:7777",
+          admittedFrom: {
+            kind: "local-cli" as const,
+            authenticationRequestId:
+              "store:AuthenticationRequest:9999" as never,
+          },
+        },
+      } as unknown as PreparedAttachmentAdmission;
+      await assert.rejects(
+        unitOfWork.admitTurn({
+          context: harness.context,
+          session: selector,
+          originMessageId: "origin-d" as never,
+          idempotencyKey: "key-d" as never,
+          text: "Foreign provenance.",
+          preparedAttachment: foreignProvenance,
+        }),
+        TurnAdmissionIntegrityError,
+      );
+      assert.equal(countRows(database, "attachments"), 1);
+
+      // Replaying the admitted turn with a different attachment conflicts.
+      const otherStage = await store.stageBoundedImage(
+        intake.seal({ bytes: PNG, authenticationRequestId }),
+      );
+      assert.equal(otherStage.status, "staged");
+      if (otherStage.status !== "staged") return;
+      const mismatchedReplay = await unitOfWork.admitTurn({
+        context: harness.context,
+        session: selector,
+        originMessageId: "origin-a" as never,
+        idempotencyKey: "key-a" as never,
+        text: "Look at this image.",
+        preparedAttachment: otherStage.stage.preparedAdmission,
+      });
+      assert.deepEqual(mismatchedReplay, { status: "denied" });
+      const rolledBackOther = await store.rollbackUnfinalizedImage({
+        stage: otherStage.stage,
+        reason: "admission-rejected",
+      });
+      assert.deepEqual(rolledBackOther, { status: "rolled-back" });
+
+      // Replaying it exactly returns the original receipt.
+      const exactReplay = await unitOfWork.admitTurn({
+        context: harness.context,
+        session: selector,
+        originMessageId: "origin-a" as never,
+        idempotencyKey: "key-a" as never,
+        text: "Look at this image.",
+        preparedAttachment: staged.stage.preparedAdmission,
+      });
+      assert.equal(exactReplay.status, "duplicate");
+      if (exactReplay.status === "duplicate") {
+        assert.equal(exactReplay.turnId, admitted.turn.id);
+      }
     } finally {
       database.close();
     }
@@ -601,6 +687,39 @@ test("[V2-S06/queued-cancellation] requester cancellation compare-removes only a
         auditEvents: [],
       });
       assert.equal(countRows(database, "turn_queue_entries"), 1);
+
+      // A lost-response retry after cancellation reports the terminal truth.
+      const replayedAdmission = await unitOfWork.admitTurn({
+        context: harness.context,
+        session: selector,
+        originMessageId: "origin-1" as never,
+        idempotencyKey: "key-1" as never,
+        text: "First",
+      });
+      assert.deepEqual(replayedAdmission, {
+        status: "duplicate",
+        turnId: first.turn.id,
+        receipt: {
+          turnId: first.turn.id,
+          status: "starting",
+          controls: { canCancel: false },
+        },
+      });
+
+      const persistedAudit = database.transaction((transaction) => {
+        const rows = transaction.all(
+          `SELECT action FROM audit_envelopes WHERE turn_id = ?
+          ORDER BY rowid`,
+          [first.turn.id],
+        );
+        return rows.map((row) => row.action);
+      });
+      assert.deepEqual(persistedAudit, [
+        "turn-admitted",
+        "turn-terminalized",
+        "response-delivery-created",
+        "turn-state-transitioned",
+      ]);
     } finally {
       database.close();
     }
@@ -726,6 +845,64 @@ test("[V2-S06/active-cancellation-intent] active cancellation records durable in
       });
       // Already-cancelling: intent was already recorded by the requester.
       assert.deepEqual(stopped, { status: "not-active", auditEvents: [] });
+
+      // Coordinator intent on an accepted attempt records system authority.
+      const second = await unitOfWork.admitTurn({
+        context: harness.context,
+        session: selector,
+        originMessageId: "origin-2" as never,
+        idempotencyKey: "key-2" as never,
+        text: "Accepted work",
+      });
+      assert.equal(second.status, "admitted");
+      if (second.status !== "admitted") return;
+      database.transaction((transaction) => {
+        transaction.run(
+          `INSERT INTO agent_dispatch_attempts (
+            id, turn_id, session_id, attempt_number, state, started_at,
+            armed_at, submitted_at, accepted_at, submission_outcome,
+            acceptance_evidence_json
+          ) VALUES (
+            'test-attempt-2', ?, ?, 1, 'accepted', ?, ?, ?, ?, 'submitted',
+            '{"kind":"explicit-ack","correlation":"dispatched-prompt-request"}'
+          )`,
+          [
+            second.turn.id,
+            harness.sessionId,
+            CLOCK_START,
+            CLOCK_START,
+            CLOCK_START,
+            CLOCK_START,
+          ],
+        );
+        transaction.run(
+          `UPDATE turn_runtime_states
+          SET status = 'accepted', attempt_id = 'test-attempt-2',
+            updated_at = ?
+          WHERE turn_id = ?`,
+          [CLOCK_START, second.turn.id],
+        );
+        transaction.run(
+          `DELETE FROM turn_queue_entries WHERE turn_id = ?`,
+          [second.turn.id],
+        );
+      });
+      const coordinatorCancelling =
+        await control.requestActiveTurnCancellation({
+          context: coordinator,
+          turnId: second.turn.id,
+          reason: "session-stopped",
+        });
+      assert.equal(coordinatorCancelling.status, "cancelling");
+      if (coordinatorCancelling.status === "cancelling") {
+        assert.deepEqual(coordinatorCancelling.runtime.state, {
+          status: "cancelling",
+          attemptId: "test-attempt-2",
+          requestedAt: "2026-07-29T12:07:00.000Z",
+          requestedBy: { kind: "system", component: "turn-coordinator" },
+          reason: "session-stopped",
+        });
+      }
     } finally {
       database.close();
     }
