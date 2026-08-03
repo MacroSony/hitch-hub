@@ -68,7 +68,7 @@ happen next, and what is blocked.
   hardens replay ordering, attachment authentication provenance, invalid-ID
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
-  current working tree. The v2 suite currently has 246 passing tests.
+  current working tree. The v2 suite currently has 275 passing tests.
 - V2-E01 is committed after two-pass independent review. The Pi sidecar
   receives an empty Bubblewrap network namespace, an exact three-entry
   environment, and a fixed
@@ -86,9 +86,15 @@ happen next, and what is blocked.
   artifact verification, a provider-scoped credential store with read-only
   API keys and a V2-011-owned resource-wide atomic OAuth update port, and a
   model-aware trusted invoke seam behind a non-forgeable E01 fetch-boundary
-  proof. V2-006A3 still owns native events, cancellation, error/retry/replay,
-  and the OAuth behavior matrix; V2-006B still owns filesystem artifacts and
-  production process integration.
+  proof.
+- V2-006A3 is independently reviewed and committed. The trusted invoke seam
+  now maps the actual Pi 0.82 native event lifecycle into bounded A1 frames,
+  applies the effective first-slice output cap, validates cumulative content
+  and terminal digests, observes atomic OAuth replacement without exposing
+  credentials, forces zero retries and SSE, rejects process-local replay
+  before native execution, and implements exact cancellation and iterator
+  cleanup without leaking provider errors. V2-006B still owns trusted
+  filesystem artifacts and production process integration and is now ready.
 
 ## Status legend
 
@@ -119,6 +125,7 @@ happen next, and what is blocked.
 | V2-005 — pure Pi launch/resource planning | Committed | `42eb481` |
 | V2-006A1 — typed bridge frames and reviewed extension generator | Committed | `6a37464`, `b0fabd8` |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Committed | `17e1419` |
+| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Committed | `2c7e17c` |
 | V2-008a — bounded private local protocol codecs | Committed | `6a9538d`, `7240b2c` |
 | V2-008b — secure Unix socket lifecycle and authenticated framing | Committed | `6b6615e` |
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
@@ -141,8 +148,8 @@ verification, and its own commit.
 | --- | --- | --- |
 | V2-E01 — production sidecar egress | Committed | `404e5a3`; downstream verified sidecar/launcher composition remains V2-006B/V2-010B |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Committed | `17e1419` |
-| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Ready | V2-006A2 is committed |
-| V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
+| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Committed | `2c7e17c` |
+| V2-006B — production artifact and sidecar integration | Ready | V2-E01 and V2-006A are committed |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
 | V2-008c — local connector/application dispatch adapter | Committed | `b7b55b1` |
 | V2-014A — first-slice CLI shell over the local socket | Committed | `7140382` |
@@ -199,8 +206,8 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. Complete V2-006A3, V2-007, and V2-010A; Runtime Gate E and V2-006A2 are
-   now available to those production integrations.
+4. Complete V2-007 and V2-010A; Runtime Gate E and all of V2-006A are now
+   committed and available to the production integrations.
 5. Complete V2-006B, V2-011, and V2-010B using E01's committed production
    sidecar topology and containment boundary.
 6. Integrate V2-012, then V2-013 and V2-014B.
