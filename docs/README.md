@@ -30,6 +30,7 @@ proposed implementation widens the first executable slice,
 | [`v2-first-slice.md`](./v2-first-slice.md) | Canonical first executable v2 scope |
 | [`v2-implementation-plan.md`](./v2-implementation-plan.md) | Commit-sized task definitions and dependency graph |
 | [`v2-walking-skeleton.md`](./v2-walking-skeleton.md) | Development-only V2-014A daemon/CLI operator guide and limitations |
+| [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md) | V2-E01 production Pi sidecar network topology, DNS, proxy, and redirect decision |
 | [`../implementation_steps.md`](../implementation_steps.md) | Remaining v1 maintenance and attended-rollout checklist |
 | [`completed-work.md`](./completed-work.md) | Dated v1 implementation and verification archive |
 

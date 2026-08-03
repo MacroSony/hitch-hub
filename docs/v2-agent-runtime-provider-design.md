@@ -3,8 +3,9 @@
 Date: 2026-07-25
 
 Status: accepted architecture; the Pi native-transport feasibility gate is
-satisfied and implementation is underway. Current progress lives in
-[`v2-status.md`](./v2-status.md).
+satisfied, the production egress topology is selected in
+[`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md), and implementation is
+underway. Current progress lives in [`v2-status.md`](./v2-status.md).
 
 ## Decisions
 

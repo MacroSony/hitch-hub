@@ -3,8 +3,9 @@
 Date: 2026-07-25
 
 Status: accepted domain and transport-bridge contract. The Pi native-library
-sidecar feasibility spike is complete; production egress containment, broker,
-and services remain pending. Current progress lives in
+sidecar feasibility spike is complete, and V2-E01 selected the production
+egress topology in [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md).
+Review/commit, broker, and service integration state lives in
 [`v2-status.md`](./v2-status.md).
 
 ## Security claim
