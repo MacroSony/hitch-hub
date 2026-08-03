@@ -6,6 +6,7 @@
   "description": "Hitch: a lightweight chat-native control plane for local coding agents.",
   "scripts": {
     "dev": "node --use-env-proxy --import tsx src/main.ts",
+    "v2": "node --use-env-proxy --import tsx src/v2/main.ts",
     "smoke:fake": "node --use-env-proxy --import tsx src/main.ts --config examples/config.smoke.yaml --fake-message \"!status\"",
     "smoke:media-cache": "node --use-env-proxy --import tsx src/smoke/media-cache.ts --config examples/config.smoke.yaml",
     "smoke:media-flow": "node --use-env-proxy --import tsx src/smoke/media-flow.ts",

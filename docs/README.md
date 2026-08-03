@@ -29,6 +29,7 @@ proposed implementation widens the first executable slice,
 | [`v2-status.md`](./v2-status.md) | Active v2 status, reviewed order, blockers, and acceptance progress |
 | [`v2-first-slice.md`](./v2-first-slice.md) | Canonical first executable v2 scope |
 | [`v2-implementation-plan.md`](./v2-implementation-plan.md) | Commit-sized task definitions and dependency graph |
+| [`v2-walking-skeleton.md`](./v2-walking-skeleton.md) | Development-only V2-014A daemon/CLI operator guide and limitations |
 | [`../implementation_steps.md`](../implementation_steps.md) | Remaining v1 maintenance and attended-rollout checklist |
 | [`completed-work.md`](./completed-work.md) | Dated v1 implementation and verification archive |
 

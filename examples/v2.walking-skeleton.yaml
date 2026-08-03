@@ -1,0 +1,7 @@
+# Development-only V2-014A example. Replace both paths before use.
+version: 1
+mode: development-walking-skeleton
+dataRoot: /absolute/path/to/private-parent/hitch-v2
+workspaceRoot: /absolute/path/to/workspace
+# Keep this value stable for every restart of the same dataRoot.
+bootstrapPublishedAt: "2026-08-02T00:00:00.000Z"
