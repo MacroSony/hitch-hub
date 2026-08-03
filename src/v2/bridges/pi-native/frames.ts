@@ -40,13 +40,16 @@ export const PI_NATIVE_BRIDGE_COMPATIBILITY = Object.freeze({
 export const PI_NATIVE_BRIDGE_LIMITS = Object.freeze({
   maximumFrameBytes: 16 * 1024 * 1024,
   maximumContextBytes: 15 * 1024 * 1024,
+  /** First-slice policy ceiling; the native catalog's 128k value is provider capacity. */
+  maximumOutputTokens: 16_384,
   maximumMessages: 256,
   maximumContentBlocks: 128,
   maximumTools: 64,
-  maximumTextCharacters: 262_144,
+  maximumTextCharacters: 2_097_152,
   maximumImageBytes: 10_485_760,
   maximumTotalImageBytes: 10_485_760,
-  maximumToolArgumentsBytes: 262_144,
+  maximumToolArgumentsBytes: 2_097_152,
+  maximumToolCallIdCharacters: 257,
   maximumErrorCharacters: 4_096,
   maximumActiveCorrelations: 256,
 } as const);
@@ -299,6 +302,7 @@ export interface PiNativeBridgeFrameExpectation {
 
 const CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SAFE_NATIVE_REFERENCE = /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?$/u;
+const SAFE_NATIVE_TOOL_CALL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?(?:\|[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?)?$/u;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 const NATIVE_JSON_BOUNDS: JsonBounds = Object.freeze({
@@ -327,6 +331,19 @@ function decodeReference(input: unknown, path: CodecPath, label: string): string
   return decodeBoundedString(
     input,
     { minimumLength: 1, maximumLength: 128, pattern: SAFE_NATIVE_REFERENCE, label },
+    path,
+  );
+}
+
+function decodeToolCallId(input: unknown, path: CodecPath): string {
+  return decodeBoundedString(
+    input,
+    {
+      minimumLength: 1,
+      maximumLength: PI_NATIVE_BRIDGE_LIMITS.maximumToolCallIdCharacters,
+      pattern: SAFE_NATIVE_TOOL_CALL_ID,
+      label: "Pi tool call ID",
+    },
     path,
   );
 }
@@ -414,7 +431,7 @@ function decodeToolCall(input: unknown, path: CodecPath): Extract<PiNativeAssist
   requireExactFields(object, ["type", "id", "name", "arguments"], ["thoughtSignature"], path);
   const output = {
     type: decodeLiteral(object.type, "toolCall", at(path, "type")),
-    id: decodeReference(object.id, at(path, "id"), "tool call ID"),
+    id: decodeToolCallId(object.id, at(path, "id")),
     name: decodeReference(object.name, at(path, "name"), "tool name"),
     arguments: decodeJsonObject(object.arguments, NATIVE_JSON_BOUNDS),
   };
@@ -478,7 +495,7 @@ function decodeContextMessage(input: unknown, path: CodecPath): PiNativeContextM
     requireExactFields(object, ["role", "toolCallId", "toolName", "content", "isError", "timestamp"], ["addedToolNames", "usage"], path);
     const output = {
       role: decodeLiteral(object.role, "toolResult", at(path, "role")),
-      toolCallId: decodeReference(object.toolCallId, at(path, "toolCallId"), "tool call ID"),
+      toolCallId: decodeToolCallId(object.toolCallId, at(path, "toolCallId")),
       toolName: decodeReference(object.toolName, at(path, "toolName"), "tool name"),
       content: decodeBoundedArray(object.content, decodeInputContent, { maximumItems: PI_NATIVE_BRIDGE_LIMITS.maximumContentBlocks }, at(path, "content")),
       isError: decodeBoolean(object.isError, at(path, "isError")),
@@ -582,12 +599,25 @@ function decodeInvoke(object: Record<string, unknown>, limits: Required<PiNative
   if (nativeSeam.maxRetries !== 0) {
     codecFail(["nativeSeam", "maxRetries"], "invalid-format", "the native seam must force maxRetries to zero");
   }
+  const maximumOutputTokens = options.maximumOutputTokens === undefined
+    ? undefined
+    : decodePositiveSafeInteger(options.maximumOutputTokens, ["options", "maximumOutputTokens"]);
+  if (
+    maximumOutputTokens !== undefined &&
+    maximumOutputTokens > PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens
+  ) {
+    codecFail(
+      ["options", "maximumOutputTokens"],
+      "out-of-range",
+      "maximum output tokens exceed the bridge execution ceiling",
+    );
+  }
   return {
     ...base,
     kind: decodeLiteral(object.kind, "invoke", ["kind"]),
     context: decodeContext(object.context, ["context"], limits),
     options: {
-      ...(options.maximumOutputTokens === undefined ? {} : { maximumOutputTokens: decodePositiveSafeInteger(options.maximumOutputTokens, ["options", "maximumOutputTokens"]) }),
+      ...(maximumOutputTokens === undefined ? {} : { maximumOutputTokens }),
       ...(options.reasoning === undefined ? {} : { reasoning: decodeEnum(options.reasoning, ["none", "low", "medium", "high"] as const, ["options", "reasoning"]) }),
     },
     nativeSeam: {
@@ -756,7 +786,7 @@ export function encodePiNativeBridgeFrame(
  * duplicate properties, which would otherwise make authorization-relevant
  * fields ambiguous before the structural codecs see them.
  */
-function parseStrictJson(input: string): unknown {
+export function parseStrictPiNativeBridgeJson(input: string): unknown {
   let index = 0;
   let nodes = 0;
   const maximumDepth = 64;
@@ -893,7 +923,11 @@ export function decodePiNativeBridgeJsonlFrame(
   } catch {
     codecFail([], "invalid-format", "bridge JSONL is not valid UTF-8");
   }
-  return decodePiNativeBridgeFrame(parseStrictJson(text), expectation, resolved);
+  return decodePiNativeBridgeFrame(
+    parseStrictPiNativeBridgeJson(text),
+    expectation,
+    resolved,
+  );
 }
 
 type CorrelationState = "invoked" | "started";
@@ -907,7 +941,7 @@ interface CorrelationRecord {
 }
 
 /**
- * Small in-memory protocol guard. It is not durable replay prevention; A2's
+ * Small in-memory protocol guard. It is not durable replay prevention; V2-011's
  * forwarding authorization remains the durable once-only boundary. It does
  * reject duplicate invocation/start/terminal frames and bad direction/order.
  */
@@ -948,8 +982,8 @@ export class PiNativeBridgeCorrelationGuard {
     if (prior === undefined) codecFail(["correlationId"], "invalid-format", "sidecar frame has no active invocation correlation");
     assertSameCorrelationBinding(prior.binding, frame.binding);
     if (frame.kind === "cancelled" || frame.kind === "error") {
-      // Connection or provider setup can fail before a started frame. A2 owns
-      // durable replay denial after this in-memory record is released.
+      // Connection or provider setup can fail before a started frame. V2-011
+      // owns durable replay denial after this in-memory record is released.
       this.#states.delete(frame.correlationId);
       return;
     }
@@ -985,6 +1019,11 @@ export class PiNativeBridgeCorrelationGuard {
       }
       if (continuation.end) existing.state = "closed";
     }
+  }
+
+  /** Trusted transport cleanup for a consumer that closes before a terminal frame. */
+  release(correlationId: string): void {
+    this.#states.delete(correlationId);
   }
 }
 

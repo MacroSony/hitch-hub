@@ -19,6 +19,7 @@ import {
   piNativeBridgeBindingFromManifest,
 } from "./extension-generator.js";
 import {
+  PI_NATIVE_BRIDGE_LIMITS,
   decodePiNativeBridgeClientFrame,
   type PiNativeInvokeFrame,
 } from "./frames.js";
@@ -225,6 +226,7 @@ async function executeGeneratedStream(
       const provider = await loadGeneratedProvider(root);
       const model = provider.models[0];
       assert.ok(model);
+      assert.equal(model.maxTokens, PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens);
       const stream = provider.streamSimple(model, context);
       const events: Record<string, unknown>[] = [];
       for await (const event of stream) events.push(event);
@@ -378,7 +380,7 @@ test("generated Pi extension executes multiline Unicode context over its bounded
       writeSidecarFrames(socket, invoke, [
         { kind: "started" },
         { kind: "text-start", contentIndex: 0 },
-        { kind: "text-delta", contentIndex: 0, delta: "hello\n" },
+        { kind: "text-delta", contentIndex: 0, delta: "hello\nworld" },
         { kind: "text-end", contentIndex: 0, content: "hello\nworld" },
         {
           kind: "terminal",
@@ -396,6 +398,10 @@ test("generated Pi extension executes multiline Unicode context over its bounded
   );
 
   assert.equal(executed.invoke.context.messages[0]?.content, "first line\nsecond line 😀");
+  assert.equal(
+    executed.invoke.options.maximumOutputTokens,
+    PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens,
+  );
   assert.deepEqual(
     executed.events.map((event) => event.type),
     ["start", "text_start", "text_delta", "text_end", "done"],
@@ -412,7 +418,11 @@ test("generated Pi extension rejects cumulative text beyond its closed stream bo
       writeSidecarFrames(socket, invoke, [
         { kind: "started" },
         { kind: "text-start", contentIndex: 0 },
-        { kind: "text-delta", contentIndex: 0, delta: "x".repeat(262_144) },
+        {
+          kind: "text-delta",
+          contentIndex: 0,
+          delta: "x".repeat(PI_NATIVE_BRIDGE_LIMITS.maximumTextCharacters),
+        },
         { kind: "text-delta", contentIndex: 0, delta: "y" },
       ]);
     },
@@ -424,7 +434,10 @@ test("generated Pi extension rejects cumulative text beyond its closed stream bo
     "The Hitch native bridge returned an invalid bounded frame.",
   );
   const content = executed.result.content as readonly Record<string, unknown>[];
-  assert.equal((content[0]?.text as string).length, 262_144);
+  assert.equal(
+    (content[0]?.text as string).length,
+    PI_NATIVE_BRIDGE_LIMITS.maximumTextCharacters,
+  );
 });
 
 test("generated Pi extension rejects oversized aggregate tool arguments", { timeout: 5_000 }, async () => {
@@ -439,11 +452,11 @@ test("generated Pi extension rejects oversized aggregate tool arguments", { time
           contentIndex: 0,
           toolCall: {
             type: "toolCall",
-            id: "tool-call-1",
+            id: "call-1|fc-item-1",
             name: "read",
             arguments: Object.fromEntries(
               Array.from(
-                { length: 5 },
+                { length: 33 },
                 (_, index) => [`argument${index}`, "x".repeat(65_536)],
               ),
             ),
@@ -481,7 +494,7 @@ test("generated Pi extension rejects non-tool content and non-object tool argume
 
   const arrayArguments = await executeToolEnd({
     type: "toolCall",
-    id: "tool-call-1",
+    id: "call-1|fc-item-1",
     name: "read",
     arguments: [],
   });

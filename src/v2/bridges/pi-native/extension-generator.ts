@@ -155,9 +155,13 @@ const SOCKET_PATH = ${JSON.stringify(PI_NATIVE_EXTENSION_SOCKET_PATH)};
 const PROTOCOL_VERSION = ${PI_NATIVE_BRIDGE_PROTOCOL_VERSION};
 const MAX_FRAME_BYTES = ${PI_NATIVE_BRIDGE_LIMITS.maximumFrameBytes};
 const MAX_CONTEXT_BYTES = ${PI_NATIVE_BRIDGE_LIMITS.maximumContextBytes};
+const MAX_OUTPUT_TOKENS = ${PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens};
+const MODEL_OUTPUT_TOKENS = Math.min(MAX_OUTPUT_TOKENS, MANIFEST.provider.model.maximumOutputTokens);
 const MAX_TEXT = ${PI_NATIVE_BRIDGE_LIMITS.maximumTextCharacters};
 const MAX_IMAGE_BYTES = ${PI_NATIVE_BRIDGE_LIMITS.maximumImageBytes};
 const MAX_TOOL_ARGUMENT_BYTES = ${PI_NATIVE_BRIDGE_LIMITS.maximumToolArgumentsBytes};
+const MAX_JSON_STRING = 65_536;
+const MAX_TOOL_CALL_ID = ${PI_NATIVE_BRIDGE_LIMITS.maximumToolCallIdCharacters};
 const MAX_CONTENT = ${PI_NATIVE_BRIDGE_LIMITS.maximumContentBlocks};
 const MAX_MESSAGES = ${PI_NATIVE_BRIDGE_LIMITS.maximumMessages};
 const MAX_TOOLS = ${PI_NATIVE_BRIDGE_LIMITS.maximumTools};
@@ -167,6 +171,7 @@ const NATIVE_SEAM = Object.freeze({ maxRetries: 0, transport: "sse" });
 const BINDING = Object.freeze({ bridgeId: MANIFEST.bridgeId, nativeStackDigest: MANIFEST.compatibility.nativeStackDigest, nativeCatalogDigest: MANIFEST.nativeCatalogDigest });
 const COMPATIBILITY = Object.freeze({ piCodingAgentVersion: MANIFEST.compatibility.piCodingAgentVersion, piAiVersion: MANIFEST.compatibility.piAiVersion });
 const REF = /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?$/u;
+const TOOL_REF = /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?(?:\\|[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?)?$/u;
 const CORRELATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
@@ -194,6 +199,11 @@ function reference(value, label) {
   if (!REF.test(result)) fail(label + " is not a safe reference");
   return result;
 }
+function toolReference(value, label) {
+  const result = text(value, MAX_TOOL_CALL_ID, label);
+  if (!TOOL_REF.test(result)) fail(label + " is not a safe tool call reference");
+  return result;
+}
 function integer(value, minimum, maximum, label) {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) fail(label + " is not a safe bounded integer");
   return value;
@@ -211,14 +221,14 @@ function json(value, state = { nodes: 0 }, depth = 0) {
   state.nodes += 1;
   if (state.nodes > 4096 || depth > 20) fail("JSON value exceeds structural bounds");
   if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "string") return text(value, 65_536, "JSON string");
+  if (typeof value === "string") return text(value, MAX_JSON_STRING, "JSON string");
   if (typeof value === "number") { if (!Number.isFinite(value)) fail("JSON number is not finite"); return Object.is(value, -0) ? 0 : value; }
   if (Array.isArray(value)) return boundedArray(value, 512, "JSON array").map((item) => json(item, state, depth + 1));
   const object = record(value, "JSON object");
   const keys = Object.keys(object);
   if (keys.length > 256) fail("JSON object has too many fields");
   const output = {};
-  for (const key of keys) { text(key, 65_536, "JSON key"); Object.defineProperty(output, key, { value: json(object[key], state, depth + 1), enumerable: true, writable: true, configurable: true }); }
+  for (const key of keys) { text(key, MAX_JSON_STRING, "JSON key"); Object.defineProperty(output, key, { value: json(object[key], state, depth + 1), enumerable: true, writable: true, configurable: true }); }
   return output;
 }
 function jsonObject(value, label) { return json(record(value, label)); }
@@ -252,7 +262,7 @@ function toolCall(value, label) {
   if (object.type !== "toolCall") fail(label + " has an unsupported type");
   const argumentsValue = jsonObject(object.arguments, label + " arguments");
   if (Buffer.byteLength(JSON.stringify(argumentsValue), "utf8") > MAX_TOOL_ARGUMENT_BYTES) fail(label + " arguments exceed the bridge byte bound");
-  return { type: "toolCall", id: reference(object.id, label + " ID"), name: reference(object.name, label + " name"), arguments: argumentsValue, ...(object.thoughtSignature === undefined ? {} : { thoughtSignature: text(object.thoughtSignature, MAX_TEXT, label + " signature") }) };
+  return { type: "toolCall", id: toolReference(object.id, label + " ID"), name: reference(object.name, label + " name"), arguments: argumentsValue, ...(object.thoughtSignature === undefined ? {} : { thoughtSignature: text(object.thoughtSignature, MAX_TEXT, label + " signature") }) };
 }
 function assistantContent(value, label) {
   const object = record(value, label);
@@ -274,7 +284,7 @@ function contextMessage(value, label) {
   }
   exact(object, ["role", "toolCallId", "toolName", "content", "isError", "timestamp"], ["details", "usage", "addedToolNames"], label);
   if (object.role !== "toolResult" || typeof object.isError !== "boolean") fail(label + " has an invalid role or error flag");
-  return { role: "toolResult", toolCallId: reference(object.toolCallId, label + " tool call ID"), toolName: reference(object.toolName, label + " tool name"), content: boundedArray(object.content, MAX_CONTENT, label + " content").map((entry, index) => inputContent(entry, label + " content " + index)), isError: object.isError, timestamp: integer(object.timestamp, 0, Number.MAX_SAFE_INTEGER, label + " timestamp"), ...(object.addedToolNames === undefined ? {} : { addedToolNames: boundedArray(object.addedToolNames, MAX_TOOLS, label + " added tools").map((entry) => reference(entry, label + " added tool")) }), ...(object.usage === undefined ? {} : { usage: normalizedUsage(object.usage, label + " usage") }) };
+  return { role: "toolResult", toolCallId: toolReference(object.toolCallId, label + " tool call ID"), toolName: reference(object.toolName, label + " tool name"), content: boundedArray(object.content, MAX_CONTENT, label + " content").map((entry, index) => inputContent(entry, label + " content " + index)), isError: object.isError, timestamp: integer(object.timestamp, 0, Number.MAX_SAFE_INTEGER, label + " timestamp"), ...(object.addedToolNames === undefined ? {} : { addedToolNames: boundedArray(object.addedToolNames, MAX_TOOLS, label + " added tools").map((entry) => reference(entry, label + " added tool")) }), ...(object.usage === undefined ? {} : { usage: normalizedUsage(object.usage, label + " usage") }) };
 }
 function normalizeContext(value) {
   const object = exact(value, ["messages"], ["systemPrompt", "tools"], "Pi context");
@@ -332,13 +342,14 @@ function assignUsage(target, value) { target.usage = { input: value.inputTokens,
 
 function bridgeStream(model, context, options = {}) {
   const stream = new BridgeEventStream(); const correlationId = randomUUID(); const partial = assistant(model); const socket = net.createConnection({ path: SOCKET_PATH });
-  const decoder = new TextDecoder("utf-8", { fatal: true }); const content = new Map(); let buffer = ""; let phase = "invoked"; let complete = false; let cancelSent = false; let decodeFinished = false; let streamEvents = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true }); const content = new Map(); let buffer = ""; let phase = "invoked"; let complete = false; let cancelSent = false; let decodeFinished = false; let streamEvents = 0; let generatedUnits = 0;
   const emit = (event) => { try { stream.push(event); } catch (error) { finishError("The Hitch native bridge event queue was not drained."); } };
   const finishError = (message, aborted = false) => { if (complete) return; complete = true; phase = "terminal"; partial.stopReason = aborted ? "aborted" : "error"; partial.errorMessage = message; try { stream.push({ type: "error", reason: partial.stopReason, error: partial }); } catch {} stream.end(partial); socket.destroy(); };
   const write = (value) => { try { socket.write(encodeFrame(value)); } catch { finishError("The Hitch native bridge could not encode a bounded frame."); } };
   const cancel = () => { if (cancelSent || socket.destroyed || complete) return; cancelSent = true; write(frame("cancel", correlationId)); };
-  const expectStart = (kind, index) => { if (phase !== "started" || content.has(index)) fail("invalid stream content start"); content.set(index, { kind, open: true }); };
-  const expectPart = (kind, index, end) => { const existing = content.get(index); if (phase !== "started" || !existing || !existing.open || existing.kind !== kind) fail("invalid stream content continuation"); if (end) existing.open = false; };
+  const addGenerated = (value, bytes = false) => { generatedUnits += bytes ? Buffer.byteLength(value, "utf8") : value.length; if (generatedUnits > MAX_TEXT) fail("stream exceeds the aggregate generated-content bound"); };
+  const expectStart = (kind, index) => { if (phase !== "started" || content.has(index)) fail("invalid stream content start"); content.set(index, { kind, open: true, cumulative: "" }); };
+  const expectPart = (kind, index, end) => { const existing = content.get(index); if (phase !== "started" || !existing || !existing.open || existing.kind !== kind) fail("invalid stream content continuation"); if (end) existing.open = false; return existing; };
   const handle = (inbound) => {
     streamEvents += 1; if (streamEvents > MAX_STREAM_EVENTS) fail("sidecar stream exceeds the event bound");
     if (inbound.kind === "error") return finishError(inbound.message);
@@ -346,21 +357,21 @@ function bridgeStream(model, context, options = {}) {
     if (inbound.kind === "started") { if (phase !== "invoked") fail("duplicate bridge start"); phase = "started"; emit({ type: "start", partial }); return; }
     if (phase !== "started") fail("bridge stream frame before start or after terminal");
     if (inbound.kind === "text-start") { expectStart("text", inbound.contentIndex); partial.content[inbound.contentIndex] = { type: "text", text: "" }; emit({ type: "text_start", contentIndex: inbound.contentIndex, partial }); return; }
-    if (inbound.kind === "text-delta") { expectPart("text", inbound.contentIndex, false); const combined = partial.content[inbound.contentIndex].text + inbound.delta; if (combined.length > MAX_TEXT) fail("text stream exceeds the cumulative bound"); partial.content[inbound.contentIndex].text = combined; emit({ type: "text_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
-    if (inbound.kind === "text-end") { expectPart("text", inbound.contentIndex, true); partial.content[inbound.contentIndex] = { type: "text", text: inbound.content }; emit({ type: "text_end", contentIndex: inbound.contentIndex, content: inbound.content, partial }); return; }
+    if (inbound.kind === "text-delta") { expectPart("text", inbound.contentIndex, false); addGenerated(inbound.delta); const combined = partial.content[inbound.contentIndex].text + inbound.delta; if (combined.length > MAX_TEXT) fail("text stream exceeds the cumulative bound"); partial.content[inbound.contentIndex].text = combined; emit({ type: "text_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
+    if (inbound.kind === "text-end") { expectPart("text", inbound.contentIndex, true); if (partial.content[inbound.contentIndex].text !== inbound.content) fail("text stream end disagrees with its deltas"); partial.content[inbound.contentIndex] = { type: "text", text: inbound.content }; emit({ type: "text_end", contentIndex: inbound.contentIndex, content: inbound.content, partial }); return; }
     if (inbound.kind === "reasoning-start") { expectStart("reasoning", inbound.contentIndex); partial.content[inbound.contentIndex] = { type: "thinking", thinking: "" }; emit({ type: "thinking_start", contentIndex: inbound.contentIndex, partial }); return; }
-    if (inbound.kind === "reasoning-delta") { expectPart("reasoning", inbound.contentIndex, false); const combined = partial.content[inbound.contentIndex].thinking + inbound.delta; if (combined.length > MAX_TEXT) fail("reasoning stream exceeds the cumulative bound"); partial.content[inbound.contentIndex].thinking = combined; emit({ type: "thinking_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
-    if (inbound.kind === "reasoning-end") { expectPart("reasoning", inbound.contentIndex, true); partial.content[inbound.contentIndex] = { type: "thinking", thinking: inbound.content }; emit({ type: "thinking_end", contentIndex: inbound.contentIndex, content: inbound.content, partial }); return; }
+    if (inbound.kind === "reasoning-delta") { expectPart("reasoning", inbound.contentIndex, false); addGenerated(inbound.delta); const combined = partial.content[inbound.contentIndex].thinking + inbound.delta; if (combined.length > MAX_TEXT) fail("reasoning stream exceeds the cumulative bound"); partial.content[inbound.contentIndex].thinking = combined; emit({ type: "thinking_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
+    if (inbound.kind === "reasoning-end") { expectPart("reasoning", inbound.contentIndex, true); if (partial.content[inbound.contentIndex].thinking !== inbound.content) fail("reasoning stream end disagrees with its deltas"); partial.content[inbound.contentIndex] = { type: "thinking", thinking: inbound.content }; emit({ type: "thinking_end", contentIndex: inbound.contentIndex, content: inbound.content, partial }); return; }
     if (inbound.kind === "tool-start") { expectStart("tool", inbound.contentIndex); partial.content[inbound.contentIndex] = { type: "toolCall", id: "", name: "", arguments: {} }; emit({ type: "toolcall_start", contentIndex: inbound.contentIndex, partial }); return; }
-    if (inbound.kind === "tool-delta") { expectPart("tool", inbound.contentIndex, false); emit({ type: "toolcall_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
-    if (inbound.kind === "tool-end") { expectPart("tool", inbound.contentIndex, true); partial.content[inbound.contentIndex] = inbound.toolCall; emit({ type: "toolcall_end", contentIndex: inbound.contentIndex, toolCall: inbound.toolCall, partial }); return; }
+    if (inbound.kind === "tool-delta") { const existing = expectPart("tool", inbound.contentIndex, false); addGenerated(inbound.delta, true); existing.cumulative += inbound.delta; emit({ type: "toolcall_delta", contentIndex: inbound.contentIndex, delta: inbound.delta, partial }); return; }
+    if (inbound.kind === "tool-end") { const existing = expectPart("tool", inbound.contentIndex, true); const finalArguments = JSON.stringify(inbound.toolCall.arguments); if (existing.cumulative.length === 0) addGenerated(finalArguments, true); else if (JSON.stringify(jsonObject(parseStrictJson(existing.cumulative), "stream tool arguments")) !== finalArguments) fail("tool stream end disagrees with its deltas"); partial.content[inbound.contentIndex] = inbound.toolCall; emit({ type: "toolcall_end", contentIndex: inbound.contentIndex, toolCall: inbound.toolCall, partial }); return; }
     if (inbound.kind === "usage") { assignUsage(partial, inbound.usage); return; }
     if (inbound.kind === "oauth-status") return;
     if (inbound.kind === "terminal") { if ([...content.values()].some((entry) => entry.open)) fail("terminal has open stream content"); complete = true; phase = "terminal"; assignUsage(partial, inbound.usage); partial.stopReason = inbound.reason; emit({ type: "done", reason: inbound.reason, message: partial }); stream.end(partial); socket.end(); return; }
     fail("unsupported decoded frame");
   };
   options.signal?.addEventListener("abort", cancel, { once: true });
-  socket.once("connect", () => { try { const requestOptions = {}; if (Number.isSafeInteger(options.maxTokens) && options.maxTokens > 0 && options.maxTokens <= MANIFEST.provider.model.maximumOutputTokens) requestOptions.maximumOutputTokens = options.maxTokens; if (["none", "low", "medium", "high"].includes(options.reasoning)) requestOptions.reasoning = options.reasoning; write(frame("invoke", correlationId, { context: normalizeContext(context), options: requestOptions, nativeSeam: NATIVE_SEAM })); if (options.signal?.aborted) cancel(); } catch { finishError("The Pi native request did not satisfy the reviewed bridge contract."); } });
+  socket.once("connect", () => { try { const requestOptions = {}; const requestedOutputTokens = Number.isSafeInteger(options.maxTokens) && options.maxTokens > 0 ? options.maxTokens : MODEL_OUTPUT_TOKENS; if (requestedOutputTokens > MODEL_OUTPUT_TOKENS) fail("request exceeds the bridge output-token ceiling"); requestOptions.maximumOutputTokens = requestedOutputTokens; if (["none", "low", "medium", "high"].includes(options.reasoning)) requestOptions.reasoning = options.reasoning; write(frame("invoke", correlationId, { context: normalizeContext(context), options: requestOptions, nativeSeam: NATIVE_SEAM })); if (options.signal?.aborted) cancel(); } catch { finishError("The Pi native request did not satisfy the reviewed bridge contract."); } });
   socket.on("data", (chunk) => { if (complete) return; try { buffer += decoder.decode(chunk, { stream: true }); if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) fail("sidecar line exceeds byte bound"); while (true) { const end = buffer.indexOf("\\n"); if (end < 0) break; const line = buffer.slice(0, end); buffer = buffer.slice(end + 1); if (line.length === 0 || line.includes("\\r")) fail("invalid sidecar JSONL line"); handle(sidecarFrame(parseStrictJson(line), correlationId)); } } catch { finishError("The Hitch native bridge returned an invalid bounded frame."); } });
   socket.once("end", () => { try { decoder.decode(); decodeFinished = true; if (!complete && buffer.length > 0) fail("unterminated sidecar JSONL line"); } catch { finishError("The Hitch native bridge returned invalid UTF-8."); } });
   socket.once("error", () => finishError("The Hitch native bridge connection failed."));
@@ -383,7 +394,7 @@ export default function registerHitchPiNativeBridge(pi) {
       reasoning: MANIFEST.provider.model.reasoning,
       input: [...MANIFEST.provider.model.input],
       contextWindow: MANIFEST.provider.model.contextWindowTokens,
-      maxTokens: MANIFEST.provider.model.maximumOutputTokens,
+      maxTokens: MODEL_OUTPUT_TOKENS,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     }],
     streamSimple: bridgeStream,

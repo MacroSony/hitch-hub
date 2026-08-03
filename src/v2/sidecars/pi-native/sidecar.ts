@@ -1,10 +1,15 @@
 import {
+  PI_NATIVE_BRIDGE_LIMITS,
   decodePiNativeBridgeClientFrame,
   type PiNativeContext,
   type PiNativeInvokeFrame,
   type PiNativeReasoning,
 } from "../../bridges/pi-native/frames.js";
-import type { PiNativeCredentialStore, BoundPiNativeCredentialSource } from "./credential-store.js";
+import type {
+  PiNativeCredentialStore,
+  PiNativeCredentialStoreObserver,
+  BoundPiNativeCredentialSource,
+} from "./credential-store.js";
 import { createPiNativeCredentialStore } from "./credential-store.js";
 import type { FrozenPiNativeCatalog } from "./catalog.js";
 import { createFrozenPiNativeCatalog } from "./catalog.js";
@@ -23,6 +28,7 @@ export interface PiNativeInvocationInput {
     readonly reasoning?: PiNativeReasoning;
   };
   readonly credentials: PiNativeCredentialStore;
+  readonly signal: AbortSignal;
 }
 
 /** A3 supplies the real Pi event adapter behind this deterministic A2 port. */
@@ -34,12 +40,13 @@ export interface PreparedPiNativeSidecar<Result = unknown> {
   readonly manifest: PiNativeSidecarManifest;
   readonly catalog: FrozenPiNativeCatalog;
   readonly credentials: PiNativeCredentialStore;
-  invoke(frame: unknown): Promise<Result>;
+  invoke(frame: unknown, signal?: AbortSignal): Promise<Result>;
 }
 
 export function preparePiNativeSidecar<Result>(input: {
   readonly boundary: InstalledPiNativeSidecarFetchBoundary;
   readonly credentialSource: BoundPiNativeCredentialSource;
+  readonly credentialObserver?: PiNativeCredentialStoreObserver;
   readonly executor: PiNativeInvocationExecutor<Result>;
 }): PreparedPiNativeSidecar<Result> {
   const invokeNative = input.executor.invoke.bind(input.executor);
@@ -48,6 +55,9 @@ export function preparePiNativeSidecar<Result>(input: {
   const credentials = createPiNativeCredentialStore({
     manifest,
     source: input.credentialSource,
+    ...(input.credentialObserver === undefined
+      ? {}
+      : { observer: input.credentialObserver }),
   });
   const expectedBinding = Object.freeze({
     bridgeId: manifest.bridge.id,
@@ -58,7 +68,7 @@ export function preparePiNativeSidecar<Result>(input: {
     manifest,
     catalog,
     credentials,
-    async invoke(rawFrame): Promise<Result> {
+    async invoke(rawFrame, requestedSignal): Promise<Result> {
       const frame = decodePiNativeBridgeClientFrame(rawFrame, {
         binding: expectedBinding,
       });
@@ -70,21 +80,27 @@ export function preparePiNativeSidecar<Result>(input: {
         manifest.catalog.model.id,
       );
       enforcePiNativeInvocationPolicy(frame, model);
+      const signal = requestedSignal ?? new AbortController().signal;
       return invokeNative(
-        deepFreeze({
+        Object.freeze({
           correlationId: frame.correlationId,
           model,
           context: frame.context,
-          options: {
+          options: Object.freeze({
             maximumOutputTokens:
-              frame.options.maximumOutputTokens ?? model.maximumOutputTokens,
+              frame.options.maximumOutputTokens ??
+              Math.min(
+                model.maximumOutputTokens,
+                PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens,
+              ),
             maxRetries: 0 as const,
             transport: "sse" as const,
             ...(frame.options.reasoning === undefined
               ? {}
               : { reasoning: frame.options.reasoning }),
-          },
+          }),
           credentials,
+          signal,
         }),
       );
     },
@@ -98,7 +114,11 @@ export function enforcePiNativeInvocationPolicy(
 ): void {
   if (
     frame.options.maximumOutputTokens !== undefined &&
-    frame.options.maximumOutputTokens > model.maximumOutputTokens
+    frame.options.maximumOutputTokens >
+      Math.min(
+        model.maximumOutputTokens,
+        PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens,
+      )
   ) {
     throw new Error("Pi native invocation exceeds the frozen output-token limit");
   }
@@ -184,12 +204,4 @@ export function enforcePiNativeInvocationPolicy(
   if (totalBytes > model.imageInput.maximumTotalImageBytesPerRequest) {
     throw new Error("Pi native invocation exceeds its total image-byte limit");
   }
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const nested of Object.values(value)) deepFreeze(nested);
-    Object.freeze(value);
-  }
-  return value;
 }

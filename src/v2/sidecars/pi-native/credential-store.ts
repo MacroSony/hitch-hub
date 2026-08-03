@@ -23,6 +23,7 @@ export type PiNativeCredential =
       readonly access: string;
       readonly refresh: string;
       readonly expires: number;
+      readonly accountId?: string;
     };
 
 /**
@@ -49,6 +50,25 @@ export interface PiNativeCredentialMetadata {
   readonly type: PiNativeCredential["type"];
 }
 
+export interface PiNativeCredentialStoreObserver {
+  onOAuthRefreshState(
+    state: "refresh-started" | "refresh-succeeded" | "refresh-failed",
+  ): void;
+  onCredentialUnavailable(): void;
+}
+
+/** Sanitized marker for unavailable or invalid bound credential state. */
+export class PiNativeCredentialUnavailableError extends Error {
+  constructor(reason: "unavailable" | "refresh-type-change" = "unavailable") {
+    super(
+      reason === "refresh-type-change"
+        ? "Pi credential refresh cannot change credential type"
+        : "The bound Pi provider credential is unavailable",
+    );
+    this.name = "PiNativeCredentialUnavailableError";
+  }
+}
+
 export interface PiNativeCredentialStore {
   read(providerId: string): Promise<PiNativeCredential | undefined>;
   list(): Promise<readonly PiNativeCredentialMetadata[]>;
@@ -64,8 +84,15 @@ export interface PiNativeCredentialStore {
 export function createPiNativeCredentialStore(input: {
   readonly manifest: unknown;
   readonly source: BoundPiNativeCredentialSource;
+  readonly observer?: PiNativeCredentialStoreObserver;
 }): PiNativeCredentialStore {
   const expected = decodePiNativeSidecarManifest(input.manifest).credentialStore;
+  const notifyOAuthRefresh = input.observer?.onOAuthRefreshState.bind(
+    input.observer,
+  );
+  const notifyCredentialUnavailable = input.observer?.onCredentialUnavailable.bind(
+    input.observer,
+  );
   const source = Object.freeze({
     resolverId: input.source.resolverId,
     providerId: input.source.providerId,
@@ -86,11 +113,16 @@ export function createPiNativeCredentialStore(input: {
     }
   };
   const readCurrent = async (): Promise<PiNativeCredential> => {
-    const credential = decodePiNativeCredential(await source.read());
-    if (credential.type !== source.credentialType) {
-      throw new Error("Pi credential type changed behind its bound source");
+    try {
+      const credential = decodePiNativeCredential(await source.read());
+      if (credential.type !== source.credentialType) {
+        throw new PiNativeCredentialUnavailableError();
+      }
+      return credential;
+    } catch {
+      notifyCredentialUnavailable?.();
+      throw new PiNativeCredentialUnavailableError();
     }
-    return credential;
   };
   const store: PiNativeCredentialStore = {
     async read(providerId): Promise<PiNativeCredential | undefined> {
@@ -105,32 +137,59 @@ export function createPiNativeCredentialStore(input: {
         }),
       ]);
     },
-    modify(providerId, transform): Promise<PiNativeCredential | undefined> {
+    async modify(providerId, transform): Promise<PiNativeCredential | undefined> {
       requireProvider(providerId);
       if (source.credentialType !== "oauth") {
-        return Promise.reject(
-          new Error("Pi API-key credentials do not grant native write authority"),
-        );
+        throw new Error("Pi API-key credentials do not grant native write authority");
       }
-      return source.modify(async (rawCurrent) => {
-        const current = decodePiNativeCredential(rawCurrent);
-        if (current.type !== "oauth") {
-          throw new Error("Pi credential type changed behind its bound source");
+      let transformEntered = false;
+      let transformReturnedNoReplacement = false;
+      let refreshStarted = false;
+      try {
+        const rawCommitted = await source.modify(async (rawCurrent) => {
+          const current = decodePiNativeCredential(rawCurrent);
+          if (current.type !== "oauth") {
+            throw new PiNativeCredentialUnavailableError();
+          }
+          transformEntered = true;
+          const proposed = await transform(detachCredential(current));
+          if (proposed === undefined) {
+            transformReturnedNoReplacement = true;
+            return detachCredential(current);
+          }
+          const replacement = decodePiNativeCredential(proposed);
+          if (replacement.type !== "oauth") {
+            throw new PiNativeCredentialUnavailableError("refresh-type-change");
+          }
+          refreshStarted = true;
+          notifyOAuthRefresh?.("refresh-started");
+          return detachCredential(replacement);
+        });
+        if (!transformEntered) {
+          throw new Error("Pi credential source skipped its atomic refresh transform");
         }
-        const proposed = await transform(detachCredential(current));
-        if (proposed === undefined) return detachCredential(current);
-        const replacement = decodePiNativeCredential(proposed);
-        if (replacement.type !== "oauth") {
-          throw new Error("Pi credential refresh cannot change credential type");
-        }
-        return detachCredential(replacement);
-      }).then((rawCommitted) => {
         const committed = decodePiNativeCredential(rawCommitted);
         if (committed.type !== "oauth") {
-          throw new Error("Pi credential type changed behind its bound source");
+          throw new PiNativeCredentialUnavailableError();
         }
+        if (refreshStarted) notifyOAuthRefresh?.("refresh-succeeded");
         return detachCredential(committed);
-      });
+      } catch (error) {
+        if (
+          transformEntered &&
+          !transformReturnedNoReplacement &&
+          !refreshStarted
+        ) {
+          refreshStarted = true;
+          notifyOAuthRefresh?.("refresh-started");
+        }
+        if (refreshStarted) {
+          notifyOAuthRefresh?.("refresh-failed");
+        }
+        notifyCredentialUnavailable?.();
+        if (error instanceof PiNativeCredentialUnavailableError) throw error;
+        throw new PiNativeCredentialUnavailableError();
+      }
     },
     async delete(providerId): Promise<never> {
       requireProvider(providerId);
@@ -153,15 +212,30 @@ export function decodePiNativeCredential(
     });
   }
   if (object.type === "oauth") {
-    requireExactFields(object, ["type", "access", "refresh", "expires"], [], path);
+    requireExactFields(object, ["type", "access", "refresh", "expires"], ["accountId"], path);
     return Object.freeze({
       type: decodeLiteral(object.type, "oauth", at(path, "type")),
       access: decodeSecret(object.access, at(path, "access"), "Pi OAuth access token"),
       refresh: decodeSecret(object.refresh, at(path, "refresh"), "Pi OAuth refresh token"),
       expires: decodeNonNegativeSafeInteger(object.expires, at(path, "expires")),
+      ...(object.accountId === undefined
+        ? {}
+        : { accountId: decodeAccountId(object.accountId, at(path, "accountId")) }),
     });
   }
   codecFail(at(path, "type"), "unsupported-discriminant", "unsupported Pi credential type");
+}
+
+function decodeAccountId(input: unknown, path: CodecPath): string {
+  const value = decodeBoundedString(
+    input,
+    { minimumLength: 1, maximumLength: 256, label: "Pi OAuth account ID" },
+    path,
+  );
+  if (/\r|\n|\u0000/u.test(value)) {
+    codecFail(path, "invalid-format", "Pi OAuth account ID contains a control delimiter");
+  }
+  return value;
 }
 
 function decodeSecret(input: unknown, path: CodecPath, label: string): string {
@@ -188,5 +262,6 @@ function detachCredential(credential: PiNativeCredential): PiNativeCredential {
         access: credential.access,
         refresh: credential.refresh,
         expires: credential.expires,
+        ...(credential.accountId === undefined ? {} : { accountId: credential.accountId }),
       });
 }

@@ -9,7 +9,10 @@ import {
   generatePiNativeBridgeExtension,
   type GeneratedPiNativeBridgeExtension,
 } from "../../bridges/pi-native/extension-generator.js";
-import type { PiNativeInvokeFrame } from "../../bridges/pi-native/frames.js";
+import {
+  PI_NATIVE_BRIDGE_LIMITS,
+  type PiNativeInvokeFrame,
+} from "../../bridges/pi-native/frames.js";
 import type { BootstrapPublicationArtifactBindings } from "../../model/application.js";
 import type { ProviderConnectionSpec } from "../../model/provider-broker.js";
 import {
@@ -304,6 +307,7 @@ test("injected Pi credential store is provider-scoped, secret-free on list, and 
     access: "initial-access-secret",
     refresh: "refresh-secret",
     expires: 1,
+    accountId: "account-123",
   };
   let writes = 0;
   let atomicUpdates = Promise.resolve();
@@ -373,6 +377,68 @@ test("injected Pi credential store is provider-scoped, secret-free on list, and 
   assert.equal(writes, 2);
 });
 
+test("OAuth status observes proposed atomic replacement, not a no-op expiry recheck", async () => {
+  const { manifest } = fixture();
+  let current: PiNativeCredential = {
+    type: "oauth",
+    access: "access-secret",
+    refresh: "refresh-secret",
+    expires: 1,
+    accountId: "account-123",
+  };
+  let failAfterTransform = false;
+  const source: BoundPiNativeCredentialSource = {
+    resolverId: manifest.credentialStore.resolverId,
+    providerId: manifest.credentialStore.providerId,
+    credentialType: "oauth",
+    async read() {
+      return current;
+    },
+    async modify(transform) {
+      const proposed = await transform(current);
+      if (failAfterTransform) throw new Error("BOUND_SOURCE_COMMIT_SECRET");
+      current = proposed as PiNativeCredential;
+      return current;
+    },
+  };
+  const firstStates: string[] = [];
+  const secondStates: string[] = [];
+  let secondUnavailable = 0;
+  const first = createPiNativeCredentialStore({
+    manifest,
+    source,
+    observer: {
+      onOAuthRefreshState: (state) => firstStates.push(state),
+      onCredentialUnavailable: () => undefined,
+    },
+  });
+  const second = createPiNativeCredentialStore({
+    manifest,
+    source,
+    observer: {
+      onOAuthRefreshState: (state) => secondStates.push(state),
+      onCredentialUnavailable: () => {
+        secondUnavailable += 1;
+      },
+    },
+  });
+  await first.modify("openai-codex", (credential) => credential?.type === "oauth"
+    ? { ...credential, access: "rotated-secret", expires: 2 }
+    : credential);
+  await second.modify("openai-codex", () => undefined);
+  assert.deepEqual(firstStates, ["refresh-started", "refresh-succeeded"]);
+  assert.deepEqual(secondStates, []);
+  assert.equal(current.type === "oauth" ? current.accountId : undefined, "account-123");
+
+  failAfterTransform = true;
+  await assert.rejects(
+    second.modify("openai-codex", () => undefined),
+    /bound Pi provider credential is unavailable/u,
+  );
+  assert.deepEqual(secondStates, []);
+  assert.equal(secondUnavailable, 1);
+});
+
 test("Pi credential codec accepts only bounded API-key or OAuth shapes", () => {
   assert.deepEqual(decodePiNativeCredential({ type: "api_key", key: "key" }), {
     type: "api_key",
@@ -384,8 +450,9 @@ test("Pi credential codec accepts only bounded API-key or OAuth shapes", () => {
       access: "access",
       refresh: "refresh",
       expires: 0,
+      accountId: "account-123",
     }),
-    { type: "oauth", access: "access", refresh: "refresh", expires: 0 },
+    { type: "oauth", access: "access", refresh: "refresh", expires: 0, accountId: "account-123" },
   );
   for (const value of [
     { type: "api_key", key: "" },
@@ -513,6 +580,14 @@ test("trusted Pi invoke seam re-decodes binding and forces retry/transport/model
   });
   assert.equal(Object.isFrozen(observed), true);
   assert.doesNotMatch(JSON.stringify(sidecar), /provider-secret/u);
+  await sidecar.invoke({
+    ...valid,
+    options: { reasoning: "high" },
+  });
+  assert.equal(
+    observed?.options.maximumOutputTokens,
+    PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens,
+  );
   await assert.rejects(
     sidecar.credentials.modify("openai-codex", () => credential),
     /do not grant native write authority/u,
@@ -537,9 +612,12 @@ test("trusted Pi invoke seam re-decodes binding and forces retry/transport/model
   await assert.rejects(
     sidecar.invoke({
       ...valid,
-      options: { ...valid.options, maximumOutputTokens: 128_001 },
+      options: {
+        ...valid.options,
+        maximumOutputTokens: PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens + 1,
+      },
     }),
-    /output-token limit/u,
+    CodecDecodeError,
   );
   const image = { type: "image", mimeType: "image/png", data: "AA==" } as const;
   await assert.rejects(

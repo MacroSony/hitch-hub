@@ -29,7 +29,10 @@ supervisor/broker must bind the private Unix transport at
 artifact/binding to the immutable connection before `invoke()` is allowed. The
 sidecar must independently force `maxRetries: 0` and SSE at its Pi native call;
 the A1 generator embeds those two literals as a checked invariant, not a
-request-selected option.
+request-selected option. The registered bridge model exposes the first-slice
+16,384-token execution ceiling, while the signed catalog still records the
+provider's larger immutable capacity. Omission uses the same 16,384-token
+default on both sides of the seam.
 
 `extension-generator.ts` accepts only a small semantic manifest: fixed bridge
 identity, exact Pi versions/digests, and one exact provider/model projection.
@@ -39,4 +42,6 @@ uses only the fixed local socket, preserves Pi's normal `streamSimple` agent
 loop, and installs no command/tool/prompt/background hook, provider discovery,
 auth-store access, or dynamic source/config loader. It bounds each frame,
 context, image, tool-argument object, queued worker event, cumulative
-text/reasoning stream, and total sidecar event count.
+text/reasoning stream, aggregate generated output, and total sidecar event
+count. A3 may accept a more fragmented native SSE stream, but coalesces those
+fragments before this seam's 4,096-frame bound.

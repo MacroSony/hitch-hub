@@ -102,7 +102,7 @@ function invoke(): Record<string, unknown> {
           content: [
             { type: "text", text: "I will inspect it." },
             { type: "thinking", thinking: "Need image reasoning.", redacted: true },
-            { type: "toolCall", id: "tool-call-1", name: "read", arguments: { path: "README.md" } },
+            { type: "toolCall", id: "call-1|fc-item-1", name: "read", arguments: { path: "README.md" } },
           ],
           api: "openai-codex-responses",
           provider: "openai-codex",
@@ -113,7 +113,7 @@ function invoke(): Record<string, unknown> {
         },
         {
           role: "toolResult",
-          toolCallId: "tool-call-1",
+          toolCallId: "call-1|fc-item-1",
           toolName: "read",
           content: [{ type: "text", text: "# Hitch" }],
           isError: false,
@@ -142,7 +142,7 @@ function frames(): readonly unknown[] {
     { ...base(), kind: "reasoning-end", contentIndex: 1, content: "reason" },
     { ...base(), kind: "tool-start", contentIndex: 2 },
     { ...base(), kind: "tool-delta", contentIndex: 2, delta: "{\"path\"" },
-    { ...base(), kind: "tool-end", contentIndex: 2, toolCall: { type: "toolCall", id: "tool-call-2", name: "read", arguments: { path: "README.md" } } },
+    { ...base(), kind: "tool-end", contentIndex: 2, toolCall: { type: "toolCall", id: "call-2|fc-item-2", name: "read", arguments: { path: "README.md" } } },
     { ...base(), kind: "usage", usage: usage() },
     { ...base(), kind: "error", code: "provider-error", message: "provider returned a sanitized failure" },
     { ...base(), kind: "terminal", reason: "stop", usage: usage() },
@@ -208,10 +208,10 @@ test("Pi native bridge bounds context strings, arrays, and context bytes without
     CodecDecodeError,
   );
   const longestText = invoke();
-  ((((longestText.context as Record<string, unknown>).messages as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!).text = "x".repeat(262_144);
+  ((((longestText.context as Record<string, unknown>).messages as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!).text = "x".repeat(PI_NATIVE_BRIDGE_LIMITS.maximumTextCharacters);
   assert.equal(decodePiNativeBridgeFrame(longestText).kind, "invoke");
   const tooLongText = invoke();
-  ((((tooLongText.context as Record<string, unknown>).messages as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!).text = "x".repeat(262_145);
+  ((((tooLongText.context as Record<string, unknown>).messages as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!).text = "x".repeat(PI_NATIVE_BRIDGE_LIMITS.maximumTextCharacters + 1);
   assert.throws(() => decodePiNativeBridgeFrame(tooLongText), CodecDecodeError);
   const tooManyMessages = invoke();
   (tooManyMessages.context as Record<string, unknown>).messages = Array.from(
@@ -219,6 +219,18 @@ test("Pi native bridge bounds context strings, arrays, and context bytes without
     () => ({ role: "user", content: "bounded", timestamp: 1 }),
   );
   assert.throws(() => decodePiNativeBridgeFrame(tooManyMessages), CodecDecodeError);
+});
+
+test("Pi native bridge enforces the first-slice output-token execution ceiling", () => {
+  const exact = invoke();
+  (exact.options as Record<string, unknown>).maximumOutputTokens =
+    PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens;
+  assert.equal(decodePiNativeBridgeFrame(exact).kind, "invoke");
+
+  const tooLarge = invoke();
+  (tooLarge.options as Record<string, unknown>).maximumOutputTokens =
+    PI_NATIVE_BRIDGE_LIMITS.maximumOutputTokens + 1;
+  assert.throws(() => decodePiNativeBridgeFrame(tooLarge), CodecDecodeError);
 });
 
 test("Pi native bridge rejects duplicate fields, prototypes, unknown fields, and unsafe injection shapes", () => {
@@ -249,6 +261,9 @@ test("Pi native bridge rejects duplicate fields, prototypes, unknown fields, and
     () => decodePiNativeBridgeFrame({ ...invoke(), nativeSeam: { maxRetries: 0, transport: "websocket" } }),
     CodecDecodeError,
   );
+  const malformedToolId = invoke();
+  (((malformedToolId.context as Record<string, unknown>).messages as Record<string, unknown>[])[1]!.content as Record<string, unknown>[])[2]!.id = "call|item|extra";
+  assert.throws(() => decodePiNativeBridgeFrame(malformedToolId), CodecDecodeError);
 });
 
 test("Pi native bridge rejects version, correlation, native-stack/catalog mismatch, and wrong direction", () => {

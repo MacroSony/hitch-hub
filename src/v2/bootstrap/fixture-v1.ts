@@ -86,7 +86,7 @@ const MODEL_MANIFEST_COVERAGE_V1 = Object.freeze({
 
 const MODEL_MANIFEST_DIGEST_V1 = digestCanonicalJson(MODEL_MANIFEST_COVERAGE_V1);
 const NATIVE_STACK_DIGEST_V1 = "sha256:feec8a6356a52ef9a5ace0a53390e35b68ad20183e5f7a4a86cf6b25d9849376";
-const BRIDGE_ARTIFACT_DIGEST_V1 = "sha256:cb9bf2c0da1ae192c11220c063194a36312745daa71ae6225e80e6a7bae697e2";
+const BRIDGE_ARTIFACT_DIGEST_V1 = "sha256:17d83f43fb8a571ab2d3fe36732c8ae784ffedab9fe811c51435a5985785a1cf";
 const ALLOWED_ORIGINS_V1 = Object.freeze(["https://chatgpt.com", "https://auth.openai.com"]);
 const PI_NATIVE_CATALOG_MODEL_V1 = Object.freeze({
   id: "gpt-5.4-mini",
