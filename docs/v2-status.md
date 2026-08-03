@@ -69,16 +69,17 @@ happen next, and what is blocked.
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
   current working tree. The v2 suite currently has 239 passing tests.
-- V2-E01 now has an accepted topology decision and an independently approved
-  working-tree candidate: the Pi sidecar receives an empty Bubblewrap network
-  namespace, an exact three-entry environment, and a fixed
+- V2-E01 is committed after two-pass independent review. The Pi sidecar
+  receives an empty Bubblewrap network namespace, an exact three-entry
+  environment, and a fixed
   loopback-to-pathname-UDS adapter; a host relay pins exact public DNS answers,
   admits only registered CONNECT authorities, verifies exact TLS ClientHello
   SNI before dialing numeric IPs or a pinned numeric-CONNECT operator proxy,
   and pairs with a locked redirect-denying fetch preload. Relay lifecycle,
   logical capacity, DNS deadlines, and one-use launch identity are explicit.
   The real namespace capability test passes on this Linux host. Runtime Gate E
-  is not recorded as committed until the bounded Git commit.
+  is committed as the containment boundary; V2-006B/V2-010B still own its
+  verified production composition.
 
 ## Status legend
 
@@ -116,23 +117,19 @@ happen next, and what is blocked.
 | V2-009C review follow-up | Committed | `bf90bcf` |
 | V2-008c — authenticated application dispatch | Committed | `b7b55b1` |
 | V2-014A — development CLI walking skeleton | Committed | `7140382` |
+| V2-E01 — production sidecar egress containment | Committed | `404e5a3` |
 
 ## Working-tree review candidates
 
-- V2-E01 — accepted ADR plus sidecar egress address policy, CONNECT relay,
-  exact ClientHello SNI, optional pinned host-proxy route, fixed loopback
-  adapter/exact environment, authenticated launch specification, locked
-  redirect guard, and adversarial tests under `src/v2/runtime/sidecar-egress/`.
-
-Passing deterministic tests remains necessary but does not by itself move this
-work to `Committed`; the bounded substep still requires independent review,
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
-| V2-E01 — production sidecar egress | Independently approved review candidate, current security-critical task | Two-pass independent review and repository verification complete; bounded commit remains |
+| V2-E01 — production sidecar egress | Committed | `404e5a3`; downstream verified sidecar/launcher composition remains V2-006B/V2-010B |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
@@ -168,9 +165,9 @@ should expose integration problems earlier than the original wave ordering.
    V2-014A owns trusted startup configuration, daemon shutdown, the CLI
    process, and the explicitly development-only no-op coordinator. The whole
    chain is committed and passing its two-process test.
-2. Commit the independently approved and verified V2-E01 candidate. Its ADR
-   and adversarial tests do not make a secure sidecar/runtime claim until the
-   bounded commit is complete.
+2. V2-E01 is independently reviewed, verified, and committed in `404e5a3`.
+   Its runtime proofs are now available to V2-006B/V2-010B; those integrations
+   remain required before a secure production sidecar/runtime claim.
 3. The walking skeleton target is:
 
    ```text
@@ -192,9 +189,9 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. Complete V2-006A2/A3, V2-007, and V2-010A while Runtime Gate E is being
-   resolved.
-5. Complete V2-006B, V2-011, and V2-010B only after E01 fixes the production
+4. Complete V2-006A2/A3, V2-007, and V2-010A; Runtime Gate E is now available
+   to those production integrations.
+5. Complete V2-006B, V2-011, and V2-010B using E01's committed production
    sidecar topology and containment boundary.
 6. Integrate V2-012, then V2-013 and V2-014B.
 7. Complete V2-015 and make the full acceptance command fail until all 21
@@ -220,7 +217,7 @@ the first slice is accepted.
 
 | Decision | Required outcome |
 | --- | --- |
-| Production sidecar egress | Decision resolved by [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md): empty sidecar network namespace plus fixed pathname-UDS CONNECT relay, exact SNI, and locked redirect seam; implementation is independently approved and awaits its bounded commit |
+| Production sidecar egress | Resolved and committed in `404e5a3`; [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md) defines the empty sidecar network namespace, fixed pathname-UDS CONNECT relay, exact SNI, locked redirect seam, and downstream composition obligations |
 | First schema validation | Keep the committed pre-release schema revisable until the walking skeleton and repository/coordinator integration validate it |
 | Pi artifact coexistence | V1's verified Pi 0.80.10 and v2's pinned Pi 0.82.0 use explicit trusted artifact roots rather than one ambiguous `PATH` installation |
 | SQLite runtime support | Either pin and continuously test the accepted Node 24 `DatabaseSync` runtime or replace it before production if its experimental behavior is unacceptable |

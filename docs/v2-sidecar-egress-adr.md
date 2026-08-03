@@ -2,8 +2,8 @@
 
 Date: 2026-08-03
 
-Status: accepted V2-E01 decision; remediated implementation independently
-approved and verified, pending its bounded Git commit
+Status: accepted and committed in `404e5a3` after two-pass independent review
+and repository verification
 
 ## Decision
 
