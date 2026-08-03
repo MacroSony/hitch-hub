@@ -1,6 +1,6 @@
 # V2 development walking skeleton
 
-Status: development-only review candidate
+Status: implemented development-only checkpoint
 
 The V2-014A walking skeleton exercises the real local boundary without making
 a production-runtime claim. It uses separate daemon and CLI processes over the

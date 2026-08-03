@@ -35,7 +35,7 @@ product and acceptance boundary. The
 [implementation plan](docs/v2-implementation-plan.md) defines task ownership
 and completion criteria without acting as a live status board.
 
-The current v2 working tree includes a development-only two-process walking
+The current v2 branch includes a development-only two-process walking
 skeleton for bootstrap, session creation, durable prompt admission, and Turn
 query. It is not a secure production runtime; see the
 [walking-skeleton guide](docs/v2-walking-skeleton.md) for its explicit startup

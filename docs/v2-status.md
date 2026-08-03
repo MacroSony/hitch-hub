@@ -1,6 +1,6 @@
 # Hitch v2 implementation status
 
-Date: 2026-07-29
+Date: 2026-08-03
 
 Status: active source of truth for v2 task state, execution order, and blockers
 
@@ -13,11 +13,15 @@ happen next, and what is blocked.
 
 ## Current snapshot
 
-- V1 is a frozen maintenance baseline. It remains the only executable
+- V1 is a frozen maintenance baseline. It remains the only production-capable
   user-facing Hitch system.
-- V2 has no executable service path yet. There is no v2 application service,
-  local connector, Pi driver, supervisor, broker, delivery worker, CLI, or
-  `main.ts`.
+- V2 now has a committed, explicitly development-only walking skeleton:
+  trusted startup configuration, `src/v2/main.ts`, a separate structured CLI,
+  the real owner-private socket, bootstrap/authentication, session creation,
+  Turn admission, private image staging, a no-op FIFO claim, and authorized
+  nonterminal `turn show`. Production `serve` remains fail-closed until
+  V2-014B; there is still no Pi driver, secure supervisor/broker composition,
+  terminal coordinator, recovery, or delivery worker.
 - The committed v2 foundation covers the domain model, application/runtime
   ports, deterministic test harness, strict codecs, exact bootstrap
   configuration and publication projection, database-root primitives, and the
@@ -44,9 +48,8 @@ happen next, and what is blocked.
   connector and the store, magic-byte MIME sniffing, sha256-hashed bounded
   private copies under the root-owned `attachments` directory, minted
   Attachment provenance, and exact finalization/rollback of staged blobs.
-  Durable `private_blobs`/`attachments` rows remain owned by the future
-  Turn-admission transaction; orphan recovery claims remain with the
-  startup-recovery slice.
+  Durable `private_blobs`/`attachments` rows are written by V2-009C Turn
+  admission; orphan recovery claims remain with the startup-recovery slice.
 - V2-009C adds Turn admission and cancellation intent: owner-scoped session
   resolution, binding/lifecycle recheck, exact idempotent replay by
   `(endpoint_id, idempotency_key)` with conflict fail-closed denial, pinned
@@ -55,10 +58,17 @@ happen next, and what is blocked.
   and receipts, compare-and-remove queued cancellation with terminal
   response/delivery/audit, and active cancellation intent recorded on the
   runtime projection without touching worker authority.
-- The only uncommitted v2 change is this status reconciliation.
-- `npm run typecheck` and `npm run test:v2` pass against the current committed
-  source plus this status reconciliation. The v2 suite currently has 211
-  passing tests.
+- V2-008c and V2-014A are committed. The real two-process
+  test covers bootstrap, `session create`, `prompt`, `turn show`, durable
+  restart, text-Turn idempotency, one-active/three-queued FIFO capacity, and
+  fail-closed production startup. The fake advances only the first FIFO head
+  to `dispatching`; it writes no terminal result, delivery, assistant message,
+  worker lease, or provider state.
+- The V2-009C review follow-up is committed and
+  hardens replay ordering, attachment authentication provenance, invalid-ID
+  cancellation, system cancellation attribution, and queue timestamps.
+- `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
+  current branch. The v2 suite currently has 220 passing tests.
 - Production sidecar egress containment, Runtime Gate E, is unresolved. The
   feasibility spike's in-process network guard is not production containment.
 
@@ -95,6 +105,9 @@ happen next, and what is blocked.
 | V2-009A — session creation and private binding | Committed | `8198b3f`, `b54e477` |
 | V2-009B — attachment staging and private storage | Committed | `62f06f9`, `55ddf6d` |
 | V2-009C — Turn admission, FIFO, idempotency, and cancellation intent | Committed | `b397ddc` |
+| V2-009C review follow-up | Committed | `bf90bcf` |
+| V2-008c — authenticated application dispatch | Committed | `b7b55b1` |
+| V2-014A — development CLI walking skeleton | Committed | `7140382` |
 
 ## Working-tree review candidates
 
@@ -106,20 +119,19 @@ verification, and its own commit.
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
-| V2-E01 — production sidecar egress | Ready, security-critical | Start now; accepted ADR and adversarial containment tests are required |
+| V2-E01 — production sidecar egress | Ready, current security-critical task | Walking skeleton is exercised; accepted ADR and adversarial containment tests are required |
 | V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Ready | V2-006A1 is committed |
 | V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Waiting | V2-006A2 |
 | V2-006B — production artifact and sidecar integration | Blocked | V2-E01 plus V2-006A |
 | V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008c — local connector/application dispatch adapter | Ready, current | V2-009A/B/C application services are committed |
-| V2-014A — first-slice CLI shell over the local socket | Waiting | V2-008c |
+| V2-008c — local connector/application dispatch adapter | Committed | `b7b55b1` |
+| V2-014A — first-slice CLI shell over the local socket | Committed | `7140382` |
 | V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
 | V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
 | V2-010B — secure worker/sidecar launch composition | Blocked | V2-E01, V2-006B, V2-010A, and broker readiness |
 | V2-011A–C — credential broker and forward-once reservations | Blocked | V2-E01, V2-004, V2-006B, V2-009, and V2-010A |
 | V2-012A–D — Turn coordinator, event materialization, and recovery | Waiting | Driver, supervisor, broker, and application repositories |
 | V2-013 — independent delivery and result query | Waiting | V2-012 terminalization/outbox |
-| V2-014A — structured local protocol and CLI shell | Waiting | V2-008 and the session/Turn application seam |
 | V2-014B — production service composition and complete CLI | Waiting | V2-010B through V2-013 |
 | V2-015 — complete acceptance and fault-injection matrix | Waiting | Every task contributes cases; final claim follows V2-014B |
 
@@ -128,7 +140,8 @@ verification, and its own commit.
 The dependency graph in the implementation plan remains useful, but delivery
 should expose integration problems earlier than the original wave ordering.
 
-1. Implement the CLI walking skeleton in independently reviewed commits:
+1. The CLI walking skeleton is implemented and committed in independently
+   bounded steps:
 
    ```text
    V2-004a -> V2-004b -> V2-004c
@@ -138,9 +151,10 @@ should expose integration problems earlier than the original wave ordering.
      -> two-process restart/idempotency/FIFO verification
    ```
 
-   V2-004a includes the missing production `Clock` and cryptographic
-   `IdSource`. V2-014A owns trusted startup configuration, daemon shutdown, the
-   CLI process, and an explicitly test/development-only no-op coordinator.
+   V2-004a includes the production `Clock` and cryptographic `IdSource`.
+   V2-014A owns trusted startup configuration, daemon shutdown, the CLI
+   process, and the explicitly development-only no-op coordinator. The whole
+   chain is committed and passing its two-process test.
 2. Begin V2-E01 independently and do not make a secure sidecar/runtime claim
    until its ADR and adversarial tests pass.
 3. The walking skeleton target is:
@@ -174,15 +188,15 @@ should expose integration problems earlier than the original wave ordering.
 
 ## Acceptance status
 
-The deterministic suite has registered partial cases for 13 of 21 scenario
+The deterministic suite has registered partial cases for 16 of 21 scenario
 IDs:
 
-`V2-S01`, `V2-S02`, `V2-S03`, `V2-S07`, `V2-S09`, `V2-S10`, `V2-S12`, `V2-S13`,
-`V2-S14`, `V2-S15`, `V2-S18`, `V2-S19`, and `V2-S20`.
+`V2-S01`–`V2-S07`, `V2-S09`, `V2-S10`, `V2-S12`–`V2-S15`, and
+`V2-S18`–`V2-S20`.
 
 The following scenarios have no registered implementation case yet:
 
-`V2-S04`–`V2-S06`, `V2-S08`, `V2-S11`, `V2-S16`, `V2-S17`, and `V2-S21`.
+`V2-S08`, `V2-S11`, `V2-S16`, `V2-S17`, and `V2-S21`.
 
 All registered scenarios remain `in-progress` by design. A green
 `npm run test:v2` verifies the implemented foundation; it does not mean that
@@ -205,6 +219,7 @@ the first slice is accepted.
 | First-slice response delivery parameters | Resolved pending a published delivery policy: cancelled-turn deliveries use pinned `maximum_attempts = 3` and a 300-second deadline (`FIRST_SLICE_RESPONSE_DELIVERY`); a future delivery-policy record replaces the constants |
 | Cancellation intent idempotency | Resolved: repeating active cancellation against an already-cancelling Turn returns `not-active` (intent already recorded), and queued cancellation of a terminal-cancelled Turn returns `already-cancelled`; neither emits duplicate audit |
 | Idempotency-key or origin-message conflict | Resolved fail-closed: reusing an idempotency key with different content, or an origin message with a different key, is denied without new state or audit (no conflict variant exists on the admission result union) |
+| Image-bearing CLI retry identity | Open before production: a fresh image stage mints a fresh Attachment ID, so an after-restart retry cannot yet reproduce the exact admitted attachment identity even when bytes and idempotency key match; V2-014A proves restart-idempotency for text Turns and first-submission image durability, while a stable pre-admission replay resolution is still required for image retries |
 
 ## First-slice completion gate
 
