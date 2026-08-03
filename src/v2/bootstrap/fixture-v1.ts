@@ -56,7 +56,7 @@ export const FIRST_SLICE_NUMERIC_DEFAULTS_V1 = Object.freeze({
 export const FIRST_SLICE_DIGEST_COVERAGE_V1 = Object.freeze({
   nativeStack: "Pi 0.82.0 package tree recorded by the native-sidecar spike",
   bridgeArtifact: "reviewed pi-native-sidecar bridge artifact",
-  catalog: "canonical JSON: piVersion, nativeStackDigest, connectionId, allowedOrigins, model manifest",
+  catalog: "canonical JSON: piVersion, nativeStackDigest, connectionId, allowedOrigins, model integrity digest, public native model",
   model: "canonical JSON: provider/model identity, API, capacities, tools, reasoning, secret-free native metadata",
   connection: "canonical JSON: provider connection, transport, selected model, allowed origins, credential binding reference",
 });
@@ -86,7 +86,7 @@ const MODEL_MANIFEST_COVERAGE_V1 = Object.freeze({
 
 const MODEL_MANIFEST_DIGEST_V1 = digestCanonicalJson(MODEL_MANIFEST_COVERAGE_V1);
 const NATIVE_STACK_DIGEST_V1 = "sha256:feec8a6356a52ef9a5ace0a53390e35b68ad20183e5f7a4a86cf6b25d9849376";
-const BRIDGE_ARTIFACT_DIGEST_V1 = "sha256:ea5a98d284d68f53f379bb59b5e438e646ff194ccfe2624c658c58ab83d2264e";
+const BRIDGE_ARTIFACT_DIGEST_V1 = "sha256:cb9bf2c0da1ae192c11220c063194a36312745daa71ae6225e80e6a7bae697e2";
 const ALLOWED_ORIGINS_V1 = Object.freeze(["https://chatgpt.com", "https://auth.openai.com"]);
 const PI_NATIVE_CATALOG_MODEL_V1 = Object.freeze({
   id: "gpt-5.4-mini",
@@ -103,6 +103,7 @@ const NATIVE_CATALOG_DIGEST_V1 = digestCanonicalJson({
   nativeStackDigest: NATIVE_STACK_DIGEST_V1,
   connectionId: "pi-native-openai-codex-v1",
   allowedOrigins: ALLOWED_ORIGINS_V1,
+  modelIntegrityDigest: MODEL_MANIFEST_DIGEST_V1,
   model: PI_NATIVE_CATALOG_MODEL_V1,
 });
 const NATIVE_LIBRARY_TRANSPORT_V1 = Object.freeze({

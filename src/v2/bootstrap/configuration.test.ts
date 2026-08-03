@@ -48,7 +48,7 @@ test("first-slice publication decodes its complete Pi/OpenAI-Codex fixture immut
   assert.equal(transport.nativeRetries, "disabled");
   assert.equal(
     transport.nativeCatalogDigest,
-    "sha256:4f810bfebfb7354e44b5ca3384857b003ec8c87a3df295820fc01a660055c0ab",
+    "sha256:d570b6189992194c559046925f5b9633d8ce5ea51de53ffd28a289de229c219b",
   );
   assert.equal(record(turnPolicy.inference).maximumOutputTokensPerRequest, 16_384);
   assert.equal(record(resourcePolicy.extensions).mode, "granted-only");

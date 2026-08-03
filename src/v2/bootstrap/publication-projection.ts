@@ -373,6 +373,7 @@ function verifyProviderDigests(config: FirstSliceInstallationConfiguration): voi
   const catalog = digestCanonicalJson({
     piVersion: transport.nativeStackVersion, nativeStackDigest: transport.nativeStackDigest,
     connectionId: connection.id, allowedOrigins: connection.allowedOrigins,
+    modelIntegrityDigest: model.integrityDigest,
     model: { id: model.id, name: "GPT-5.4 mini", api: model.apiProtocol, provider: model.providerId, reasoning: true, input: ["text", "image"], contextWindow: model.contextWindowTokens, maxTokens: model.maximumOutputTokens },
   });
   if (catalog !== transport.nativeCatalogDigest) codecFail([], "invalid-format", "native catalog digest drift");
