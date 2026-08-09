@@ -48,7 +48,7 @@ what is blocked.
   owner-private socket. The transport has real mTLS handshake tests, but it is
   not composed into production `serve`; V2-M07 owns that configuration and
   lifecycle.
-- V2-M03 is an independently reviewed working-tree candidate. It generalizes
+- V2-M03 is independently reviewed and committed in `f10897a`. It generalizes
   session creation, Turn admission/query/cancellation, live configuration and
   credential reauthorization, audit attribution, idempotency, and atomic
   one-active/three-pending FIFO capacity to the authenticated principal. Two
@@ -178,15 +178,12 @@ what is blocked.
 | V2-E01 — production sidecar egress containment | Committed | `404e5a3` |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
 | V2-M02 — mTLS ingress and local administration | Committed | `e69f0c9` |
+| V2-M03 — multi-user application enforcement | Committed | `f10897a` |
 
 ## Working-tree review candidates
 
-| Task | State | Evidence |
-| --- | --- | --- |
-| V2-M03 — multi-user application enforcement | Review candidate | Independently approved after three implementation checkpoints; typecheck, build, and 322/322 v2 tests pass |
-
-Passing deterministic tests remains necessary but does not by itself move
-future work to `Committed`; each bounded substep still requires review,
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
@@ -195,8 +192,8 @@ verification, and its own commit.
 | --- | --- | --- |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
 | V2-M02 — mTLS ingress and local administration | Committed | `e69f0c9` |
-| V2-M03 — multi-user application enforcement | Review candidate | Independently reviewed in the working tree; commit the frozen candidate |
-| V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
+| V2-M03 — multi-user application enforcement | Committed | `f10897a` |
+| V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Next MVP slice; pure driver/mount work may proceed without singleton-owner assumptions |
 | V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
 | V2-M06 — thin coordinator and durable query | Waiting | V2-M03 through V2-M05 |
 | V2-M07 — production composition and private-alpha gate | Waiting | V2-M01 through V2-M06 |
@@ -253,11 +250,10 @@ should expose integration problems earlier than the original wave ordering.
    principal-wide execution capacity.
 5. V2-M02 private-network mTLS ingress and local-only user administration are
    independently reviewed and committed in `e69f0c9`. V2-M03 cross-principal
-   application enforcement is an independently reviewed working-tree
-   candidate: the two-principal denial, capacity, revocation, configuration,
-   certificate-rotation, and durable-provenance matrix passes. Commit that
-   frozen candidate, then proceed to V2-M04. No production runtime is connected
-   by V2-M03.
+   application enforcement is independently reviewed and committed in
+   `f10897a`: the two-principal denial, capacity, revocation, configuration,
+   certificate-rotation, and durable-provenance matrix passes. Proceed to
+   V2-M04. No production runtime is connected by V2-M03.
 6. Complete V2-M04 and V2-M05: the minimal Pi driver, one fresh bounded
    Bubblewrap worker per Turn, verified E01 sidecar, one-shot broker authority,
    and secure launch composition.
