@@ -33,7 +33,7 @@ what is blocked.
   administration, production attachments, rich interactions, persistent
   workers, automatic retry/recovery, push delivery, provider breadth, and
   exhaustive final-acceptance work.
-- V2-M01 is an independently reviewed working-tree candidate. It removes the
+- V2-M01 is independently reviewed and committed in `ec0735f`. It removes the
   single-active-human schema constraint; adds exact DER-certificate identity,
   `admin`/`member` roles, same-owner mTLS endpoints, fixed principal/workspace
   bindings, and durable per-principal execution capacity; preserves additional
@@ -158,26 +158,20 @@ what is blocked.
 | V2-008c — authenticated application dispatch | Committed | `b7b55b1` |
 | V2-014A — development CLI walking skeleton | Committed | `7140382` |
 | V2-E01 — production sidecar egress containment | Committed | `404e5a3` |
+| V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
 
 ## Working-tree review candidates
 
-- V2-M01 — multi-principal contract and schema: executable identity/endpoint
-  codecs, canonical relational constraints, bootstrap coexistence, fixed
-  provider cardinality, principal-wide queue/capacity behavior, and the
-  focused MVP acceptance registry are implemented. Contract, schema, and
-  repository checkpoints have independent approval; final whole-change
-  verification and commit/push remain.
-
-Passing deterministic tests remains necessary but does not by itself move
-future work to `Committed`; each bounded substep still requires review,
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
-| V2-M01 — multi-principal contract and schema | Review candidate | Independently approved bounded checkpoints; final release verification and commit/push remain |
-| V2-M02 — mTLS ingress and local administration | Waiting | V2-M01 certificate-binding and principal contracts |
+| V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
+| V2-M02 — mTLS ingress and local administration | Ready | V2-M01 certificate-binding and principal contracts are committed |
 | V2-M03 — multi-user application enforcement | Waiting | V2-M01 and V2-M02 trusted authentication context |
 | V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
 | V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
@@ -230,11 +224,10 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. V2-M01 is implemented and independently approved in the working tree:
-   multiple active human principals, certificate identity bindings,
-   `admin`/`member`, private owner-only endpoints, fixed per-principal
-   workspaces, and principal-wide execution capacity. Final whole-change
-   verification and commit/push remain.
+4. V2-M01 is independently reviewed and committed in `ec0735f`: multiple
+   active human principals, certificate identity bindings, `admin`/`member`,
+   private owner-only endpoints, fixed per-principal workspaces, and
+   principal-wide execution capacity.
 5. Complete V2-M02 and V2-M03: private-network mTLS ingress, local-only user
    administration, and cross-principal application enforcement. No runtime is
    connected until the two-principal denial matrix passes.
