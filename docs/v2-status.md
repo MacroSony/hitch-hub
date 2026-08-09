@@ -39,6 +39,9 @@ what is blocked.
   boundary. V2-M01 must revise the pre-release schema and executable contracts
   before downstream application/runtime integration encodes the singleton
   assumption more deeply.
+- The multi-user agentic MVP boundary, explicit deferrals, seven-slice mapping,
+  and source-of-truth transition were independently reviewed and committed in
+  `f7e9669`.
 - The committed v2 foundation covers the domain model, application/runtime
   ports, deterministic test harness, strict codecs, exact bootstrap
   configuration and publication projection, database-root primitives, and the
@@ -155,12 +158,8 @@ what is blocked.
 
 ## Working-tree review candidates
 
-| Candidate | State | Scope |
-| --- | --- | --- |
-| Multi-user agentic MVP plan consolidation | Review candidate | Canonical MVP boundary and deferrals, documentation hierarchy, consolidated V2-M01–M07 mapping, live status/order, and superseded single-owner marker; no runtime code |
-
-Passing deterministic tests remains necessary but does not by itself move
-future work to `Committed`; each bounded substep still requires review,
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
