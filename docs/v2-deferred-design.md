@@ -5,6 +5,11 @@ Date: 2026-07-24
 Status: preserved design considerations; not part of the v2.0 executable
 contract.
 
+The current executable target is the private
+[`multi-user agentic MVP`](./v2-multi-user-agentic-mvp.md). It promotes multiple
+private principals and certificate-bound remote ingress, while the shared
+endpoint and collaboration behavior below remains explicitly deferred.
+
 This document keeps decisions that may be useful after the first private
 vertical slice. The broader compile-only model may describe some of their
 discriminants, but first-slice codecs, adapters, services, and repositories

@@ -6,15 +6,21 @@ Status: historical design-gate checklist; the required first-slice contracts
 were accepted and implementation is underway. Current status and ordering live
 in [`v2-status.md`](./v2-status.md).
 
+The current product boundary is the
+[`multi-user agentic MVP`](./v2-multi-user-agentic-mvp.md). References below to
+the former canonical single-owner first slice describe the historical design
+threshold that produced the committed foundation; they do not control new
+scope or ordering.
+
 This document records the remaining design gates after the initial v2 session,
 identity, authorization, endpoint, and binding model. The goal is to settle the
 cross-component contracts that would otherwise force expensive rewrites, not to
 fully specify every future product feature before implementation begins.
 
-The canonical first executable product and acceptance boundary is
+The original first executable product and acceptance boundary was
 [`v2-first-slice.md`](./v2-first-slice.md). V1 is a frozen maintenance baseline;
-the first slice is a clean structured Pi RPC path through a private local CLI,
-not a v1 dispatch refactor, PTY path, or ACP integration.
+that slice was a clean structured Pi RPC path through a private local CLI, not
+a v1 dispatch refactor, PTY path, or ACP integration.
 
 ## Design order
 
@@ -143,12 +149,14 @@ These do not block the first v2 implementation:
 - enforced egress proxying
 - management UI
 
-## Implementation threshold
+## Historical implementation threshold
 
-Implementation begins with the vertical slice fixed in
-[`v2-first-slice.md`](./v2-first-slice.md). Agent runtime, launch planning,
-private connector ingress, persistence, and application-service interfaces
-should be introduced only when that slice consumes them. It must exercise:
+Implementation originally began with the vertical slice fixed in
+[`v2-first-slice.md`](./v2-first-slice.md). The current consolidated threshold
+and deliberate reductions are in
+[`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md). The original
+slice required the following capabilities and remains useful historical
+contract evidence:
 
 - immutable `SessionSpec` loading and live reauthorization
 - private turn admission, idempotency, bounded FIFO, and cancellation by Turn ID

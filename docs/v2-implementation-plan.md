@@ -1,32 +1,58 @@
-# Hitch v2 first-slice implementation plan
+# Hitch v2 implementation task catalog
 
-Date: 2026-07-25
+Date: 2026-08-09
 
-Status: accepted task catalog and dependency reference
+Status: detailed task catalog; consolidated MVP ordering is authoritative
 
-This document turns the accepted v2 contracts and the successful Pi native
-sidecar spike into commit-sized implementation work. It does not reopen the
-product scope in [`v2-first-slice.md`](./v2-first-slice.md), and it does not
-reuse the frozen v1 runtime as a compatibility layer.
+This document records detailed task ownership and the original dependency
+decomposition produced from the accepted v2 contracts and successful Pi native
+sidecar spike. The current product boundary, deliberate reductions, and seven
+dependency-complete delivery slices are defined in
+[`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md). When the old
+single-owner task catalog or 21-scenario program conflicts with that document,
+the consolidated MVP boundary wins. The frozen v1 runtime is still not reused
+as a compatibility layer.
 
 Current task state, reviewed execution order, and blockers live in
 [`v2-status.md`](./v2-status.md). The waves below group capabilities and
 dependencies; they are not a live status board or a requirement to postpone
 all integration until the final wave.
 
+## Consolidated MVP task mapping
+
+The original task IDs remain useful ownership labels. New implementation is
+delivered through the following consolidated slices:
+
+| MVP slice | Existing ownership consumed | MVP reduction |
+| --- | --- | --- |
+| V2-M01 — multi-principal contract and schema | V2-001A/B, V2-002, V2-003B, V2-004 | Multiple active human principals, certificate bindings, private owner-only sessions, fixed per-principal workspace/capacity |
+| V2-M02 — mTLS ingress and local administration | V2-008, V2-014 | Private-network mTLS JSONL plus local create/disable/bind/revoke commands; no OIDC, signup, invitations, or remote admin |
+| V2-M03 — multi-user application enforcement | V2-004c, V2-009, V2-008c | Generalize owner-scoped commands and live authorization; no sharing, delegation, group audience, or production attachments |
+| V2-M04 — minimal Pi driver and ephemeral sandbox | V2-007, V2-010A | Prompt/events/cancel/terminal/close and one fresh bounded worker per Turn; no resume, long-lived worker, or interaction mediation |
+| V2-M05 — sidecar, one-shot broker, and launch | V2-006B, reduced V2-011, V2-010B | One connection/model, fixed ceilings, one-shot native send; no configurable quotas, provider breadth, or automatic retry |
+| V2-M06 — thin coordinator and durable query | Reduced V2-012/V2-013 | Claim, run, cancel, terminalize, poll; no push delivery, exact live reconciliation, or automatic recovery of active work |
+| V2-M07 — production composition and alpha gate | Reduced V2-014B/V2-015 | Production mTLS service, operator guidance, focused cross-user/runtime matrix, and one opt-in provider smoke |
+
+The full definitions below remain reference material for invariants and future
+work. Capabilities explicitly deferred by the canonical MVP document are not
+quietly implemented through an older task's broader completion criteria.
+
 ## Delivery rules
 
 - New implementation lives under `src/v2/`. It may study v1 code, but imports
   no v1 application, persistence, connector, or runtime service.
-- `src/v2/model/` remains the compile-only domain boundary. Missing first-slice
-  records are added deliberately before repositories encode them.
-- Every task includes deterministic tests. Security and recovery tests are not
-  deferred to a final hardening pass.
+- `src/v2/model/` remains the compile-only domain boundary. Missing MVP records
+  are added deliberately before repositories encode them.
+- Every task includes deterministic tests proportionate to the MVP boundary.
+  Identity isolation, live authorization, sandbox/credential containment,
+  replay denial, cancellation cleanup, and uncertain-send behavior are not
+  deferred. Exhaustive crash injection, provider breadth, soak/load work, and
+  the full original V2-015 matrix are deferred explicitly.
 - Every security-sensitive state change emits its allowlisted audit envelope in
   the same transaction as the authoritative fact; later tasks do not bolt audit
   records onto completed workflows.
-- First-slice executable codecs reject deferred discriminants even when the
-  broader compile-only model describes them.
+- MVP executable codecs reject deferred discriminants even when the broader
+  compile-only model describes them.
 - Real provider calls remain opt-in and run only after deterministic sidecar,
   broker, and sandbox tests pass.
 - No migration, dual-write, compatibility table, automatic reset, or production

@@ -2,6 +2,12 @@
 
 Status: implemented development-only checkpoint
 
+This remains valid evidence for the committed single-owner foundation. The
+accepted product target is now the
+[`multi-user agentic MVP`](./v2-multi-user-agentic-mvp.md); this operator guide
+does not claim certificate-bound multi-user authentication or production
+agent execution.
+
 The V2-014A walking skeleton exercises the real local boundary without making
 a production-runtime claim. It uses separate daemon and CLI processes over the
 owner-private Unix socket and durable SQLite state. The fake coordinator moves

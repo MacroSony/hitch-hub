@@ -2,16 +2,24 @@
 
 Date: 2026-07-25
 
-Status: accepted implementation scope
+Status: superseded single-owner scope; retained as foundation history
+
+The accepted product boundary for new work is now
+[`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md). That decision
+preserves the committed walking-skeleton and runtime foundation but changes the
+target to multiple certificate-bound principals in one installation. This file
+continues to explain the assumptions under which the existing single-owner
+code and original acceptance scenarios were created; it no longer controls new
+implementation scope or completion.
 
 Current task state and execution order are maintained in
 [`v2-status.md`](./v2-status.md). This document defines scope and acceptance,
 not implementation progress.
 
-This document is the canonical product and acceptance boundary for the first
+This document was the canonical product and acceptance boundary for the first
 executable Hitch v2 vertical slice. It narrows the broader domain and security
-designs to one end-to-end path. When another roadmap or discussion note suggests
-a different implementation order, this document wins for the first slice.
+designs to the single-owner path that produced the committed development
+walking skeleton.
 
 The slice is not a compatibility refactor of v1. V1 is a frozen maintenance
 baseline. V2 uses a separate executable path, disposable data root, canonical

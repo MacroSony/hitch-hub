@@ -10,25 +10,30 @@ matters when two files appear to disagree.
    behavior and operating commands.
 2. [`v2-status.md`](./v2-status.md) is the authoritative v2 task status,
    execution order, and blocker tracker.
-3. [`v2-first-slice.md`](./v2-first-slice.md) is the accepted v2 product scope
-   and acceptance boundary.
+3. [`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md) is the
+   accepted v2 product scope, explicit deferral list, and MVP completion
+   boundary.
 4. [`v2-implementation-plan.md`](./v2-implementation-plan.md) defines task
    ownership, dependencies, and completion criteria. It is a task catalog, not
    a live status board.
-5. The accepted design documents define component contracts and security
+5. [`v2-first-slice.md`](./v2-first-slice.md) preserves the superseded
+   single-owner product boundary that produced the committed walking-skeleton
+   foundation.
+6. The accepted design documents define component contracts and security
    invariants. They do not establish current implementation progress.
 
 When status or ordering text elsewhere is stale, `v2-status.md` wins. When a
-proposed implementation widens the first executable slice,
-`v2-first-slice.md` wins.
+proposed implementation widens or contradicts the MVP,
+`v2-multi-user-agentic-mvp.md` wins.
 
 ## Current documents
 
 | Document | Role |
 | --- | --- |
 | [`v2-status.md`](./v2-status.md) | Active v2 status, reviewed order, blockers, and acceptance progress |
-| [`v2-first-slice.md`](./v2-first-slice.md) | Canonical first executable v2 scope |
-| [`v2-implementation-plan.md`](./v2-implementation-plan.md) | Commit-sized task definitions and dependency graph |
+| [`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md) | Canonical single-install multi-user agentic MVP scope, consolidated sequence, deferrals, and completion gate |
+| [`v2-implementation-plan.md`](./v2-implementation-plan.md) | Detailed task ownership catalog, interpreted through the consolidated MVP sequence |
+| [`v2-first-slice.md`](./v2-first-slice.md) | Superseded single-owner scope retained as committed-foundation history |
 | [`v2-walking-skeleton.md`](./v2-walking-skeleton.md) | Development-only V2-014A daemon/CLI operator guide and limitations |
 | [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md) | V2-E01 production Pi sidecar network topology, DNS, proxy, and redirect decision |
 | [`../implementation_steps.md`](../implementation_steps.md) | Remaining v1 maintenance and attended-rollout checklist |

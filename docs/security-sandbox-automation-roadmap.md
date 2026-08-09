@@ -2,8 +2,11 @@
 
 Status: historical v1 roadmap. Phases 0-4 and the credential-containment
 follow-up are implemented; later v1 phases are frozen. The clean replacement is
-governed by [`v2-first-slice.md`](./v2-first-slice.md) and
-[`v2-design-roadmap.md`](./v2-design-roadmap.md).
+governed by the
+[`v2 multi-user agentic MVP`](./v2-multi-user-agentic-mvp.md). The superseded
+[`v2-first-slice.md`](./v2-first-slice.md) and
+[`v2-design-roadmap.md`](./v2-design-roadmap.md) remain historical foundation
+context.
 
 This document records the intended order for per-principal authorization, persistent agent state, Linux Bubblewrap isolation, generic proactive triggers, and scheduled agent work. It also reconciles this direction with the older broad roadmap in [`plan.md`](../plan.md).
 

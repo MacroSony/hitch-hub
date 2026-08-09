@@ -1,15 +1,16 @@
 # Hitch v2 implementation status
 
-Date: 2026-08-03
+Date: 2026-08-09
 
 Status: active source of truth for v2 task state, execution order, and blockers
 
-The accepted product boundary remains
-[`v2-first-slice.md`](./v2-first-slice.md). Task definitions and detailed
-dependencies remain in
-[`v2-implementation-plan.md`](./v2-implementation-plan.md). This file records
-what is actually committed, what exists only in the working tree, what should
-happen next, and what is blocked.
+The accepted product boundary is now
+[`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md). Detailed
+historical task ownership remains in
+[`v2-implementation-plan.md`](./v2-implementation-plan.md), interpreted through
+the new consolidated seven-slice sequence. This file records what is actually
+committed, what exists only in the working tree, what should happen next, and
+what is blocked.
 
 ## Current snapshot
 
@@ -19,9 +20,25 @@ happen next, and what is blocked.
   trusted startup configuration, `src/v2/main.ts`, a separate structured CLI,
   the real owner-private socket, bootstrap/authentication, session creation,
   Turn admission, private image staging, a no-op FIFO claim, and authorized
-  nonterminal `turn show`. Production `serve` remains fail-closed until
-  V2-014B; there is still no Pi driver, secure supervisor/broker composition,
-  terminal coordinator, recovery, or delivery worker.
+  nonterminal `turn show`. Production `serve` remains fail-closed; V2-M07 now
+  owns production composition. There is still no Pi driver, secure
+  supervisor/broker composition, terminal coordinator, recovery, or delivery
+  worker.
+- The accepted target changed on 2026-08-09 from the superseded single-owner
+  first slice to a private single-installation, multi-user agentic MVP. Remote
+  principals authenticate through certificate-bound mTLS on an
+  operator-controlled private network; sessions remain private and owner-only;
+  each principal receives a fixed workspace and at most one fresh Bubblewrap
+  worker at a time. The MVP deliberately omits shared sessions, OIDC, remote
+  administration, production attachments, rich interactions, persistent
+  workers, automatic retry/recovery, push delivery, provider breadth, and
+  exhaustive final-acceptance work.
+- The committed executable schema and walking-skeleton composition still
+  enforce one active bootstrap owner and local-socket authentication. They are
+  valid foundation evidence, not an implementation of the new multi-user
+  boundary. V2-M01 must revise the pre-release schema and executable contracts
+  before downstream application/runtime integration encodes the singleton
+  assumption more deeply.
 - The committed v2 foundation covers the domain model, application/runtime
   ports, deterministic test harness, strict codecs, exact bootstrap
   configuration and publication projection, database-root primitives, and the
@@ -138,29 +155,27 @@ happen next, and what is blocked.
 
 ## Working-tree review candidates
 
-None. Passing deterministic tests remains necessary but does not by itself
-move future work to `Committed`; each bounded substep still requires review,
+| Candidate | State | Scope |
+| --- | --- | --- |
+| Multi-user agentic MVP plan consolidation | Review candidate | Canonical MVP boundary and deferrals, documentation hierarchy, consolidated V2-M01–M07 mapping, live status/order, and superseded single-owner marker; no runtime code |
+
+Passing deterministic tests remains necessary but does not by itself move
+future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
-| V2-E01 — production sidecar egress | Committed | `404e5a3`; downstream verified sidecar/launcher composition remains V2-006B/V2-010B |
-| V2-006A2 — deterministic sidecar, artifact, catalog, and credential store | Committed | `17e1419` |
-| V2-006A3 — native event, OAuth, error, cancellation, retry, and replay matrix | Committed | `2c7e17c` |
-| V2-006B — production artifact and sidecar integration | Ready | V2-E01 and V2-006A are committed |
-| V2-007 — Pi RPC driver | Ready | V2-001B2 and V2-002A are committed |
-| V2-008c — local connector/application dispatch adapter | Committed | `b7b55b1` |
-| V2-014A — first-slice CLI shell over the local socket | Committed | `7140382` |
-| V2-010A1 — mount verification and Bubblewrap rendering | Ready | V2-003B and V2-005 are committed |
-| V2-010A2 — worker lifecycle, fencing, quarantine, and cleanup | Waiting | V2-010A1 |
-| V2-010B — secure worker/sidecar launch composition | Blocked | V2-E01, V2-006B, V2-010A, and broker readiness |
-| V2-011A–C — credential broker and forward-once reservations | Blocked | V2-E01, V2-004, V2-006B, V2-009, and V2-010A |
-| V2-012A–D — Turn coordinator, event materialization, and recovery | Waiting | Driver, supervisor, broker, and application repositories |
-| V2-013 — independent delivery and result query | Waiting | V2-012 terminalization/outbox |
-| V2-014B — production service composition and complete CLI | Waiting | V2-010B through V2-013 |
-| V2-015 — complete acceptance and fault-injection matrix | Waiting | Every task contributes cases; final claim follows V2-014B |
+| V2-M01 — multi-principal contract and schema | Ready | Next assignment; revise singleton executable boundaries before schema freeze |
+| V2-M02 — mTLS ingress and local administration | Waiting | V2-M01 certificate-binding and principal contracts |
+| V2-M03 — multi-user application enforcement | Waiting | V2-M01 and V2-M02 trusted authentication context |
+| V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
+| V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
+| V2-M06 — thin coordinator and durable query | Waiting | V2-M03 through V2-M05 |
+| V2-M07 — production composition and private-alpha gate | Waiting | V2-M01 through V2-M06 |
+| V2-006B — verified production artifact and sidecar integration | Ready | Consumed by V2-M05; V2-E01 and V2-006A are committed |
+| Original full V2-011 through V2-015 breadth | Deferred | Reduced MVP subsets are owned by V2-M05 through V2-M07; see the canonical deferral list |
 
 ## Reviewed execution order
 
@@ -206,68 +221,86 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. Complete V2-007 and V2-010A; Runtime Gate E and all of V2-006A are now
-   committed and available to the production integrations.
-5. Complete V2-006B, V2-011, and V2-010B using E01's committed production
-   sidecar topology and containment boundary.
-6. Integrate V2-012, then V2-013 and V2-014B.
-7. Complete V2-015 and make the full acceptance command fail until all 21
-   scenarios are explicitly accepted.
+4. Complete V2-M01 before schema freeze: multiple active human principals,
+   certificate identity bindings, `admin`/`member`, private owner-only
+   endpoints, fixed per-principal workspaces, and execution capacity.
+5. Complete V2-M02 and V2-M03: private-network mTLS ingress, local-only user
+   administration, and cross-principal application enforcement. No runtime is
+   connected until the two-principal denial matrix passes.
+6. Complete V2-M04 and V2-M05: the minimal Pi driver, one fresh bounded
+   Bubblewrap worker per Turn, verified E01 sidecar, one-shot broker authority,
+   and secure launch composition.
+7. Complete V2-M06: claim, execute, cancel, terminalize, fail closed on
+   uncertain active work, and expose only owner-authorized polling through
+   `turn show`.
+8. Complete V2-M07: production mTLS composition, focused security/operational
+   verification, private-alpha guidance, and one opt-in real-provider smoke.
 
 ## Acceptance status
 
-The deterministic suite has registered partial cases for 16 of 21 scenario
-IDs:
+The existing deterministic registry still records partial foundation coverage
+for 16 of the original 21 single-owner scenarios, and the current suite remains
+required. It does not define completion of the revised MVP.
 
-`V2-S01`–`V2-S07`, `V2-S09`, `V2-S10`, `V2-S12`–`V2-S15`, and
-`V2-S18`–`V2-S20`.
+V2-M01 must add a focused multi-user acceptance registry or update the existing
+one without falsely marking historical cases complete. The canonical MVP gate
+requires certificate-to-principal integrity, cross-principal denial,
+content-blind administration, live revocation, workspace/sandbox isolation,
+resource ceilings, one-shot provider invocation, cleanup, uncertain-send
+non-replay, and one two-principal end-to-end sandboxed agent Turn. Exhaustive
+crash permutations, provider/OS breadth, soak/load work, and the complete
+original 21-scenario matrix are explicitly deferred.
 
-The following scenarios have no registered implementation case yet:
-
-`V2-S08`, `V2-S11`, `V2-S16`, `V2-S17`, and `V2-S21`.
-
-All registered scenarios remain `in-progress` by design. A green
-`npm run test:v2` verifies the implemented foundation; it does not mean that
-the first slice is accepted.
+A green `npm run test:v2` verifies the implemented foundation; it does not mean
+that the multi-user MVP is accepted.
 
 ## Open implementation decisions
 
 | Decision | Required outcome |
 | --- | --- |
 | Production sidecar egress | Resolved and committed in `404e5a3`; [`v2-sidecar-egress-adr.md`](./v2-sidecar-egress-adr.md) defines the empty sidecar network namespace, fixed pathname-UDS CONNECT relay, exact SNI, locked redirect seam, and downstream composition obligations |
-| First schema validation | Keep the committed pre-release schema revisable until the walking skeleton and repository/coordinator integration validate it |
+| Multi-user schema pivot | V2-M01 removes the single-active-human executable constraint before schema freeze and adds certificate-bound principals, private owner-only endpoints, fixed workspaces, and per-principal capacity in one installation |
 | Pi artifact coexistence | V1's verified Pi 0.80.10 and v2's pinned Pi 0.82.0 use explicit trusted artifact roots rather than one ambiguous `PATH` installation |
 | SQLite runtime support | Either pin and continuously test the accepted Node 24 `DatabaseSync` runtime or replace it before production if its experimental behavior is unacceptable |
-| Post-slice product path | Select the first chat connector and define minimum v1 parity plus retirement/coexistence criteria |
+| Remote authentication | Resolved for the MVP as Hitch-validated mTLS client certificates over an operator-controlled private network; OIDC, public exposure, signup, invitations, and reverse-proxy identity headers are deferred |
+| User administration | Resolved as local administrator-only create/disable and certificate bind/revoke commands; no remote administration or management UI |
+| Session audience | Resolved as private owner-only sessions and Turns; sharing, delegation, teams, groups, and cross-principal context are rejected |
+| Agent surface | Resolved as a fresh Bubblewrap worker per Turn with `read`, `write`, `edit`, and `ls` inside one fixed principal workspace; shell, worker networking, MCP, packages, ambient discovery, and user extensions are rejected |
+| Runtime recovery | Resolved for the MVP as no worker reuse, resume, automatic provider retry, or heuristic replay; possibly submitted or active work after interruption becomes explicit `unknown/worker-lost` |
+| Result delivery | Resolved for the MVP as owner-authorized `turn show` polling; attached streaming and independent push delivery are deferred |
 | Grant re-issuance lifecycle | Resolved for the first slice: configuration-use grant replacement is an operator transaction that deletes the revoked row and inserts its successor together; `readConfigurationUse` intentionally hard-fails on active-plus-revoked ambiguity, and out-of-band revocation intentionally conflicts with the next bootstrap publication's digest check. A grant-management service redesigns this post-slice |
-| First-slice configuration cardinality | Resolved as intended posture: exactly one installation, active principal, execution/turn policy, profile provider allowance, and per-provider credential binding are hard integrity requirements (schema-enforced or session-creation-enforced) until multi-policy/multi-provider support arrives as one deliberate schema-plus-command package |
+| MVP configuration cardinality | One installation, multiple active humans, one provider connection/model, fixed policy/profile revisions, one workspace root per principal, one worker per principal, three pending Turns per principal, and one operator-wide concurrency ceiling |
 | Publication provenance depth | Resolved under the trusted-local-DB threat model: `assertPublishedRow` proves PK-existence plus bootstrap audit chain, not current row content; content drift is detected fail-closed at re-publication, mutable state columns remain the intended revocation channel, and launch-time integrity verification (V2-010) owns artifact/grant digest enforcement |
 | Attachment durability ordering | Resolved for the first slice: a returned stage is durable (file and directory fsynced) before the Turn-admission transaction may commit rows referencing it; finalization promotes via no-clobber `linkSync` and verifies content on every repeat/crash-window path; startup recovery must treat "rows plus final file, no stage" as idempotent success |
 | Connector-declared attachment MIME | Deferred: staging derives MIME solely from sealed bytes today, so the port's `mime-content-mismatch` reason is unreachable; it is reserved for a future connector-declared MIME the store would verify against the sniffed type |
 | First-slice response delivery parameters | Resolved pending a published delivery policy: cancelled-turn deliveries use pinned `maximum_attempts = 3` and a 300-second deadline (`FIRST_SLICE_RESPONSE_DELIVERY`); a future delivery-policy record replaces the constants |
 | Cancellation intent idempotency | Resolved: repeating active cancellation against an already-cancelling Turn returns `not-active` (intent already recorded), and queued cancellation of a terminal-cancelled Turn returns `already-cancelled`; neither emits duplicate audit |
 | Idempotency-key or origin-message conflict | Resolved fail-closed: reusing an idempotency key with different content, or an origin message with a different key, is denied without new state or audit (no conflict variant exists on the admission result union) |
-| Image-bearing CLI retry identity | Open before production: a fresh image stage mints a fresh Attachment ID, so an after-restart retry cannot yet reproduce the exact admitted attachment identity even when bytes and idempotency key match; V2-014A proves restart-idempotency for text Turns and first-submission image durability, while a stable pre-admission replay resolution is still required for image retries |
+| Production attachments | Deferred from the MVP; committed local staging remains foundation code, while remote production submission accepts text only |
 
-## First-slice completion gate
+## MVP completion gate
 
-The first slice is complete only when:
+The private multi-user agentic MVP is complete only when:
 
-- the production CLI can execute the full accepted local private-session path;
-- E01 containment, artifact verification, Bubblewrap, credential brokerage,
-  forwarding uniqueness, cancellation, recovery, and delivery all pass their
-  deterministic adversarial tests;
-- all 21 acceptance scenarios are explicitly complete, with real provider
-  smokes remaining opt-in;
-- no required implementation exists only as unreviewed working-tree files;
-- the schema is frozen only after the end-to-end walking skeleton and
-  repository/coordinator integration validate it; and
-- the documentation map, this tracker, and current operator guidance agree.
+- at least two certificate-bound principals operate in one canonical Hitch
+  installation and cannot cross identity, session, Turn, workspace, result, or
+  runtime boundaries;
+- each principal can execute a text Turn through a fresh denied-network
+  Bubblewrap Pi worker against only that principal's fixed workspace;
+- one verified credential-isolated sidecar invocation produces a durable
+  terminal result retrievable only by the owner after disconnect;
+- revocation, capacity denial, cancellation, cleanup, uncertain submission,
+  restart non-replay, and the cross-principal matrix pass focused deterministic
+  tests;
+- production startup rejects incomplete mTLS, schema, artifact, egress,
+  workspace, credential, and resource-limit configuration; and
+- every required slice is reviewed and committed, the existing suite remains
+  green, and operator guidance matches the executable private-alpha boundary.
 
 ## Product follow-up
 
-The first slice proves the local architecture; it is not yet the chat-native
-product replacement. The next product milestone must select one existing chat
-connector, define the minimum v1 parity required for it, and establish explicit
-v1 retirement or coexistence criteria. That follow-up remains outside the
-accepted first-slice scope.
+After the MVP is exercised by a small trusted population, evidence decides
+whether the next milestone is richer single-user agent behavior, OIDC/public
+access, durable recovery/delivery, user-managed credentials, or collaboration.
+None is silently part of this MVP. The explicit deferral list in
+[`v2-multi-user-agentic-mvp.md`](./v2-multi-user-agentic-mvp.md) controls.
