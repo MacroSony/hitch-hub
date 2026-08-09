@@ -16,6 +16,7 @@ import type {
   AgentProtocolToolCallId,
   AgentResumeHandleId,
   Base64Payload,
+  IntegrityDigest,
   IsoTimestamp,
   JsonObject,
   SandboxPath,
@@ -115,7 +116,19 @@ export interface AgentLaunchProjection {
     readonly sandboxPath: SandboxPath;
     readonly content: JsonObject;
   }[];
+  /**
+   * Exact executable artifacts fixed by trusted supervisor composition. These
+   * do not originate in a user/profile resource grant and cannot be widened by
+   * the driver runtime configuration.
+   */
+  readonly reviewedSupervisorArtifacts: readonly ReviewedSupervisorAgentArtifact[];
   readonly resources: readonly AgentRuntimeResource[];
+}
+
+export interface ReviewedSupervisorAgentArtifact {
+  readonly kind: "workspace-tools-extension" | "workspace-tools-addon";
+  readonly integrityDigest: IntegrityDigest;
+  readonly sandboxPath: SandboxPath;
 }
 
 export interface AgentProcessExit {
