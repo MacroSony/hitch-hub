@@ -16,6 +16,7 @@ import type {
   InstallationId,
   PrincipalId,
   WorkspaceId,
+  WorkspaceRevisionId,
 } from "../model/primitives.js";
 import type {
   InstallationRole,
@@ -27,6 +28,11 @@ import type {
   V2RepositoryTransaction,
 } from "./database.js";
 import type { BootstrapFoundationTable } from "./foundation-rows.js";
+import {
+  assertPrincipalProvisionedRow,
+  PrincipalProvisioningIntegrityError,
+  type PrincipalProvisionedRowRef,
+} from "./principal-provisioning.js";
 
 const CONFIGURATION_REFERENCE = /^[a-z][a-z0-9-]{0,127}$/u;
 
@@ -159,7 +165,26 @@ export function assertPublishedRow(
   primaryKey: readonly string[],
   label: string,
 ): void {
-  const count = requiredCount(
+  const count = exactBootstrapPublicationCount(
+    transaction,
+    installationId,
+    table,
+    primaryKey,
+  );
+  if (count !== 1) {
+    throw new FoundationalAuthorizationIntegrityError(
+      `durable ${label} has no exact bootstrap publication provenance`,
+    );
+  }
+}
+
+function exactBootstrapPublicationCount(
+  transaction: V2RepositoryTransaction,
+  installationId: InstallationId,
+  table: BootstrapFoundationTable,
+  primaryKey: readonly string[],
+): number {
+  return requiredCount(
     transaction,
     `SELECT COUNT(*) AS count
       FROM bootstrap_publication_rows AS publication
@@ -173,10 +198,179 @@ export function assertPublishedRow(
         AND first_audit.action = 'installation-published'`,
     [table, encodeCanonicalJson(primaryKey), installationId],
   );
-  if (count !== 1) {
+}
+
+function assertAccessGrantProvenance(
+  transaction: V2RepositoryTransaction,
+  identity: LiveConnectorIdentity,
+  grantId: AccessGrantId,
+): void {
+  if (
+    exactBootstrapPublicationCount(
+      transaction,
+      identity.installationId,
+      "access_grants",
+      [grantId],
+    ) === 1
+  ) {
+    return;
+  }
+  assertExactPrincipalProvisionedRow(transaction, identity, {
+    table: "access_grants",
+    primaryKey: [grantId],
+  });
+}
+
+function assertExactPrincipalProvisionedRow(
+  transaction: V2RepositoryTransaction,
+  identity: LiveConnectorIdentity,
+  row: PrincipalProvisionedRowRef,
+): void {
+  try {
+    assertPrincipalProvisionedRow(transaction, {
+      installationId: identity.installationId,
+      principalId: identity.principalId,
+      row,
+    });
+  } catch (error) {
+    if (error instanceof PrincipalProvisioningIntegrityError) {
+      throw new FoundationalAuthorizationIntegrityError(error.message);
+    }
+    throw error;
+  }
+}
+
+export function assertPrincipalWorkspaceProvenance(
+  transaction: V2RepositoryTransaction,
+  identity: LiveConnectorIdentity,
+  workspaceId: WorkspaceId,
+  workspaceRevisionId?: WorkspaceRevisionId,
+): void {
+  const ownerBindingCount = requiredCount(
+    transaction,
+    `SELECT COUNT(*) AS count
+    FROM principal_workspace_bindings
+    WHERE principal_id = ? AND installation_id = ? AND workspace_id = ?`,
+    [identity.principalId, identity.installationId, workspaceId],
+  );
+  if (ownerBindingCount !== 1) {
     throw new FoundationalAuthorizationIntegrityError(
-      `durable ${label} has no exact bootstrap publication provenance`,
+      "durable workspace is not the principal's fixed workspace",
     );
+  }
+  const bootstrapWorkspace = exactBootstrapPublicationCount(
+    transaction,
+    identity.installationId,
+    "workspaces",
+    [workspaceId],
+  );
+  const bootstrapRevision = workspaceRevisionId === undefined
+    ? 1
+    : exactBootstrapPublicationCount(
+        transaction,
+        identity.installationId,
+        "workspace_revisions",
+        [workspaceRevisionId],
+      );
+  if (bootstrapWorkspace === 1 && bootstrapRevision === 1) return;
+
+  const revisionPredicate = workspaceRevisionId === undefined
+    ? ""
+    : "AND revisions.id = ?";
+  const rows = transaction.all(
+    `SELECT revisions.id AS workspace_revision_id,
+      resources.id AS workspace_resource_id,
+      execution_grants.execution_policy_snapshot_id AS execution_policy_snapshot_id
+    FROM workspaces
+    JOIN principal_workspace_bindings AS principal_binding
+      ON principal_binding.workspace_id = workspaces.id
+      AND principal_binding.installation_id = workspaces.installation_id
+    JOIN principals AS subject
+      ON subject.id = principal_binding.principal_id
+      AND subject.installation_id = principal_binding.installation_id
+    JOIN workspace_reference_bindings AS reference_binding
+      ON reference_binding.workspace_id = workspaces.id
+      AND reference_binding.installation_id = workspaces.installation_id
+      AND reference_binding.binding_reference = workspaces.reference
+    JOIN workspace_revisions AS revisions
+      ON revisions.id = reference_binding.workspace_revision_id
+      AND revisions.workspace_id = workspaces.id
+    JOIN workspace_revision_resources AS revision_resources
+      ON revision_resources.workspace_revision_id = revisions.id
+      AND revision_resources.ordinal = 0
+      AND revision_resources.role = 'root'
+    JOIN workspace_resources AS resources
+      ON resources.id = revision_resources.workspace_resource_id
+      AND resources.installation_id = workspaces.installation_id
+      AND resources.sandbox_path = '/workspace'
+      AND resources.maximum_access = 'read-write'
+    JOIN execution_policy_resource_grants AS execution_grants
+      ON execution_grants.workspace_resource_id = resources.id
+      AND execution_grants.access = 'read-write'
+    WHERE workspaces.id = ?
+      AND workspaces.installation_id = ?
+      AND principal_binding.principal_id = ?
+      AND principal_binding.created_actor_kind = 'principal'
+      AND (SELECT COUNT(*) FROM workspace_revisions AS all_revisions
+        WHERE all_revisions.workspace_id = workspaces.id) = 1
+      AND (SELECT COUNT(*) FROM workspace_revision_resources AS all_resources
+        WHERE all_resources.workspace_revision_id = revisions.id) = 1
+      AND (SELECT COUNT(*) FROM execution_policy_resource_grants AS execution_grants
+        WHERE execution_grants.workspace_resource_id = resources.id) = 1
+      ${revisionPredicate}`,
+    workspaceRevisionId === undefined
+      ? [workspaceId, identity.installationId, identity.principalId]
+      : [
+          workspaceId,
+          identity.installationId,
+          identity.principalId,
+          workspaceRevisionId,
+        ],
+  );
+  if (rows.length !== 1) {
+    throw new FoundationalAuthorizationIntegrityError(
+      "durable workspace has no exact bootstrap or principal-creation provenance",
+    );
+  }
+  const row = rows[0]!;
+  const revisionId = requiredText(
+    row,
+    "workspace_revision_id",
+    "workspace revision identifier",
+  );
+  const resourceId = requiredText(
+    row,
+    "workspace_resource_id",
+    "workspace resource identifier",
+  );
+  const executionPolicySnapshotId = requiredText(
+    row,
+    "execution_policy_snapshot_id",
+    "execution policy snapshot identifier",
+  );
+  for (const provisioned of [
+    { table: "principals", primaryKey: [identity.principalId] },
+    { table: "workspaces", primaryKey: [workspaceId] },
+    {
+      table: "principal_workspace_bindings",
+      primaryKey: [identity.principalId],
+    },
+    { table: "workspace_resources", primaryKey: [resourceId] },
+    { table: "workspace_revisions", primaryKey: [revisionId] },
+    {
+      table: "workspace_revision_resources",
+      primaryKey: [revisionId, resourceId],
+    },
+    {
+      table: "workspace_reference_bindings",
+      primaryKey: [workspaceId],
+    },
+    {
+      table: "execution_policy_resource_grants",
+      primaryKey: [executionPolicySnapshotId, resourceId],
+    },
+  ] as const) {
+    assertExactPrincipalProvisionedRow(transaction, identity, provisioned);
   }
 }
 
@@ -245,7 +439,7 @@ interface ConfigurationResourceState {
 
 function readConfigurationResource(
   transaction: V2RepositoryTransaction,
-  installationId: InstallationId,
+  identity: LiveConnectorIdentity,
   resource: SessionConfigurationResourceRef,
 ): ConfigurationResourceState {
   const query = (
@@ -266,7 +460,7 @@ function readConfigurationResource(
         table,
       });
     }
-    if (row.installation_id !== installationId) {
+    if (row.installation_id !== identity.installationId) {
       return Object.freeze({
         exists: false,
         revoked: false,
@@ -287,13 +481,21 @@ function readConfigurationResource(
       }
       revoked = state === "revoked";
     }
-    assertPublishedRow(
-      transaction,
-      installationId,
-      table,
-      [id],
-      `${resource.kind} resource`,
-    );
+    if (resource.kind === "workspace") {
+      assertPrincipalWorkspaceProvenance(
+        transaction,
+        identity,
+        decodeServiceId("Workspace", id),
+      );
+    } else {
+      assertPublishedRow(
+        transaction,
+        identity.installationId,
+        table,
+        [id],
+        `${resource.kind} resource`,
+      );
+    }
     return Object.freeze({ exists: true, revoked, table });
   };
 
@@ -636,13 +838,7 @@ export class SQLiteFoundationalAuthorizationReads {
     const grantId = decodeAccessGrantId(
       requiredText(rows[0]!, "id", "access-grant identifier"),
     );
-    assertPublishedRow(
-      transaction,
-      identity.installationId,
-      "access_grants",
-      [grantId],
-      "installation role grant",
-    );
+    assertAccessGrantProvenance(transaction, identity, grantId);
     return Object.freeze({
       status: requireGrantState(rows[0]!),
       grantId,
@@ -679,17 +875,11 @@ export class SQLiteFoundationalAuthorizationReads {
     const grantId = decodeAccessGrantId(
       requiredText(rows[0]!, "id", "access-grant identifier"),
     );
-    assertPublishedRow(
-      transaction,
-      identity.installationId,
-      "access_grants",
-      [grantId],
-      "configuration-use grant",
-    );
+    assertAccessGrantProvenance(transaction, identity, grantId);
     const grantState = requireGrantState(rows[0]!);
     const resourceState = readConfigurationResource(
       transaction,
-      identity.installationId,
+      identity,
       resource,
     );
     if (!resourceState.exists) {
@@ -761,10 +951,15 @@ export class SQLiteFoundationalAuthorizationReads {
     this.#requireTransactionIdentity(transaction, identity);
     const decoded = decodeConfigurationReference(reference);
     const rows = transaction.all(
-      `SELECT id
+      `SELECT workspaces.id AS id
       FROM workspaces
-      WHERE installation_id = ? AND reference = ?`,
-      [identity.installationId, decoded],
+      JOIN principal_workspace_bindings AS principal_binding
+        ON principal_binding.workspace_id = workspaces.id
+        AND principal_binding.installation_id = workspaces.installation_id
+      WHERE workspaces.installation_id = ?
+        AND workspaces.reference = ?
+        AND principal_binding.principal_id = ?`,
+      [identity.installationId, decoded, identity.principalId],
     );
     if (rows.length === 0) return Object.freeze({ status: "not-found" });
     if (rows.length !== 1) {
@@ -776,12 +971,10 @@ export class SQLiteFoundationalAuthorizationReads {
       "Workspace",
       requiredText(rows[0]!, "id", "workspace identifier"),
     );
-    assertPublishedRow(
+    assertPrincipalWorkspaceProvenance(
       transaction,
-      identity.installationId,
-      "workspaces",
-      [workspaceId],
-      "workspace",
+      identity,
+      workspaceId,
     );
     return Object.freeze({
       status: "resolved" as const,

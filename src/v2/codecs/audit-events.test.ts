@@ -141,6 +141,7 @@ scenarioCase({
           action: "turn-admitted",
           sessionId: "audit:Session:0001",
           turnId: "audit:Turn:0001",
+          endpointBindingId: "audit:SessionEndpointBinding:0001",
           ...forbidden,
         },
         "unknown-field",

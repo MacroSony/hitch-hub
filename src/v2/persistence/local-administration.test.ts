@@ -152,6 +152,15 @@ test("local administrator atomically creates a fixed principal workspace and sha
         ),
         2,
       );
+      assert.equal(
+        database.transaction((transaction) =>
+          transaction.get(
+            `SELECT COUNT(*) AS count FROM principal_provisioning_rows
+            WHERE principal_id = 'admin:Principal:0001'`,
+          )?.count,
+        ),
+        18,
+      );
       assert.deepEqual(
         database.transaction((transaction) =>
           transaction.get(

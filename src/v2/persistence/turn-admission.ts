@@ -27,7 +27,10 @@ import type {
   QueuedCancellationUnitOfWork,
   TurnAdmissionUnitOfWork,
 } from "../model/application.js";
-import type { AuditActorRef } from "../model/identity-access.js";
+import type {
+  AuditActorRef,
+  SessionConfigurationResourceRef,
+} from "../model/identity-access.js";
 import type {
   Attachment,
   TurnResponseDelivery,
@@ -61,6 +64,8 @@ import {
 } from "./audit-repository.js";
 import type { V2Database, V2RepositoryTransaction } from "./database.js";
 import {
+  assertPrincipalWorkspaceProvenance,
+  assertPublishedRow,
   SQLiteFoundationalAuthorizationReads,
   type LiveConnectorIdentity,
 } from "./foundational-authorization.js";
@@ -518,16 +523,19 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
   ):
     | {
         readonly status: "authorized";
-        readonly bindingId: SessionEndpointBindingId;
+        readonly bindingId: SessionEndpointBindingId | undefined;
       }
     | { readonly status: "denied" } {
+    if (!this.#configurationIsActive(transaction, identity, session)) {
+      return Object.freeze({ status: "denied" as const });
+    }
     const bindingRow = transaction.get(
       `SELECT id, state FROM session_endpoint_bindings
       WHERE session_id = ? AND endpoint_id = ?`,
       [session.sessionId, identity.endpointId],
     );
     if (
-      bindingRow === undefined ||
+      bindingRow !== undefined &&
       requiredText(bindingRow, "state", "session endpoint binding") !==
         "active"
     ) {
@@ -545,11 +553,161 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     }
     return Object.freeze({
       status: "authorized" as const,
-      bindingId: decodeServiceId(
-        "SessionEndpointBinding",
-        requiredText(bindingRow, "id", "session endpoint binding"),
-      ),
+      bindingId: bindingRow === undefined
+        ? undefined
+        : decodeServiceId(
+            "SessionEndpointBinding",
+            requiredText(bindingRow, "id", "session endpoint binding"),
+          ),
     });
+  }
+
+  #configurationIsActive(
+    transaction: V2RepositoryTransaction,
+    identity: LiveConnectorIdentity,
+    session: SessionResolution,
+  ): boolean {
+    const pinned = transaction.get(
+      `SELECT profile_revisions.profile_id AS profile_id,
+        workspace_revisions.workspace_id AS workspace_id,
+        workspace_revisions.id AS workspace_revision_id,
+        execution_snapshots.policy_id AS execution_policy_id,
+        turn_snapshots.policy_id AS turn_policy_id
+      FROM session_specs AS specs
+      JOIN agent_profile_revisions AS profile_revisions
+        ON profile_revisions.id = specs.agent_profile_revision_id
+      JOIN workspace_revisions
+        ON workspace_revisions.id = specs.workspace_revision_id
+      JOIN execution_policy_snapshots AS execution_snapshots
+        ON execution_snapshots.id = specs.execution_policy_snapshot_id
+      JOIN turn_policy_snapshots AS turn_snapshots
+        ON turn_snapshots.id = specs.turn_policy_snapshot_id
+      WHERE specs.id = ?`,
+      [session.specId],
+    );
+    if (pinned === undefined) {
+      throw new TurnAdmissionIntegrityError(
+        "session spec cannot resolve its pinned configuration",
+      );
+    }
+    const workspaceId = decodeServiceId(
+      "Workspace",
+      requiredText(pinned, "workspace_id", "session workspace"),
+    );
+    assertPrincipalWorkspaceProvenance(
+      transaction,
+      identity,
+      workspaceId,
+      decodeServiceId(
+        "WorkspaceRevision",
+        requiredText(
+          pinned,
+          "workspace_revision_id",
+          "session workspace revision",
+        ),
+      ),
+    );
+
+    const extensionRows = transaction.all(
+      `SELECT snapshots.extension_id
+      FROM session_spec_extension_grants AS grants
+      JOIN extension_grant_snapshots AS snapshots
+        ON snapshots.id = grants.extension_grant_snapshot_id
+      WHERE grants.session_spec_id = ?
+      ORDER BY grants.ordinal`,
+      [session.specId],
+    );
+    const providerRows = transaction.all(
+      `SELECT bindings.provider_id, bindings.provider_connection_id,
+        bindings.credential_binding_id, connections.installation_id
+      FROM session_spec_provider_bindings AS bindings
+      JOIN provider_connections AS connections
+        ON connections.id = bindings.provider_connection_id
+        AND connections.provider_id = bindings.provider_id
+      WHERE bindings.session_spec_id = ?`,
+      [session.specId],
+    );
+    if (providerRows.length !== 1) {
+      throw new TurnAdmissionIntegrityError(
+        "session spec provider binding is missing or ambiguous",
+      );
+    }
+    const provider = providerRows[0]!;
+    if (provider.installation_id !== identity.installationId) {
+      throw new TurnAdmissionIntegrityError(
+        "session provider connection belongs to another installation",
+      );
+    }
+    const providerConnectionId = decodeServiceId(
+      "ProviderConnection",
+      requiredText(
+        provider,
+        "provider_connection_id",
+        "session provider connection",
+      ),
+    );
+    assertPublishedRow(
+      transaction,
+      identity.installationId,
+      "provider_connections",
+      [providerConnectionId],
+      "session provider connection",
+    );
+
+    const resources: readonly SessionConfigurationResourceRef[] = [
+      {
+        kind: "agent-profile",
+        id: decodeServiceId(
+          "AgentProfile",
+          requiredText(pinned, "profile_id", "session agent profile"),
+        ),
+      },
+      { kind: "workspace", id: workspaceId },
+      {
+        kind: "execution-policy",
+        id: decodeServiceId(
+          "ExecutionPolicy",
+          requiredText(
+            pinned,
+            "execution_policy_id",
+            "session execution policy",
+          ),
+        ),
+      },
+      {
+        kind: "turn-policy",
+        id: decodeServiceId(
+          "TurnPolicy",
+          requiredText(pinned, "turn_policy_id", "session turn policy"),
+        ),
+      },
+      ...extensionRows.map((row): SessionConfigurationResourceRef => ({
+        kind: "extension",
+        id: decodeServiceId(
+          "Extension",
+          requiredText(row, "extension_id", "session extension"),
+        ),
+      })),
+      {
+        kind: "provider-credential-binding",
+        id: decodeServiceId(
+          "ProviderCredentialBinding",
+          requiredText(
+            provider,
+            "credential_binding_id",
+            "session provider credential binding",
+          ),
+        ),
+      },
+    ];
+    return resources.every(
+      (resource) =>
+        this.#reads.readConfigurationUse(
+          transaction,
+          identity,
+          resource,
+        ).status === "active",
+    );
   }
 
   /**
@@ -738,7 +896,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     transaction: V2RepositoryTransaction,
     identity: LiveConnectorIdentity,
     session: SessionResolution,
-    bindingId: SessionEndpointBindingId,
+    existingBindingId: SessionEndpointBindingId | undefined,
     input: AdmitTurnInput,
     validated: {
       readonly text: string;
@@ -748,6 +906,32 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     },
   ): TurnAdmissionResult {
     const now = this.#clock.now();
+    const bindingId = existingBindingId ??
+      this.#ids.next("SessionEndpointBinding");
+    if (existingBindingId === undefined) {
+      this.#insertOne(
+        transaction,
+        `INSERT INTO session_endpoint_bindings (
+          id, kind, session_id, endpoint_id, created_by_principal_id,
+          state, suspended_at, suspended_actor_kind,
+          suspended_actor_principal_id, suspended_actor_system_component,
+          suspended_reason, revoked_at, revoked_actor_kind,
+          revoked_actor_principal_id, revoked_actor_system_component,
+          created_at, updated_at
+        ) VALUES (
+          ?, 'private', ?, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL,
+          NULL, NULL, NULL, NULL, ?, ?
+        )`,
+        [
+          bindingId,
+          session.sessionId,
+          identity.endpointId,
+          identity.principalId,
+          now,
+          now,
+        ],
+      );
+    }
     const profileRow = transaction.get(
       `SELECT default_provider_id, default_model_id
       FROM agent_profile_revisions WHERE id = ?`,
@@ -946,6 +1130,7 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       action: "turn-admitted",
       sessionId: session.sessionId,
       turnId,
+      endpointBindingId: bindingId,
       occurredAt: now,
     });
     const auditEvents = Object.freeze(
@@ -1064,12 +1249,16 @@ export class SQLiteTurnCancellationUnitOfWork
   readonly #clock: Clock;
   readonly #ids: IdSource;
   readonly #contextVerifier: TrustedAuthorizationContextVerifier;
+  readonly #reads: SQLiteFoundationalAuthorizationReads;
 
   constructor(options: SQLiteTurnAdmissionUnitOfWorkOptions) {
     this.#database = options.database;
     this.#clock = options.clock;
     this.#ids = options.ids;
     this.#contextVerifier = options.contextVerifier;
+    this.#reads = new SQLiteFoundationalAuthorizationReads({
+      contextVerifier: options.contextVerifier,
+    });
   }
 
   async cancelStillQueuedTurn(
@@ -1101,19 +1290,22 @@ export class SQLiteTurnCancellationUnitOfWork
     if (verified === undefined) {
       return Object.freeze({ status: "denied" as const });
     }
-    const row = transaction.get(
-      `SELECT session_id, requester_principal_id FROM turns WHERE id = ?`,
-      [turnId],
-    );
-    if (row === undefined) {
-      return Object.freeze({ status: "unknown-turn" as const });
-    }
     if (verified.kind === "connector") {
-      const principalId = verified.context.actor.principalId;
-      if (
-        requiredText(row, "requester_principal_id", "turn") !== principalId
-      ) {
+      const identity = this.#reads.readLiveConnectorIdentity(
+        transaction,
+        verified.context,
+      );
+      if (identity.status === "denied") {
         return Object.freeze({ status: "denied" as const });
+      }
+      const principalId = identity.principalId;
+      const owned = transaction.get(
+        `SELECT 1 AS present FROM turns
+        WHERE id = ? AND requester_principal_id = ?`,
+        [turnId, principalId],
+      );
+      if (owned === undefined) {
+        return Object.freeze({ status: "unknown-turn" as const });
       }
       return Object.freeze({
         status: "authorized" as const,
@@ -1125,6 +1317,13 @@ export class SQLiteTurnCancellationUnitOfWork
     }
     if (verified.component !== "turn-coordinator") {
       return Object.freeze({ status: "denied" as const });
+    }
+    const row = transaction.get(
+      `SELECT 1 AS present FROM turns WHERE id = ?`,
+      [turnId],
+    );
+    if (row === undefined) {
+      return Object.freeze({ status: "unknown-turn" as const });
     }
     return Object.freeze({
       status: "authorized" as const,

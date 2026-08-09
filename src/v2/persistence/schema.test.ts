@@ -28,7 +28,7 @@ const REQUIRED_DURABLE_TABLES = [
   "workspace_reference_bindings", "agent_resource_artifact_bindings", "extension_artifact_bindings", "provider_artifact_bindings",
   "session_specs", "session_spec_resource_snapshots", "session_spec_extension_grants", "session_spec_provider_bindings", "sessions", "session_metadata", "session_lifecycle", "session_runtime_state", "session_endpoint_bindings",
   "attachments", "turn_input_snapshots", "turn_input_blocks", "turns", "turn_inference_resolutions", "turn_queue_entries", "agent_dispatch_attempts", "turn_runtime_states", "turn_events", "turn_messages", "tool_invocations", "turn_interactions", "turn_interaction_advertised_options", "turn_interaction_options", "interaction_response_dispatches",
-  "worker_leases", "credential_leases", "agent_resume_handles", "turn_recovery_records", "turn_inference_usage_ledgers", "inference_request_reservations", "inference_forwarding_attempts", "turn_terminal_responses", "turn_terminal_response_messages", "turn_response_deliveries", "turn_response_delivery_attempts", "audit_envelopes", "bootstrap_publication_rows",
+  "worker_leases", "credential_leases", "agent_resume_handles", "turn_recovery_records", "turn_inference_usage_ledgers", "inference_request_reservations", "inference_forwarding_attempts", "turn_terminal_responses", "turn_terminal_response_messages", "turn_response_deliveries", "turn_response_delivery_attempts", "audit_envelopes", "bootstrap_publication_rows", "principal_provisioning_rows",
 ] as const;
 
 const FORBIDDEN_DEFERRED_TABLES = [

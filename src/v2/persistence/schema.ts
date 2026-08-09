@@ -1156,6 +1156,16 @@ const HITCH_V2_SCHEMA_DDL_UNQUALIFIED = [
     last_published_audit_id TEXT NOT NULL REFERENCES audit_envelopes(id),
     PRIMARY KEY (table_name, primary_key_json)
   )`,
+  `CREATE TABLE principal_provisioning_rows (
+    installation_id TEXT NOT NULL REFERENCES installations(id),
+    principal_id TEXT NOT NULL REFERENCES principals(id),
+    table_name TEXT NOT NULL CHECK (table_name IN ('principals', 'principal_reference_bindings', 'principal_execution_capacity', 'access_grants', 'workspaces', 'principal_workspace_bindings', 'workspace_resources', 'workspace_revisions', 'workspace_revision_resources', 'workspace_reference_bindings', 'execution_policy_resource_grants')),
+    primary_key_json TEXT NOT NULL CHECK (json_valid(primary_key_json)),
+    row_digest TEXT NOT NULL CHECK (length(row_digest) = 71 AND substr(row_digest, 1, 7) = 'sha256:'),
+    created_audit_id TEXT NOT NULL REFERENCES audit_envelopes(id),
+    PRIMARY KEY (installation_id, principal_id, table_name, primary_key_json),
+    FOREIGN KEY (principal_id, installation_id) REFERENCES principals(id, installation_id)
+  )`,
   `CREATE UNIQUE INDEX uq_installations_first_slice_singleton ON installations ((1))`,
   `CREATE UNIQUE INDEX uq_identity_bindings_active_local_subject ON identity_bindings (installation_id, local_host_id, subject_id) WHERE source_kind = 'local-peer' AND state = 'active'`,
   `CREATE UNIQUE INDEX uq_identity_bindings_active_mtls_fingerprint ON identity_bindings (installation_id, subject_id) WHERE source_kind = 'mtls-client' AND state = 'active'`,

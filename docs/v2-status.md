@@ -47,8 +47,19 @@ what is blocked.
   and CLI coverage that still reaches administration only through the
   owner-private socket. The transport has real mTLS handshake tests, but it is
   not composed into production `serve`; V2-M07 owns that configuration and
-  lifecycle. Existing session/Turn services still require V2-M03
-  principal-generalized authorization before remote multi-user use is claimed.
+  lifecycle.
+- V2-M03 is an independently reviewed working-tree candidate. It generalizes
+  session creation, Turn admission/query/cancellation, live configuration and
+  credential reauthorization, audit attribution, idempotency, and atomic
+  one-active/three-pending FIFO capacity to the authenticated principal. Two
+  verifier-minted certificate principals are isolated across private sessions,
+  Turns, cancellation, terminal results, queue ordinals, and endpoint rotation;
+  disabled/revoked or stale configuration authority fails closed. Exact
+  immutable row-digest provenance admits locally provisioned principal graphs
+  without weakening bootstrap authorization. This is application-boundary
+  evidence only: V2-M04 through V2-M07 still own sandboxing, provider execution,
+  production claim/terminalization, ingress composition, and the end-to-end MVP
+  gate.
 - The multi-user agentic MVP boundary, explicit deferrals, seven-slice mapping,
   and source-of-truth transition were independently reviewed and committed in
   `f7e9669`.
@@ -98,7 +109,7 @@ what is blocked.
   hardens replay ordering, attachment authentication provenance, invalid-ID
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
-  current working tree. The v2 suite currently has 313 passing tests.
+  current working tree. The v2 suite currently has 322 passing tests.
 - V2-E01 is committed after two-pass independent review. The Pi sidecar
   receives an empty Bubblewrap network namespace, an exact three-entry
   environment, and a fixed
@@ -170,8 +181,12 @@ what is blocked.
 
 ## Working-tree review candidates
 
-None. Passing deterministic tests remains necessary but does not by itself
-move future work to `Committed`; each bounded substep still requires review,
+| Task | State | Evidence |
+| --- | --- | --- |
+| V2-M03 — multi-user application enforcement | Review candidate | Independently approved after three implementation checkpoints; typecheck, build, and 322/322 v2 tests pass |
+
+Passing deterministic tests remains necessary but does not by itself move
+future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
@@ -180,7 +195,7 @@ verification, and its own commit.
 | --- | --- | --- |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
 | V2-M02 — mTLS ingress and local administration | Committed | `e69f0c9` |
-| V2-M03 — multi-user application enforcement | Ready | V2-M01 and V2-M02 trusted authentication contexts are committed |
+| V2-M03 — multi-user application enforcement | Review candidate | Independently reviewed in the working tree; commit the frozen candidate |
 | V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
 | V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
 | V2-M06 — thin coordinator and durable query | Waiting | V2-M03 through V2-M05 |
@@ -237,9 +252,12 @@ should expose integration problems earlier than the original wave ordering.
    private owner-only endpoints, fixed per-principal workspaces, and
    principal-wide execution capacity.
 5. V2-M02 private-network mTLS ingress and local-only user administration are
-   independently reviewed and committed in `e69f0c9`. Complete V2-M03
-   cross-principal application enforcement next. No runtime is connected until
-   the two-principal denial matrix passes.
+   independently reviewed and committed in `e69f0c9`. V2-M03 cross-principal
+   application enforcement is an independently reviewed working-tree
+   candidate: the two-principal denial, capacity, revocation, configuration,
+   certificate-rotation, and durable-provenance matrix passes. Commit that
+   frozen candidate, then proceed to V2-M04. No production runtime is connected
+   by V2-M03.
 6. Complete V2-M04 and V2-M05: the minimal Pi driver, one fresh bounded
    Bubblewrap worker per Turn, verified E01 sidecar, one-shot broker authority,
    and secure launch composition.
@@ -256,17 +274,21 @@ for 16 of the original 21 single-owner scenarios, and the current suite remains
 required. It does not define completion of the revised MVP.
 
 V2-M01 adds a separate focused ten-scenario multi-user MVP registry without
-relabeling the historical cases. Current M01/M02 evidence marks exact
+relabeling the historical cases. Current M01-M03 evidence marks exact
 certificate identity and real mTLS ingress (`V2-MVP-S01`), ownership/capacity
 correlation (`V2-MVP-S02`), fresh-authentication denial after disable/revoke
 (`V2-MVP-S04`), and principal-wide queue ceilings (`V2-MVP-S07`) in progress.
-It does not claim completion of cross-principal application denial,
-content-blind containment beyond the bounded local lifecycle commands,
-dispatch/result revocation, workspace/sandbox isolation, full resource
-ceilings, one-shot provider invocation, cleanup, uncertain-send non-replay, or
-the two-principal end-to-end Turn; those remain M03-M07 gates. Exhaustive crash
-permutations, provider/OS breadth, soak/load work, and the complete original
-21-scenario matrix are explicitly deferred.
+M03 adds ordinary application tests for owner-private session/Turn operations,
+opaque foreign/missing lookups, endpoint rotation, live disable/revocation and
+configuration denial, independent queue capacity/FIFO, and development-claim
+revocation. These strengthen the in-progress evidence but do not mark the
+focused registry scenarios complete. Content-blind containment beyond the
+bounded local lifecycle commands, real workspace/sandbox isolation, full
+resource ceilings, one-shot provider invocation, production dispatch and
+terminalization, cleanup, uncertain-send non-replay, and the two-principal
+end-to-end agent Turn remain M04-M07 gates. Exhaustive crash permutations,
+provider/OS breadth, soak/load work, and the complete original 21-scenario
+matrix are explicitly deferred.
 
 A green `npm run test:v2` verifies the implemented foundation; it does not mean
 that the multi-user MVP is accepted.

@@ -33,6 +33,7 @@ import {
   SQLiteFoundationalAuthorizationReads,
   type LiveConnectorIdentity,
 } from "./foundational-authorization.js";
+import { recordPrincipalProvisionedRows } from "./principal-provisioning.js";
 
 export interface SQLiteLocalAdministrationOptions {
   readonly database: V2Database;
@@ -384,6 +385,7 @@ export class SQLiteLocalAdministration implements LocalAdministrationPort {
         ORDER BY resource_kind, resource_id`,
         [administrator.installationId, administrator.principalId],
       );
+      const sharedGrantIds: string[] = [];
       for (const row of shared) {
         const resourceKind = requiredText(
           row,
@@ -395,9 +397,14 @@ export class SQLiteLocalAdministration implements LocalAdministrationPort {
           "resource_id",
           "shared configuration resource identifier",
         );
+        const sharedGrantId = decodeServiceId(
+          "AccessGrant",
+          this.#ids.next("AccessGrant"),
+        );
+        sharedGrantIds.push(sharedGrantId);
         this.#insertGrant(
           transaction,
-          decodeServiceId("AccessGrant", this.#ids.next("AccessGrant")),
+          sharedGrantId,
           administrator,
           principalId,
           now,
@@ -427,22 +434,20 @@ export class SQLiteLocalAdministration implements LocalAdministrationPort {
           "administrator execution policy snapshot is missing or ambiguous",
         );
       }
+      const executionPolicySnapshotId = requiredText(
+        executionSnapshots[0]!,
+        "id",
+        "execution policy snapshot identifier",
+      );
       inserted(
         transaction,
         `INSERT INTO execution_policy_resource_grants (
           execution_policy_snapshot_id, workspace_resource_id, access
         ) VALUES (?, ?, 'read-write')`,
-        [
-          requiredText(
-            executionSnapshots[0]!,
-            "id",
-            "execution policy snapshot identifier",
-          ),
-          workspaceResourceId,
-        ],
+        [executionPolicySnapshotId, workspaceResourceId],
         "workspace execution grant create",
       );
-      insertAuditEnvelope(transaction, {
+      const audit = insertAuditEnvelope(transaction, {
         id: auditId,
         installationId: administrator.installationId,
         actor: { kind: "principal", principalId: administrator.principalId },
@@ -450,6 +455,53 @@ export class SQLiteLocalAdministration implements LocalAdministrationPort {
         action: "principal-created",
         subjectPrincipalId: principalId,
         occurredAt: now,
+      });
+      recordPrincipalProvisionedRows(transaction, {
+        installationId: administrator.installationId,
+        principalId,
+        createdAuditId: audit.id,
+        rows: [
+          { table: "principals", primaryKey: [principalId] },
+          {
+            table: "principal_reference_bindings",
+            primaryKey: [principalId],
+          },
+          {
+            table: "principal_execution_capacity",
+            primaryKey: [principalId],
+          },
+          { table: "workspaces", primaryKey: [workspaceId] },
+          {
+            table: "principal_workspace_bindings",
+            primaryKey: [principalId],
+          },
+          {
+            table: "workspace_resources",
+            primaryKey: [workspaceResourceId],
+          },
+          {
+            table: "workspace_revisions",
+            primaryKey: [workspaceRevisionId],
+          },
+          {
+            table: "workspace_revision_resources",
+            primaryKey: [workspaceRevisionId, workspaceResourceId],
+          },
+          {
+            table: "workspace_reference_bindings",
+            primaryKey: [workspaceId],
+          },
+          {
+            table: "execution_policy_resource_grants",
+            primaryKey: [executionPolicySnapshotId, workspaceResourceId],
+          },
+          ...[roleGrantId, workspaceGrantId, ...sharedGrantIds].map(
+            (grantId) => ({
+              table: "access_grants" as const,
+              primaryKey: [grantId],
+            }),
+          ),
+        ],
       });
       return succeeded({ kind: "principal-created", principalId, workspaceId });
     });

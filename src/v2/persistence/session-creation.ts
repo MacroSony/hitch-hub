@@ -55,6 +55,7 @@ import type {
 } from "./database.js";
 import type { BootstrapFoundationTable } from "./foundation-rows.js";
 import {
+  assertPrincipalWorkspaceProvenance,
   assertPublishedRow,
   requiredText,
   SQLiteFoundationalAuthorizationReads,
@@ -201,7 +202,7 @@ export class SQLiteSessionCreationUnitOfWork
 
     const selection = this.#selectCurrentConfiguration(
       transaction,
-      installationId,
+      identity,
       profile.profileId,
       workspace.workspaceId,
     );
@@ -263,6 +264,7 @@ export class SQLiteSessionCreationUnitOfWork
     ownerId: string,
     kind: Kind,
     label: string,
+    identity?: LiveConnectorIdentity,
   ): Id<Kind> {
     const rows = transaction.all(
       `SELECT id FROM "${table}"
@@ -277,13 +279,22 @@ export class SQLiteSessionCreationUnitOfWork
       );
     }
     const id = requiredText(rows[0]!, "id", `${label} revision`);
-    assertPublishedRow(
-      transaction,
-      installationId,
-      table,
-      [id],
-      `${label} revision`,
-    );
+    if (table === "workspace_revisions" && identity !== undefined) {
+      assertPrincipalWorkspaceProvenance(
+        transaction,
+        identity,
+        decodeServiceId("Workspace", ownerId),
+        decodeServiceId("WorkspaceRevision", id),
+      );
+    } else {
+      assertPublishedRow(
+        transaction,
+        installationId,
+        table,
+        [id],
+        `${label} revision`,
+      );
+    }
     return decodeServiceId(kind, id);
   }
 
@@ -311,7 +322,7 @@ export class SQLiteSessionCreationUnitOfWork
 
   #selectCurrentConfiguration(
     transaction: V2RepositoryTransaction,
-    installationId: InstallationId,
+    identity: LiveConnectorIdentity,
     profileId: string,
     workspaceId: string,
   ): CurrentConfigurationSelection & {
@@ -319,6 +330,7 @@ export class SQLiteSessionCreationUnitOfWork
     readonly turnPolicyId: TurnPolicyId;
     readonly extensionIds: readonly ExtensionId[];
   } {
+    const installationId = identity.installationId;
     const profileRevisionId = this.#currentRevision(
       transaction,
       installationId,
@@ -336,6 +348,7 @@ export class SQLiteSessionCreationUnitOfWork
       workspaceId,
       "WorkspaceRevision",
       "workspace",
+      identity,
     );
     const executionPolicyId = this.#solePolicy(
       transaction,

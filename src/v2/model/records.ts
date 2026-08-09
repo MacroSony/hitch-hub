@@ -351,6 +351,7 @@ export type AuditEvent =
       readonly action: "turn-admitted";
       readonly sessionId: SessionId;
       readonly turnId: TurnId;
+      readonly endpointBindingId: SessionEndpointBindingId;
     }
   | {
       readonly action: "turn-state-transitioned";

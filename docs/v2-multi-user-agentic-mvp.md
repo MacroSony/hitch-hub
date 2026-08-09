@@ -231,9 +231,11 @@ by the smallest dependency-complete MVP slices:
    - publish operator guidance for certificate, user, workspace, credential,
      backup, revocation, and upgrade procedures.
 
-V2-M01 and V2-M02 are committed. V2-M03 is the next dependency-ordered
-implementation assignment. V2-007 and pure V2-010A work may proceed
-independently only when they do not encode the old singleton-owner assumption.
+V2-M01 and V2-M02 are committed. V2-M03 is independently reviewed in the
+current working tree; after its frozen candidate is committed, V2-M04 is the
+next dependency-ordered implementation assignment. V2-007 and pure V2-010A
+work may proceed independently only when they do not encode the old
+singleton-owner assumption.
 
 ## Explicitly deferred from this MVP
 

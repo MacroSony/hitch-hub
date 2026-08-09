@@ -464,8 +464,7 @@ export class SQLiteWalkingSkeletonTurnResultQuery
       return Object.freeze({ kind: "turn-read-denied" as const });
     }
     const turn = transaction.get(
-      `SELECT session_id, requester_principal_id, endpoint_id,
-        endpoint_binding_id
+      `SELECT session_id, requester_principal_id
       FROM turns WHERE id = ?`,
       [turnId],
     );
@@ -474,22 +473,9 @@ export class SQLiteWalkingSkeletonTurnResultQuery
     }
     if (
       requiredText(turn, "requester_principal_id", "turn") !==
-        identity.principalId ||
-      requiredText(turn, "endpoint_id", "turn") !== identity.endpointId
+        identity.principalId
     ) {
-      return Object.freeze({ kind: "turn-read-denied" as const });
-    }
-    const binding = transaction.get(
-      `SELECT state FROM session_endpoint_bindings
-      WHERE id = ? AND session_id = ? AND endpoint_id = ?`,
-      [
-        requiredText(turn, "endpoint_binding_id", "turn"),
-        requiredText(turn, "session_id", "turn"),
-        identity.endpointId,
-      ],
-    );
-    if (binding === undefined || binding.state !== "active") {
-      return Object.freeze({ kind: "turn-read-denied" as const });
+      return Object.freeze({ kind: "turn-not-found" as const });
     }
     const runtimeRow = transaction.get(
       `SELECT status, attempt_id, requested_at, requested_actor_kind,

@@ -74,6 +74,7 @@ const AUDIT_EVENT_FIELDS = {
   "turn-admitted": [
     { field: "sessionId", kind: "Session" },
     { field: "turnId", kind: "Turn" },
+    { field: "endpointBindingId", kind: "SessionEndpointBinding" },
   ],
   "turn-state-transitioned": [
     { field: "sessionId", kind: "Session" },
