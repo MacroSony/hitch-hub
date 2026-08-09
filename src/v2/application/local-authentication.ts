@@ -357,14 +357,15 @@ function insertAuthenticationRequest(
   const result = transaction.run(
     `INSERT INTO authentication_requests (
       id, installation_id, evidence_kind, socket_security,
-      outcome_status, principal_id, identity_binding_id, assurance,
+      binding_source_kind, outcome_status, principal_id, identity_binding_id, assurance,
       rejection_reason, decided_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       decision.requestId,
       decision.installationId,
       "local-peer-owner-socket",
       "service-owned-0700-parent-and-0600-socket",
+      authenticated === undefined ? null : "local-peer",
       decision.outcome.status,
       authenticated?.principalId ?? null,
       authenticated?.identityBindingId ?? null,

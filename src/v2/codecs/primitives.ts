@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import { posix } from "node:path";
 
 import type {
   AgentImageMimeType,
+  ClientCertificateFingerprint,
+  ClientCertificateTrustRootId,
   Id,
   InferenceRequestFingerprint,
   IntegrityDigest,
@@ -75,6 +78,10 @@ const SAFE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?$/u;
 const CANONICAL_TIMESTAMP =
   /^(?!0000)(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
+const SAFE_CONFIGURATION_REFERENCE =
+  /^[A-Za-z0-9](?:[A-Za-z0-9._:@-]{0,126}[A-Za-z0-9])?$/u;
+
+export const MAXIMUM_CLIENT_CERTIFICATE_DER_BYTES = 65_536;
 
 export function decodeServiceId<Kind extends ServiceIdKind>(
   kind: Kind,
@@ -399,6 +406,60 @@ export function decodeIntegrityDigest(
     codecFail(path, "invalid-format", "expected sha256:<64 lowercase hex digits>");
   }
   return value as IntegrityDigest;
+}
+
+export function decodeClientCertificateFingerprint(
+  input: unknown,
+  path: CodecPath = [],
+): ClientCertificateFingerprint {
+  const value = decodeString(input, path);
+  if (!SHA256.test(value)) {
+    codecFail(
+      path,
+      "invalid-format",
+      "expected a client certificate fingerprint as sha256:<64 lowercase hex digits>",
+    );
+  }
+  return value as ClientCertificateFingerprint;
+}
+
+export function decodeClientCertificateTrustRootId(
+  input: unknown,
+  path: CodecPath = [],
+): ClientCertificateTrustRootId {
+  const value = decodeString(input, path);
+  if (!SAFE_CONFIGURATION_REFERENCE.test(value) || value.includes("..")) {
+    codecFail(
+      path,
+      "invalid-format",
+      "client certificate trust-root ID must be a 1-128 character safe opaque reference",
+    );
+  }
+  return value as ClientCertificateTrustRootId;
+}
+
+/** Hashes every byte of the exact DER leaf-certificate representation. */
+export function fingerprintClientCertificateDer(
+  certificateDer: Uint8Array,
+  path: CodecPath = [],
+): ClientCertificateFingerprint {
+  if (!(certificateDer instanceof Uint8Array)) {
+    codecFail(path, "invalid-type", "client certificate DER must be bytes");
+  }
+  if (
+    certificateDer.byteLength === 0 ||
+    certificateDer.byteLength > MAXIMUM_CLIENT_CERTIFICATE_DER_BYTES
+  ) {
+    codecFail(
+      path,
+      "out-of-range",
+      `client certificate DER must contain 1-${MAXIMUM_CLIENT_CERTIFICATE_DER_BYTES} bytes`,
+    );
+  }
+  return decodeClientCertificateFingerprint(
+    `sha256:${createHash("sha256").update(certificateDer).digest("hex")}`,
+    path,
+  );
 }
 
 export function decodeInferenceRequestFingerprint(

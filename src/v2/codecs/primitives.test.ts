@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { scenarioCase } from "../acceptance/runner.js";
+import { mvpScenarioCase, scenarioCase } from "../acceptance/runner.js";
 import {
   CodecDecodeError,
   decodeAgentImageMimeType,
   decodeBoundedArray,
   decodeBoundedString,
+  decodeClientCertificateFingerprint,
+  decodeClientCertificateTrustRootId,
   decodeIntegrityDigest,
   decodeInferenceRequestFingerprint,
   decodeIsoTimestamp,
@@ -17,6 +19,7 @@ import {
   decodeTrustedUpstreamOrigin,
   digestCanonicalJson,
   encodeCanonicalJson,
+  fingerprintClientCertificateDer,
   fingerprintCanonicalInferenceRequest,
 } from "./index.js";
 
@@ -58,6 +61,46 @@ test("timestamps accept only canonical RFC3339 UTC values", () => {
   ]) {
     assertCodecError(() => decodeIsoTimestamp(invalid), "invalid-format");
   }
+});
+
+mvpScenarioCase({
+  scenarioId: "V2-MVP-S01",
+  caseId: "complete-der-certificate-fingerprint",
+  title: "certificate identity hashes the complete bounded DER value",
+  run: () => {
+    const certificateDer = Buffer.from("3003020101", "hex");
+    const expected =
+      "sha256:1b65f68a522c858715f5dd951cd0402dc16691778814bf0759822b7a257421d0";
+    assert.equal(fingerprintClientCertificateDer(certificateDer), expected);
+    assert.equal(decodeClientCertificateFingerprint(expected), expected);
+    assert.equal(
+      decodeClientCertificateTrustRootId("private-alpha-client-ca-v1"),
+      "private-alpha-client-ca-v1",
+    );
+    assert.notEqual(
+      fingerprintClientCertificateDer(Buffer.from("3003020100", "hex")),
+      expected,
+    );
+
+    assertCodecError(
+      () => fingerprintClientCertificateDer(new Uint8Array()),
+      "out-of-range",
+    );
+    assertCodecError(
+      () => fingerprintClientCertificateDer(new Uint8Array(65_537)),
+      "out-of-range",
+    );
+    assertCodecError(
+      () => decodeClientCertificateFingerprint(`sha256:${"AB".repeat(32)}`),
+      "invalid-format",
+    );
+    for (const invalid of ["", "../client-ca", "client/ca", "a".repeat(129)]) {
+      assertCodecError(
+        () => decodeClientCertificateTrustRootId(invalid),
+        "invalid-format",
+      );
+    }
+  },
 });
 
 test("canonical JSON is stable, normalized, and hashed with labelled SHA-256", () => {

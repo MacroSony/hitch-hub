@@ -11,6 +11,7 @@ import type {
   ConnectorAccountId,
   EndpointId,
   ExternalEndpointId,
+  IdentityBindingId,
   InstallationId,
   IsoTimestamp,
   LocalEndpointId,
@@ -31,6 +32,11 @@ export type EndpointAddress =
       readonly kind: "local-client";
       readonly localHostId: LocalHostId;
       readonly localEndpointId: LocalEndpointId;
+    }
+  | {
+      readonly kind: "remote-client";
+      /** Resolved from trusted mTLS evidence; it is never caller-selected. */
+      readonly identityBindingId: IdentityBindingId;
     };
 
 export type EndpointAudience =
@@ -44,7 +50,7 @@ export type EndpointAudience =
       readonly kind: "shared";
     };
 
-/** Connector or local-client destination known to the trusted ingress layer. */
+/** Connector, local-client, or certificate-bound remote destination. */
 export interface Endpoint {
   readonly id: EndpointId;
   readonly installationId: InstallationId;

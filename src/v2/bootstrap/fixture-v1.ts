@@ -32,6 +32,9 @@ export const FIRST_SLICE_NUMERIC_DEFAULTS_V1 = Object.freeze({
   }),
   installationHardCeilings: Object.freeze({
     maximumQueuedTurnsPerSession: 3,
+    maximumPendingTurnsPerPrincipal: 3,
+    maximumConcurrentWorkersPerPrincipal: 1,
+    maximumConcurrentWorkersPerInstallation: 4,
     maximumActiveWorkMs: 3_600_000,
     maximumInteractionWaitMs: 600_000,
     maximumBeforeAcceptanceAttempts: 1,

@@ -434,6 +434,7 @@ function decodeAuditActorRef(
             "broker",
             "delivery",
             "local-connector",
+            "remote-ingress",
             "recovery",
             "sidecar",
             "supervisor",
@@ -488,7 +489,7 @@ function decodeAuthenticatedPrincipal(
     ),
     method: decodeEnum(
       object.method,
-      ["connector", "local-peer"] as const,
+      ["connector", "local-peer", "mtls-client"] as const,
       at(path, "method"),
     ),
     assurance: decodeEnum(

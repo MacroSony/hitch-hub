@@ -118,7 +118,7 @@ test("bootstrap publication atomically inserts foundation and allowlisted audit"
       ]);
       assert.equal(count(database, "installations"), 1);
       assert.equal(count(database, "audit_envelopes"), 1);
-      assert.equal(count(database, "bootstrap_publication_rows"), 81);
+      assert.equal(count(database, "bootstrap_publication_rows"), 83);
       assert.deepEqual(
         database.transaction((transaction) =>
           transaction.get(
@@ -207,6 +207,152 @@ test("exact and relationally reordered bootstrap retries are unchanged", async (
     }
   });
 
+});
+
+test("bootstrap replay preserves runtime multi-user rows and mutable capacity", async () => {
+  await withDisposableDataRoot(async (root) => {
+    const database = openCanonicalHitchV2Database({
+      dataRoot: root.resolve("state"),
+    });
+    try {
+      const records = createBootstrapPublicationRecords();
+      const { publication } = unit(database);
+      await publication.publishBootstrap(records);
+      const createdAt = "2026-07-29T12:03:00.000Z";
+      const fingerprint = `sha256:${"ab".repeat(32)}`;
+      database.transaction((transaction) => {
+        transaction.run(
+          `UPDATE principal_execution_capacity
+            SET next_admission_ordinal = ?, updated_at = ?
+            WHERE principal_id = ?`,
+          [7, createdAt, records.owner.id],
+        );
+        transaction.run(
+          `INSERT INTO principals (
+            id, installation_id, kind, display_name, state, created_at
+          ) VALUES (?, ?, 'human', ?, 'active', ?)`,
+          ["member-v1", records.installation.id, "Member", createdAt],
+        );
+        transaction.run(
+          `INSERT INTO workspaces (
+            id, installation_id, reference, display_name, created_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+          [
+            "member-workspace-v1",
+            records.installation.id,
+            "member-workspace-v1",
+            "Member workspace",
+            createdAt,
+          ],
+        );
+        transaction.run(
+          `INSERT INTO principal_workspace_bindings (
+            principal_id, installation_id, workspace_id,
+            created_actor_kind, created_at
+          ) VALUES (?, ?, ?, 'bootstrap', ?)`,
+          [
+            "member-v1",
+            records.installation.id,
+            "member-workspace-v1",
+            createdAt,
+          ],
+        );
+        transaction.run(
+          `INSERT INTO identity_bindings (
+            id, installation_id, principal_id, source_kind,
+            client_trust_root_id, subject_id, state, created_at
+          ) VALUES (?, ?, ?, 'mtls-client', ?, ?, 'active', ?)`,
+          [
+            "member-binding-v1",
+            records.installation.id,
+            "member-v1",
+            "client-ca-v1",
+            fingerprint,
+            createdAt,
+          ],
+        );
+        transaction.run(
+          `INSERT INTO endpoints (
+            id, installation_id, address_kind, identity_binding_id,
+            identity_binding_source_kind, audience_kind,
+            audience_principal_id, created_at
+          ) VALUES (?, ?, 'remote-client', ?, 'mtls-client', 'private', ?, ?)`,
+          [
+            "member-endpoint-v1",
+            records.installation.id,
+            "member-binding-v1",
+            "member-v1",
+            createdAt,
+          ],
+        );
+        transaction.run(
+          `INSERT INTO access_grants (
+            id, kind, installation_id, principal_id, role,
+            granted_actor_kind, created_at, state
+          ) VALUES (?, 'installation-role', ?, ?, 'member', 'bootstrap', ?, 'active')`,
+          ["member-role-v1", records.installation.id, "member-v1", createdAt],
+        );
+        transaction.run(
+          `INSERT INTO principal_execution_capacity (
+            principal_id, next_admission_ordinal, active_turn_id, updated_at
+          ) VALUES (?, 0, NULL, ?)`,
+          ["member-v1", createdAt],
+        );
+      });
+
+      const replay = await publication.publishBootstrap(
+        structuredClone(records),
+      );
+      assert.equal(replay.status, "unchanged");
+      assert.deepEqual(replay.auditEvents, []);
+      assert.equal(count(database, "principals"), 2);
+      assert.equal(count(database, "identity_bindings"), 2);
+      assert.equal(count(database, "endpoints"), 2);
+      assert.equal(count(database, "workspaces"), 2);
+      assert.equal(count(database, "principal_workspace_bindings"), 2);
+      assert.equal(count(database, "principal_execution_capacity"), 2);
+      assert.equal(count(database, "bootstrap_publication_rows"), 83);
+      assert.equal(count(database, "audit_envelopes"), 1);
+      assert.deepEqual(
+        database.transaction((transaction) =>
+          transaction.get(
+            `SELECT next_admission_ordinal, updated_at
+              FROM principal_execution_capacity WHERE principal_id = ?`,
+            [records.owner.id],
+          ),
+        ),
+        { next_admission_ordinal: 7, updated_at: createdAt },
+      );
+
+      database.transaction((transaction) =>
+        transaction.run(
+          `INSERT INTO provider_credential_bindings (
+            id, installation_id, provider_id, custody, display_name, state,
+            created_actor_kind, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            "extra-credential-binding-v1",
+            records.installation.id,
+            records.providerConnection.providerId,
+            "hitch-control-plane",
+            "Unexpected credential",
+            "active",
+            "bootstrap",
+            createdAt,
+            createdAt,
+          ],
+        ),
+      );
+      await assert.rejects(
+        publication.publishBootstrap(records),
+        BootstrapPublicationConflictError,
+      );
+      assert.equal(count(database, "provider_credential_bindings"), 2);
+      assert.equal(count(database, "audit_envelopes"), 1);
+    } finally {
+      database.close();
+    }
+  });
 });
 
 test("semantic bootstrap changes append revisions and reject stale pointer rollback", async () => {
@@ -334,31 +480,6 @@ test("conflicting or partial bootstrap state fails closed without mutation", asy
         { display_name: records.owner.displayName },
       );
 
-      database.transaction((transaction) =>
-        transaction.run(
-          `INSERT INTO provider_credential_bindings (
-            id, installation_id, provider_id, custody, display_name, state,
-            created_actor_kind, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            "rogue-credential-binding-v1",
-            records.installation.id,
-            records.providerConnection.providerId,
-            "hitch-control-plane",
-            "Unexpected active credential",
-            "active",
-            "bootstrap",
-            "2026-07-29T12:04:00.000Z",
-            "2026-07-29T12:04:00.000Z",
-          ],
-        ),
-      );
-      await assert.rejects(
-        publication.publishBootstrap(records),
-        BootstrapPublicationConflictError,
-      );
-      assert.equal(count(database, "provider_credential_bindings"), 2);
-      assert.equal(count(database, "audit_envelopes"), 1);
     } finally {
       database.close();
     }
@@ -452,7 +573,7 @@ test("bootstrap publication never heals missing ledgered foundation rows", async
       );
       assert.equal(count(database, "provider_connection_origins"), 1);
       assert.equal(count(database, "audit_envelopes"), 1);
-      assert.equal(count(database, "bootstrap_publication_rows"), 81);
+      assert.equal(count(database, "bootstrap_publication_rows"), 83);
     } finally {
       database.close();
     }
@@ -512,7 +633,7 @@ test("bootstrap publication rolls back before commit and converges after commit 
       );
       assert.equal(count(database, "installations"), 1);
       assert.equal(count(database, "audit_envelopes"), 1);
-      assert.equal(count(database, "bootstrap_publication_rows"), 81);
+      assert.equal(count(database, "bootstrap_publication_rows"), 83);
       const retried = await publication.publishBootstrap(records);
       assert.equal(retried.status, "unchanged");
       assert.deepEqual(retried.auditEvents, []);

@@ -117,7 +117,7 @@ function countRows(database: V2Database, table: string): number {
   });
 }
 
-test("[V2-S05/walking-skeleton-active-and-fifo-capacity] durable local application survives restart with one active and three queued Turns", async () => {
+test("[V2-S05/walking-skeleton-active-and-fifo-capacity] durable local application preserves principal-wide capacity across sessions and restart", async () => {
   await withDisposableDataRoot(async (root) => {
     const database = openCanonicalHitchV2Database({
       dataRoot: root.resolve("state"),
@@ -136,12 +136,33 @@ test("[V2-S05/walking-skeleton-active-and-fifo-capacity] durable local applicati
       assert.equal(created.result.kind, "session-created");
       if (created.result.kind !== "session-created") return;
       const sessionId = created.result.sessionId;
+      const secondCreated = await harness.application.execute(
+        harness.context,
+        {
+          kind: "create-session",
+          profileReference: records.agentProfile.reference,
+          workspaceReference: records.workspace.reference,
+          displayName: "Second walking skeleton",
+        },
+      );
+      assert.equal(secondCreated.status, "succeeded");
+      if (
+        secondCreated.status !== "succeeded" ||
+        secondCreated.result.kind !== "session-created"
+      ) return;
+      const secondSessionId = secondCreated.result.sessionId;
+      const sessions = [
+        sessionId,
+        secondSessionId,
+        sessionId,
+        secondSessionId,
+      ] as const;
 
       const submitted: { turnId: string; status: string }[] = [];
       for (let index = 1; index <= 4; index += 1) {
         const response = await harness.application.execute(harness.context, {
           kind: "submit-turn",
-          session: { kind: "session-id", sessionId },
+          session: { kind: "session-id", sessionId: sessions[index - 1]! },
           idempotencyKey: `retry-key-${index}` as never,
           text: `Prompt ${index}`,
         });
@@ -213,6 +234,24 @@ test("[V2-S05/walking-skeleton-active-and-fifo-capacity] durable local applicati
       ) {
         assert.equal(queued.result.runtime.state.status, "queued");
       }
+
+      assert.deepEqual(
+        database.transaction((transaction) =>
+          transaction.all(
+            `SELECT q.admission_ordinal, t.session_id
+            FROM turn_queue_entries q
+            JOIN turns t ON t.id = q.turn_id
+            WHERE q.principal_id = ?
+            ORDER BY q.admission_ordinal`,
+            ["owner-v1"],
+          ),
+        ),
+        [
+          { admission_ordinal: 1, session_id: secondSessionId },
+          { admission_ordinal: 2, session_id: sessionId },
+          { admission_ordinal: 3, session_id: secondSessionId },
+        ],
+      );
 
       assert.equal(countRows(database, "turns"), 4);
       assert.equal(countRows(database, "agent_dispatch_attempts"), 1);

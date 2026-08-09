@@ -209,6 +209,49 @@ test("all current Turn event payload variants decode through an exhaustive table
   }
 });
 
+test("remote mTLS actors decode at persisted Turn event boundaries", () => {
+  const cancellation = decodeTurnEventPayload({
+    kind: "state-transition",
+    from: { status: "queued" },
+    to: {
+      status: "cancelling",
+      attemptId: "event:AgentDispatchAttempt:0001",
+      requestedAt: NOW,
+      requestedBy: { kind: "system", component: "remote-ingress" },
+      reason: "withdrawn-by-requester",
+    },
+  });
+  assert.equal(cancellation.kind, "state-transition");
+
+  const resolution = decodeTurnEventPayload({
+    kind: "interaction-resolved",
+    interactionId: "event:TurnInteraction:0001",
+    interactionKind: "input",
+    resolution: {
+      kind: "input-by-originator",
+      resolver: {
+        actor: {
+          kind: "authenticated-principal",
+          principalId: "event:Principal:0001",
+          identityBindingId: "event:IdentityBinding:0001",
+          method: "mtls-client",
+          assurance: "normal",
+          requestId: "event:AuthenticationRequest:0001",
+          authenticatedAt: NOW,
+        },
+        authorization: {
+          basis: "turn-requester",
+          decision: "allowed",
+          reason: "turn-requester",
+          evaluatedAt: NOW,
+        },
+      },
+      responseId: "event:TurnInteractionResponse:0001",
+    },
+  });
+  assert.equal(resolution.kind, "interaction-resolved");
+});
+
 test("persisted Turn event codec validates its exact envelope and canonical encoding", () => {
   const event = decodeTurnEvent({
     id: "event:TurnEvent:0001",

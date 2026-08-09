@@ -110,6 +110,12 @@ function persistedRowDigest(
 ): string {
   const values: Record<string, JsonValue> = {};
   for (const [column, value] of Object.entries(persisted)) {
+    if (
+      table === "principal_execution_capacity" &&
+      ["next_admission_ordinal", "active_turn_id", "updated_at"].includes(column)
+    ) {
+      continue;
+    }
     values[column] = sqliteJsonValue(
       value,
       `${table}.${column}`,
@@ -245,7 +251,12 @@ function persistedRowMatches(
   row: BootstrapFoundationRow,
 ): boolean {
   return row.columns.every((column, index) => {
-    if (column === "created_at" || column === "updated_at") {
+    if (
+      column === "created_at" ||
+      column === "updated_at" ||
+      (row.table === "principal_execution_capacity" &&
+        ["next_admission_ordinal", "active_turn_id"].includes(column))
+    ) {
       return true;
     }
     const actual = persisted[column];
@@ -572,7 +583,6 @@ function mergeProjection(
       changed = true;
     }
   }
-  assertExactActiveBootstrapAuthority(transaction, projection);
   assertProjectedRevisionsAreLatest(transaction, projection);
   if (changed) {
     assertAppendChronology(
@@ -611,54 +621,11 @@ function updateInstallationTimestamp(
   }
 }
 
-function assertExactActiveBootstrapAuthority(
-  transaction: V2RepositoryTransaction,
-  projection: BootstrapFoundationRowProjection,
-): void {
-  const expectedActiveGrants = projection.rows.filter(
-    (row) => row.table === "access_grants",
-  ).length;
-  const expectedActiveCredentials = projection.rows.filter(
-    (row) => row.table === "provider_credential_bindings",
-  ).length;
-  const checks = [
-    {
-      sql: "SELECT COUNT(*) AS count FROM principals WHERE state = 'active'",
-      expected: 1,
-      label: "active bootstrap principal",
-    },
-    {
-      sql: "SELECT COUNT(*) AS count FROM identity_bindings WHERE state = 'active'",
-      expected: 1,
-      label: "active bootstrap identity binding",
-    },
-    {
-      sql: "SELECT COUNT(*) AS count FROM access_grants WHERE state = 'active'",
-      expected: expectedActiveGrants,
-      label: "active bootstrap access grants",
-    },
-    {
-      sql: "SELECT COUNT(*) AS count FROM provider_credential_bindings WHERE state = 'active'",
-      expected: expectedActiveCredentials,
-      label: "active bootstrap credential bindings",
-    },
-  ] as const;
-  for (const check of checks) {
-    const result = transaction.get(check.sql);
-    if (result?.count !== check.expected) {
-      throw new BootstrapPublicationConflictError(
-        `${check.label} differ from the exact publication graph`,
-      );
-    }
-  }
-}
-
 function insertProjection(
   transaction: V2RepositoryTransaction,
   projection: BootstrapFoundationRowProjection,
 ): void {
   for (const row of projection.rows) insertRow(transaction, row);
-  assertExactActiveBootstrapAuthority(transaction, projection);
   assertProjectedRevisionsAreLatest(transaction, projection);
 }
 
@@ -679,6 +646,34 @@ function requiredCount(
     );
   }
   return result.count;
+}
+
+const MVP_FIXED_PROVIDER_AUTHORITY_TABLES = Object.freeze([
+  "providers",
+  "models",
+  "provider_credential_bindings",
+  "provider_connections",
+  "provider_connection_origins",
+  "provider_model_manifests",
+  "provider_model_image_mime_types",
+  "provider_model_reasoning_efforts",
+  "provider_artifact_bindings",
+] as const satisfies readonly BootstrapFoundationTable[]);
+
+function assertExactMvpProviderAuthority(
+  transaction: V2RepositoryTransaction,
+  projection: BootstrapFoundationRowProjection,
+): void {
+  for (const table of MVP_FIXED_PROVIDER_AUTHORITY_TABLES) {
+    const expected = projection.rows.filter(
+      (row) => row.table === table,
+    ).length;
+    if (tableCount(transaction, table) !== expected) {
+      throw new BootstrapPublicationConflictError(
+        `${table} differ from the exact MVP provider authority graph`,
+      );
+    }
+  }
 }
 
 function assertEstablishedPublication(
@@ -712,20 +707,16 @@ function assertEstablishedPublication(
     transaction,
     "SELECT COUNT(*) AS count FROM bootstrap_publication_rows",
   );
-  const foundationCount = BOOTSTRAP_FOUNDATION_TABLES.reduce(
-    (sum, table) => sum + tableCount(transaction, table),
-    0,
-  );
-  if (
-    publicationAudits < 1 ||
-    ledgerCount < 1 ||
-    ledgerCount !== foundationCount
-  ) {
+  if (publicationAudits < 1 || ledgerCount < 1) {
     throw new BootstrapPublicationConflictError(
       "durable bootstrap foundation has no complete publication baseline",
     );
   }
+  // The ledger owns bootstrap-published rows, not the whole installation.
+  // Runtime-created principals and their authority graph intentionally remain
+  // outside it; mergeProjection verifies every current bootstrap row below.
   assertAllLedgerRowsIntact(transaction);
+  assertExactMvpProviderAuthority(transaction, projection);
 }
 
 function recordProjectionLedger(

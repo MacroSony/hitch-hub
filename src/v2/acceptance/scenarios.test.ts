@@ -76,6 +76,20 @@ test("isolated TAP accounting rejects duplicate and non-executed cases", () => {
   );
 });
 
+test("isolated TAP accounting includes focused MVP scenario cases", () => {
+  const accounting = new DeterministicTestAccounting();
+  accounting.observeTapLine(
+    "# Subtest: [V2-MVP-S10/two-principal-e2e] first",
+  );
+  accounting.observeTapLine(
+    "# Subtest: [V2-MVP-S10/two-principal-e2e] duplicate",
+  );
+  assert.throws(
+    () => accounting.assertAcceptable(),
+    /duplicate scenario cases/u,
+  );
+});
+
 test("TAP accounting ignores TODO and SKIP text in ordinary titles", () => {
   const accounting = new DeterministicTestAccounting();
   accounting.observeTapLine("# Subtest: explains # TODO without skipping");

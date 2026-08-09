@@ -13,6 +13,7 @@
  * attachment rows.
  */
 import { encodeCanonicalJson } from "../codecs/json.js";
+import { decodeInstallationHardCeilings } from "../bootstrap/records.js";
 import {
   decodeBoundedString,
   decodeServiceId,
@@ -334,23 +335,24 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     }
     const bindingId = authorization.bindingId;
 
-    const maximumQueued = this.#readMaximumQueuedTurns(
+    const maximumQueued = this.#readMaximumPendingTurns(
       transaction,
+      identity.installationId,
       session.turnPolicySnapshotId,
     );
     const pendingRow = transaction.get(
-      `SELECT COUNT(*) AS pending FROM turn_queue_entries WHERE session_id = ?`,
-      [session.sessionId],
+      `SELECT COUNT(*) AS pending FROM turn_queue_entries WHERE principal_id = ?`,
+      [identity.principalId],
     );
     if (pendingRow === undefined) {
       throw new TurnAdmissionIntegrityError(
-        "session queue count is unavailable",
+        "principal queue count is unavailable",
       );
     }
     const pendingCount = requiredNumber(
       pendingRow,
       "pending",
-      "session queue",
+      "principal queue",
     );
     if (pendingCount >= maximumQueued) {
       return Object.freeze({ status: "queue-capacity-exceeded" as const });
@@ -613,16 +615,37 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     requesterPrincipalId: PrincipalId,
   ): TurnReceipt {
     const entry = transaction.get(
-      `SELECT queue_position FROM turn_queue_entries WHERE turn_id = ?`,
+      `SELECT principal_id, admission_ordinal
+      FROM turn_queue_entries WHERE turn_id = ?`,
       [turnId],
     );
     if (entry !== undefined) {
+      const principalId = requiredText(
+        entry,
+        "principal_id",
+        "queue entry",
+      );
+      const ordinal = requiredNumber(
+        entry,
+        "admission_ordinal",
+        "queue entry",
+      );
+      const positionRow = transaction.get(
+        `SELECT COUNT(*) AS position FROM turn_queue_entries
+        WHERE principal_id = ? AND admission_ordinal < ?`,
+        [principalId, ordinal],
+      );
+      if (positionRow === undefined) {
+        throw new TurnAdmissionIntegrityError(
+          "principal queue position is unavailable",
+        );
+      }
       return Object.freeze({
         turnId,
         status: "queued" as const,
         queue: Object.freeze({
           turnId,
-          position: requiredNumber(entry, "queue_position", "queue entry"),
+          position: requiredNumber(positionRow, "position", "queue entry"),
           requesterPrincipalId,
           controls: Object.freeze({ canCancel: true }),
         }),
@@ -642,20 +665,42 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     });
   }
 
-  #readMaximumQueuedTurns(
+  #readMaximumPendingTurns(
     transaction: V2RepositoryTransaction,
+    installationId: InstallationId,
     turnPolicySnapshotId: TurnPolicySnapshotId,
   ): number {
     const row = transaction.get(
-      `SELECT max_queued_turns FROM turn_policy_snapshots WHERE id = ?`,
-      [turnPolicySnapshotId],
+      `SELECT p.max_queued_turns, i.hard_ceilings_json
+      FROM turn_policy_snapshots p
+      JOIN installations i ON i.id = ?
+      WHERE p.id = ?`,
+      [installationId, turnPolicySnapshotId],
     );
     if (row === undefined) {
       throw new TurnAdmissionIntegrityError(
         "session pins an unknown Turn policy snapshot",
       );
     }
-    return requiredNumber(row, "max_queued_turns", "turn policy snapshot");
+    const hardCeilingsJson = requiredText(
+      row,
+      "hard_ceilings_json",
+      "installation hard ceilings",
+    );
+    let hardCeilings: ReturnType<typeof decodeInstallationHardCeilings>;
+    try {
+      hardCeilings = decodeInstallationHardCeilings(
+        JSON.parse(hardCeilingsJson) as unknown,
+      );
+    } catch {
+      throw new TurnAdmissionIntegrityError(
+        "installation hard ceilings are invalid",
+      );
+    }
+    return Math.min(
+      requiredNumber(row, "max_queued_turns", "turn policy snapshot"),
+      hardCeilings.maximumPendingTurnsPerPrincipal,
+    );
   }
 
   #insertOne(
@@ -671,6 +716,20 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
     if (result.changes !== 1) {
       throw new TurnAdmissionIntegrityError(
         "turn admission did not append exactly one row",
+      );
+    }
+  }
+
+  #updateExactlyOne(
+    transaction: V2RepositoryTransaction,
+    sql: string,
+    parameters: readonly (string | number | null)[],
+    label: string,
+  ): void {
+    const result = transaction.run(sql, parameters);
+    if (result.changes !== 1) {
+      throw new TurnAdmissionIntegrityError(
+        `turn admission did not update exactly one ${label}`,
       );
     }
   }
@@ -823,36 +882,46 @@ export class SQLiteTurnAdmissionUnitOfWork implements TurnAdmissionUnitOfWork {
       [turnId, providerId, modelId, now],
     );
 
-    transaction.run(
-      `INSERT OR IGNORE INTO turn_queue (session_id, active_turn_id, updated_at)
-      VALUES (?, NULL, ?)`,
-      [session.sessionId, now],
+    const capacity = transaction.get(
+      `SELECT next_admission_ordinal FROM principal_execution_capacity
+      WHERE principal_id = ?`,
+      [identity.principalId],
     );
-    transaction.run(
-      `UPDATE turn_queue SET updated_at = ? WHERE session_id = ?`,
-      [now, session.sessionId],
-    );
-    const positionRow = transaction.get(
-      `SELECT COALESCE(MAX(queue_position) + 1, 0) AS next_position
-      FROM turn_queue_entries WHERE session_id = ?`,
-      [session.sessionId],
-    );
-    if (positionRow === undefined) {
+    if (capacity === undefined) {
       throw new TurnAdmissionIntegrityError(
-        "session queue position is unavailable",
+        "principal execution capacity is unavailable",
       );
     }
-    const position = requiredNumber(
-      positionRow,
-      "next_position",
-      "session queue",
+    const admissionOrdinal = requiredNumber(
+      capacity,
+      "next_admission_ordinal",
+      "principal execution capacity",
+    );
+    const pending = transaction.get(
+      `SELECT COUNT(*) AS position FROM turn_queue_entries
+      WHERE principal_id = ?`,
+      [identity.principalId],
+    );
+    if (pending === undefined) {
+      throw new TurnAdmissionIntegrityError(
+        "principal queue position is unavailable",
+      );
+    }
+    const position = requiredNumber(pending, "position", "principal queue");
+    this.#updateExactlyOne(
+      transaction,
+      `UPDATE principal_execution_capacity
+      SET next_admission_ordinal = ?, updated_at = ?
+      WHERE principal_id = ? AND next_admission_ordinal = ?`,
+      [admissionOrdinal + 1, now, identity.principalId, admissionOrdinal],
+      "principal admission ordinal",
     );
     this.#insertOne(
       transaction,
       `INSERT INTO turn_queue_entries (
-        session_id, turn_id, queue_position, enqueued_at
+        principal_id, turn_id, admission_ordinal, enqueued_at
       ) VALUES (?, ?, ?, ?)`,
-      [session.sessionId, turnId, position, now],
+      [identity.principalId, turnId, admissionOrdinal, now],
     );
     this.#insertOne(
       transaction,
@@ -1132,8 +1201,8 @@ export class SQLiteTurnCancellationUnitOfWork
     // Compare-and-remove: the delete proves the entry was still pending.
     const removed = transaction.run(
       `DELETE FROM turn_queue_entries
-      WHERE session_id = ? AND turn_id = ?`,
-      [sessionId, turnId],
+      WHERE turn_id = ?`,
+      [turnId],
     );
     if (removed.changes !== 1) {
       return Object.freeze({

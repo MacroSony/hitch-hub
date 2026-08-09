@@ -714,7 +714,7 @@ export class SQLiteDevelopmentNoOpCoordinator
       );
       if (identity.status === "denied") return input.receipt;
       const admittedEntry = transaction.get(
-        `SELECT q.session_id FROM turn_queue_entries q
+        `SELECT q.principal_id, t.session_id FROM turn_queue_entries q
         JOIN turns t ON t.id = q.turn_id
         WHERE q.turn_id = ? AND t.requester_principal_id = ?`,
         [input.turnId, identity.principalId],
@@ -727,10 +727,15 @@ export class SQLiteDevelopmentNoOpCoordinator
         "session_id",
         "admitted queue entry",
       );
+      const principalId = requiredText(
+        admittedEntry,
+        "principal_id",
+        "admitted queue entry",
+      );
       const head = transaction.get(
         `SELECT turn_id FROM turn_queue_entries
-        WHERE session_id = ? ORDER BY queue_position LIMIT 1`,
-        [sessionId],
+        WHERE principal_id = ? ORDER BY admission_ordinal LIMIT 1`,
+        [principalId],
       );
       if (
         head === undefined ||
@@ -739,8 +744,9 @@ export class SQLiteDevelopmentNoOpCoordinator
         return input.receipt;
       }
       const queue = transaction.get(
-        `SELECT active_turn_id FROM turn_queue WHERE session_id = ?`,
-        [sessionId],
+        `SELECT active_turn_id FROM principal_execution_capacity
+        WHERE principal_id = ?`,
+        [principalId],
       );
       const session = transaction.get(
         `SELECT active_turn_id FROM session_runtime_state WHERE session_id = ?`,
@@ -770,16 +776,17 @@ export class SQLiteDevelopmentNoOpCoordinator
       );
       runExactlyOne(
         transaction,
-        `DELETE FROM turn_queue_entries WHERE session_id = ? AND turn_id = ?`,
-        [sessionId, input.turnId],
+        `DELETE FROM turn_queue_entries WHERE principal_id = ? AND turn_id = ?`,
+        [principalId, input.turnId],
         "queue entry",
       );
       runExactlyOne(
         transaction,
-        `UPDATE turn_queue SET active_turn_id = ?, updated_at = ?
-        WHERE session_id = ?`,
-        [input.turnId, now, sessionId],
-        "Turn queue",
+        `UPDATE principal_execution_capacity
+        SET active_turn_id = ?, updated_at = ?
+        WHERE principal_id = ? AND active_turn_id IS NULL`,
+        [input.turnId, now, principalId],
+        "principal execution capacity",
       );
       runExactlyOne(
         transaction,

@@ -289,16 +289,23 @@ export interface TurnInferenceUsageLedger {
 }
 
 /**
- * Minimal persisted session queue. `pendingTurnIds` is bounded by the pinned
- * admission policy and ordered oldest first. A repository must atomically claim
- * only the head, set it active, and record its dispatching lifecycle transition.
- * It must maintain at most one active turn.
+ * Durable principal-wide scheduling state. Admission increments the ordinal in
+ * the same transaction that inserts the queue entry. Claiming the oldest
+ * ordinal and setting activeTurnId is one transaction across all sessions
+ * owned by the principal.
  */
-export interface TurnQueue {
-  readonly sessionId: SessionId;
+export interface PrincipalExecutionCapacity {
+  readonly principalId: PrincipalId;
+  readonly nextAdmissionOrdinal: number;
   readonly activeTurnId?: TurnId;
-  readonly pendingTurnIds: readonly TurnId[];
   readonly updatedAt: IsoTimestamp;
+}
+
+export interface PrincipalTurnQueueEntry {
+  readonly principalId: PrincipalId;
+  readonly turnId: TurnId;
+  readonly admissionOrdinal: number;
+  readonly enqueuedAt: IsoTimestamp;
 }
 
 export interface TurnQueueControls {

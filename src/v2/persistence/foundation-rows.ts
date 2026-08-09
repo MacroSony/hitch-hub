@@ -46,6 +46,7 @@ import {
 export const BOOTSTRAP_FOUNDATION_TABLES = Object.freeze([
   "installations",
   "principals",
+  "principal_execution_capacity",
   "local_hosts",
   "identity_bindings",
   "endpoints",
@@ -57,6 +58,7 @@ export const BOOTSTRAP_FOUNDATION_TABLES = Object.freeze([
   "authentication_subject_reference_bindings",
   "endpoint_reference_bindings",
   "workspaces",
+  "principal_workspace_bindings",
   "workspace_resources",
   "workspace_revisions",
   "workspace_revision_resources",
@@ -114,6 +116,7 @@ function freezePrimaryKeyMap<
 export const BOOTSTRAP_FOUNDATION_PRIMARY_KEYS = freezePrimaryKeyMap({
   installations: ["id"],
   principals: ["id"],
+  principal_execution_capacity: ["principal_id"],
   local_hosts: ["id"],
   identity_bindings: ["id"],
   endpoints: ["id"],
@@ -125,6 +128,7 @@ export const BOOTSTRAP_FOUNDATION_PRIMARY_KEYS = freezePrimaryKeyMap({
   authentication_subject_reference_bindings: ["identity_binding_id"],
   endpoint_reference_bindings: ["endpoint_id"],
   workspaces: ["id"],
+  principal_workspace_bindings: ["principal_id"],
   workspace_resources: ["id"],
   workspace_revisions: ["id"],
   workspace_revision_resources: [
@@ -432,6 +436,7 @@ function assertBasicBootstrapRecords(
     [
       "installation",
       "owner",
+      "ownerWorkspaceBinding",
       "localIdentityBinding",
       "localEndpoint",
       "accessGrants",
@@ -469,6 +474,30 @@ function assertBasicBootstrapRecords(
   decodeServiceId("Installation", owner.installationId);
   displayName(owner.displayName, "bootstrap owner display name");
   decodeIsoTimestamp(owner.createdAt);
+
+  const workspaceBinding = exactObject(
+    records.ownerWorkspaceBinding,
+    [
+      "installationId",
+      "principalId",
+      "workspaceId",
+      "createdBy",
+      "createdAt",
+    ],
+    "bootstrap owner workspace binding",
+  );
+  decodeServiceId("Installation", workspaceBinding.installationId);
+  decodeServiceId("Principal", workspaceBinding.principalId);
+  decodeServiceId("Workspace", workspaceBinding.workspaceId);
+  const workspaceBindingActor = exactObject(
+    workspaceBinding.createdBy,
+    ["kind"],
+    "bootstrap owner workspace binding actor",
+  );
+  if (workspaceBindingActor.kind !== "bootstrap") {
+    fail("bootstrap owner workspace binding actor must be bootstrap");
+  }
+  decodeIsoTimestamp(workspaceBinding.createdAt);
 
   const binding = exactObject(
     records.localIdentityBinding,
@@ -967,6 +996,9 @@ function assertBootstrapBindingAlignment(
   }
   if (
     records.owner.installationId !== installationId ||
+    records.ownerWorkspaceBinding.installationId !== installationId ||
+    records.ownerWorkspaceBinding.principalId !== records.owner.id ||
+    records.ownerWorkspaceBinding.workspaceId !== graph.workspace.id ||
     records.localIdentityBinding.installationId !== installationId ||
     records.localIdentityBinding.principalId !== records.owner.id ||
     records.localEndpoint.installationId !== installationId ||
@@ -1150,6 +1182,12 @@ export function projectBootstrapFoundationRows(
     disabled_actor_system_component: null,
     created_at: records.owner.createdAt,
   }));
+  add(row("principal_execution_capacity", ["principal_id"], {
+    principal_id: records.owner.id,
+    next_admission_ordinal: 0,
+    active_turn_id: null,
+    updated_at: records.owner.createdAt,
+  }));
 
   const localHostId =
     graph.workspace.installationId === installationId &&
@@ -1167,6 +1205,7 @@ export function projectBootstrapFoundationRows(
     principal_id: records.owner.id,
     source_kind: "local-peer",
     local_host_id: localHostId,
+    client_trust_root_id: null,
     subject_id: records.localIdentityBinding.subjectId,
     state: "active",
     revoked_at: null,
@@ -1188,6 +1227,8 @@ export function projectBootstrapFoundationRows(
     address_kind: "local-client",
     local_host_id: records.localEndpoint.address.localHostId,
     local_endpoint_id: records.localEndpoint.address.localEndpointId,
+    identity_binding_id: null,
+    identity_binding_source_kind: null,
     audience_kind: "private",
     audience_principal_id: records.localEndpoint.audience.principalId,
     created_at: records.localEndpoint.createdAt,
@@ -1261,6 +1302,18 @@ export function projectBootstrapFoundationRows(
   }));
 
   add(mapIdentityRow("workspaces", graph.workspace));
+  const workspaceBindingActor = actorColumns(
+    records.ownerWorkspaceBinding.createdBy,
+  );
+  add(row("principal_workspace_bindings", ["principal_id"], {
+    principal_id: records.ownerWorkspaceBinding.principalId,
+    installation_id: records.ownerWorkspaceBinding.installationId,
+    workspace_id: records.ownerWorkspaceBinding.workspaceId,
+    created_actor_kind: workspaceBindingActor.kind,
+    created_actor_principal_id: workspaceBindingActor.principalId,
+    created_actor_system_component: workspaceBindingActor.systemComponent,
+    created_at: records.ownerWorkspaceBinding.createdAt,
+  }));
   add(row("workspace_resources", ["id"], {
     id: graph.workspaceRevision.root.id,
     installation_id: installationId,

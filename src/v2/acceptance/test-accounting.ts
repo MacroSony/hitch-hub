@@ -1,5 +1,5 @@
 const SCENARIO_SUBTEST =
-  /^\s*# Subtest: \[(V2-S(?:0[1-9]|1[0-9]|2[01]))\/([a-z0-9][a-z0-9-]*)\]/u;
+  /^\s*# Subtest: \[(V2-(?:S(?:0[1-9]|1[0-9]|2[01])|MVP-S(?:0[1-9]|10)))\/([a-z0-9][a-z0-9-]*)\]/u;
 const FORBIDDEN_SUMMARY = /^\s*# (cancelled|skipped|todo) ([0-9]+)\s*$/u;
 
 /**

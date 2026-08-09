@@ -228,7 +228,7 @@ export function decodeTurnPolicySnapshot(input: unknown, path: CodecPath = []): 
 }
 
 export function decodeInstallationHardCeilings(input: unknown, path: CodecPath = []): InstallationHardCeilings {
-  const keys = ["maximumQueuedTurnsPerSession", "maximumActiveWorkMs", "maximumInteractionWaitMs", "maximumBeforeAcceptanceAttempts", "maximumProviderRequestsPerTurn", "maximumTotalInferenceTokensPerTurn", "maximumOutputTokensPerInferenceRequest", "maximumImageBytesPerAttachment", "maximumBrokerRequestBytes", "maximumConcurrentBrokerRequests", "maximumMemoryBytes", "maximumProcesses", "maximumTemporaryStorageBytes", "maximumAgentOutputBytes"] as const;
+  const keys = ["maximumQueuedTurnsPerSession", "maximumPendingTurnsPerPrincipal", "maximumConcurrentWorkersPerPrincipal", "maximumConcurrentWorkersPerInstallation", "maximumActiveWorkMs", "maximumInteractionWaitMs", "maximumBeforeAcceptanceAttempts", "maximumProviderRequestsPerTurn", "maximumTotalInferenceTokensPerTurn", "maximumOutputTokensPerInferenceRequest", "maximumImageBytesPerAttachment", "maximumBrokerRequestBytes", "maximumConcurrentBrokerRequests", "maximumMemoryBytes", "maximumProcesses", "maximumTemporaryStorageBytes", "maximumAgentOutputBytes"] as const;
   const object = exact(input, keys, path); const output: Record<string, number> = {};
   for (const key of keys) output[key] = decodePositiveSafeInteger(object[key], at(path, key));
   return freeze(output) as unknown as InstallationHardCeilings;

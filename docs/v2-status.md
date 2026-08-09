@@ -33,12 +33,15 @@ what is blocked.
   administration, production attachments, rich interactions, persistent
   workers, automatic retry/recovery, push delivery, provider breadth, and
   exhaustive final-acceptance work.
-- The committed executable schema and walking-skeleton composition still
-  enforce one active bootstrap owner and local-socket authentication. They are
-  valid foundation evidence, not an implementation of the new multi-user
-  boundary. V2-M01 must revise the pre-release schema and executable contracts
-  before downstream application/runtime integration encodes the singleton
-  assumption more deeply.
+- V2-M01 is an independently reviewed working-tree candidate. It removes the
+  single-active-human schema constraint; adds exact DER-certificate identity,
+  `admin`/`member` roles, same-owner mTLS endpoints, fixed principal/workspace
+  bindings, and durable per-principal execution capacity; preserves additional
+  enrolled users across bootstrap replay while keeping provider authority
+  exact; and makes admission/claim use one atomic principal-wide FIFO across
+  sessions. Remote authentication and user administration remain V2-M02 work,
+  and the application still authenticates only through the committed local
+  owner socket until then.
 - The multi-user agentic MVP boundary, explicit deferrals, seven-slice mapping,
   and source-of-truth transition were independently reviewed and committed in
   `f7e9669`.
@@ -88,7 +91,7 @@ what is blocked.
   hardens replay ordering, attachment authentication provenance, invalid-ID
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
-  current working tree. The v2 suite currently has 275 passing tests.
+  current working tree. The v2 suite currently has 285 passing tests.
 - V2-E01 is committed after two-pass independent review. The Pi sidecar
   receives an empty Bubblewrap network namespace, an exact three-entry
   environment, and a fixed
@@ -158,15 +161,22 @@ what is blocked.
 
 ## Working-tree review candidates
 
-None. Passing deterministic tests remains necessary but does not by itself
-move future work to `Committed`; each bounded substep still requires review,
+- V2-M01 — multi-principal contract and schema: executable identity/endpoint
+  codecs, canonical relational constraints, bootstrap coexistence, fixed
+  provider cardinality, principal-wide queue/capacity behavior, and the
+  focused MVP acceptance registry are implemented. Contract, schema, and
+  repository checkpoints have independent approval; final whole-change
+  verification and commit/push remain.
+
+Passing deterministic tests remains necessary but does not by itself move
+future work to `Committed`; each bounded substep still requires review,
 verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
-| V2-M01 — multi-principal contract and schema | Ready | Next assignment; revise singleton executable boundaries before schema freeze |
+| V2-M01 — multi-principal contract and schema | Review candidate | Independently approved bounded checkpoints; final release verification and commit/push remain |
 | V2-M02 — mTLS ingress and local administration | Waiting | V2-M01 certificate-binding and principal contracts |
 | V2-M03 — multi-user application enforcement | Waiting | V2-M01 and V2-M02 trusted authentication context |
 | V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
@@ -220,9 +230,11 @@ should expose integration problems earlier than the original wave ordering.
    behavior; rejection of unsafe roots and oversized/malformed frames; and no
    caller-selected principal, origin, `SessionSpec`, or authorization result.
    The fake writes neither terminal/delivery state nor an assistant response.
-4. Complete V2-M01 before schema freeze: multiple active human principals,
-   certificate identity bindings, `admin`/`member`, private owner-only
-   endpoints, fixed per-principal workspaces, and execution capacity.
+4. V2-M01 is implemented and independently approved in the working tree:
+   multiple active human principals, certificate identity bindings,
+   `admin`/`member`, private owner-only endpoints, fixed per-principal
+   workspaces, and principal-wide execution capacity. Final whole-change
+   verification and commit/push remain.
 5. Complete V2-M02 and V2-M03: private-network mTLS ingress, local-only user
    administration, and cross-principal application enforcement. No runtime is
    connected until the two-principal denial matrix passes.
@@ -241,14 +253,16 @@ The existing deterministic registry still records partial foundation coverage
 for 16 of the original 21 single-owner scenarios, and the current suite remains
 required. It does not define completion of the revised MVP.
 
-V2-M01 must add a focused multi-user acceptance registry or update the existing
-one without falsely marking historical cases complete. The canonical MVP gate
-requires certificate-to-principal integrity, cross-principal denial,
-content-blind administration, live revocation, workspace/sandbox isolation,
-resource ceilings, one-shot provider invocation, cleanup, uncertain-send
-non-replay, and one two-principal end-to-end sandboxed agent Turn. Exhaustive
-crash permutations, provider/OS breadth, soak/load work, and the complete
-original 21-scenario matrix are explicitly deferred.
+V2-M01 adds a separate focused ten-scenario multi-user MVP registry without
+relabeling the historical cases. Current M01 evidence marks certificate
+identity (`V2-MVP-S01`), ownership/capacity correlation (`V2-MVP-S02`), and
+principal-wide queue ceilings (`V2-MVP-S07`) in progress. It does not claim
+completion of cross-principal application denial, content-blind
+administration, live revocation, workspace/sandbox isolation, full resource
+ceilings, one-shot provider invocation, cleanup, uncertain-send non-replay, or
+the two-principal end-to-end Turn; those remain M02-M07 gates. Exhaustive crash
+permutations, provider/OS breadth, soak/load work, and the complete original
+21-scenario matrix are explicitly deferred.
 
 A green `npm run test:v2` verifies the implemented foundation; it does not mean
 that the multi-user MVP is accepted.

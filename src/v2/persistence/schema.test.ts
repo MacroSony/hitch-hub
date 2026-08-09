@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
-import { scenarioCase } from "../acceptance/runner.js";
+import { mvpScenarioCase, scenarioCase } from "../acceptance/runner.js";
 import { withDisposableDataRoot } from "../test-support/disposable-data-root.js";
 import { V2Database } from "./database.js";
 import { V2DataRootError } from "./errors.js";
@@ -20,14 +20,14 @@ import {
 } from "./schema.js";
 
 const REQUIRED_DURABLE_TABLES = [
-  "schema_metadata", "installations", "private_blobs", "principals", "local_hosts", "identity_bindings", "authentication_requests", "endpoints", "access_grants",
+  "schema_metadata", "installations", "private_blobs", "principals", "principal_execution_capacity", "local_hosts", "identity_bindings", "authentication_requests", "endpoints", "access_grants",
   "installation_reference_bindings", "principal_reference_bindings", "local_host_reference_bindings", "identity_binding_reference_bindings", "authentication_subject_reference_bindings", "endpoint_reference_bindings",
-  "workspaces", "workspace_resources", "workspace_revisions", "workspace_revision_resources", "execution_policies", "tool_capabilities", "execution_policy_snapshots", "execution_policy_resource_grants", "execution_policy_tool_capabilities", "turn_policies", "turn_policy_snapshots",
+  "workspaces", "principal_workspace_bindings", "workspace_resources", "workspace_revisions", "workspace_revision_resources", "execution_policies", "tool_capabilities", "execution_policy_snapshots", "execution_policy_resource_grants", "execution_policy_tool_capabilities", "turn_policies", "turn_policy_snapshots",
   "providers", "models", "provider_credential_bindings", "provider_connections", "provider_connection_origins", "provider_model_manifests", "provider_model_image_mime_types", "provider_model_reasoning_efforts",
   "agent_drivers", "agent_driver_launch_profiles", "agent_driver_permission_mediations", "agent_profiles", "agent_profile_revisions", "agent_profile_provider_allowances", "agent_profile_allowance_models", "agent_resource_snapshots", "extensions", "extension_revisions", "extension_capabilities", "extension_grant_snapshots", "extension_grant_capabilities", "agent_profile_resource_snapshots", "agent_profile_extension_grants",
   "workspace_reference_bindings", "agent_resource_artifact_bindings", "extension_artifact_bindings", "provider_artifact_bindings",
   "session_specs", "session_spec_resource_snapshots", "session_spec_extension_grants", "session_spec_provider_bindings", "sessions", "session_metadata", "session_lifecycle", "session_runtime_state", "session_endpoint_bindings",
-  "attachments", "turn_input_snapshots", "turn_input_blocks", "turns", "turn_inference_resolutions", "turn_queue", "turn_queue_entries", "agent_dispatch_attempts", "turn_runtime_states", "turn_events", "turn_messages", "tool_invocations", "turn_interactions", "turn_interaction_advertised_options", "turn_interaction_options", "interaction_response_dispatches",
+  "attachments", "turn_input_snapshots", "turn_input_blocks", "turns", "turn_inference_resolutions", "turn_queue_entries", "agent_dispatch_attempts", "turn_runtime_states", "turn_events", "turn_messages", "tool_invocations", "turn_interactions", "turn_interaction_advertised_options", "turn_interaction_options", "interaction_response_dispatches",
   "worker_leases", "credential_leases", "agent_resume_handles", "turn_recovery_records", "turn_inference_usage_ledgers", "inference_request_reservations", "inference_forwarding_attempts", "turn_terminal_responses", "turn_terminal_response_messages", "turn_response_deliveries", "turn_response_delivery_attempts", "audit_envelopes", "bootstrap_publication_rows",
 ] as const;
 
@@ -138,6 +138,7 @@ test("canonical schema manifest is a complete, reproducible durable inventory", 
   }
   for (const [tableName, componentColumns] of Object.entries({
     principals: ["disabled_actor_system_component"],
+    principal_workspace_bindings: ["created_actor_system_component"],
     identity_bindings: ["revoked_actor_system_component"],
     access_grants: ["granted_actor_system_component", "revoked_actor_system_component"],
     provider_credential_bindings: ["created_actor_system_component", "revoked_actor_system_component"],
@@ -176,7 +177,8 @@ test("canonical manifest excludes every explicitly deferred first-slice table an
     HITCH_V2_SCHEMA_MANIFEST.tables.find((table) => table.name === tableName)?.columns.map((column) => column.name) ?? [];
   assert.deepEqual(columns("endpoints"), [
     "id", "installation_id", "address_kind", "local_host_id", "local_endpoint_id",
-    "audience_kind", "audience_principal_id", "created_at",
+    "identity_binding_id", "identity_binding_source_kind", "audience_kind",
+    "audience_principal_id", "created_at",
   ]);
   assert.equal(columns("sessions").includes("parent_session_id"), false);
   assert.equal(columns("turn_input_blocks").includes("workspace_resource_id"), false);
@@ -205,34 +207,235 @@ test("canonical constraints protect singleton metadata, private references, and 
   });
 });
 
-test("session aggregates cannot queue or activate a Turn owned by another session", async () => {
-  await withDisposableDataRoot(async (disposable) => {
+mvpScenarioCase({
+  scenarioId: "V2-MVP-S01",
+  caseId: "certificate-binding-relational-integrity",
+  title: "certificate, endpoint, role, and workspace bindings fail closed",
+  run: async () => {
+    await withDisposableDataRoot(async (disposable) => {
+    const dataRoot = disposable.resolve("state");
+    openCanonicalHitchV2Database({ dataRoot }).close();
+    const database = new DatabaseSync(join(dataRoot, V2_DATABASE_FILENAME));
+    const fingerprintA = `sha256:${"ab".repeat(32)}`;
+    const fingerprintB = `sha256:${"cd".repeat(32)}`;
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      database.exec(`
+        INSERT INTO installations (
+          id, service_schema_digest, hard_ceilings_json, created_at, updated_at
+        ) VALUES ('installation-1', 'sha256:x', '{}', 't', 't');
+        INSERT INTO principals (
+          id, installation_id, kind, display_name, state, created_at
+        ) VALUES
+          ('principal-a', 'installation-1', 'human', 'A', 'active', 't'),
+          ('principal-b', 'installation-1', 'human', 'B', 'active', 't');
+        INSERT INTO workspaces (
+          id, installation_id, reference, display_name, created_at
+        ) VALUES
+          ('workspace-a', 'installation-1', 'workspace-a', 'A', 't'),
+          ('workspace-b', 'installation-1', 'workspace-b', 'B', 't');
+        INSERT INTO principal_workspace_bindings (
+          principal_id, installation_id, workspace_id, created_actor_kind,
+          created_at
+        ) VALUES
+          ('principal-a', 'installation-1', 'workspace-a', 'bootstrap', 't'),
+          ('principal-b', 'installation-1', 'workspace-b', 'bootstrap', 't');
+      `);
+      assert.throws(() => database.exec(`
+        UPDATE principal_workspace_bindings
+        SET workspace_id = 'workspace-a' WHERE principal_id = 'principal-b'
+      `));
+
+      database.prepare(`
+        INSERT INTO identity_bindings (
+          id, installation_id, principal_id, source_kind,
+          client_trust_root_id, subject_id, state, created_at
+        ) VALUES (?, 'installation-1', ?, 'mtls-client', 'client-ca-v1', ?, 'active', 't')
+      `).run("binding-a", "principal-a", fingerprintA);
+      assert.throws(() => database.prepare(`
+        INSERT INTO identity_bindings (
+          id, installation_id, principal_id, source_kind,
+          client_trust_root_id, subject_id, state, created_at
+        ) VALUES (?, 'installation-1', ?, 'mtls-client', 'client-ca-v1', ?, 'active', 't')
+      `).run("binding-duplicate", "principal-b", fingerprintA));
+      assert.throws(() => database.prepare(`
+        INSERT INTO identity_bindings (
+          id, installation_id, principal_id, source_kind,
+          client_trust_root_id, subject_id, state, created_at
+        ) VALUES (?, 'installation-1', ?, 'mtls-client', 'client-ca-v2', ?, 'active', 't')
+      `).run("binding-duplicate-other-root", "principal-b", fingerprintA));
+      assert.throws(() => database.prepare(`
+        INSERT INTO identity_bindings (
+          id, installation_id, principal_id, source_kind,
+          client_trust_root_id, subject_id, state, created_at
+        ) VALUES (?, 'installation-1', ?, 'mtls-client', 'client-ca-v1', ?, 'active', 't')
+      `).run("binding-uppercase", "principal-b", fingerprintB.toUpperCase()));
+
+      database.exec(`
+        INSERT INTO endpoints (
+          id, installation_id, address_kind, identity_binding_id,
+          identity_binding_source_kind, audience_kind,
+          audience_principal_id, created_at
+        ) VALUES (
+          'endpoint-a', 'installation-1', 'remote-client', 'binding-a',
+          'mtls-client', 'private', 'principal-a', 't'
+        );
+      `);
+      assert.throws(() => database.exec(`
+        INSERT INTO endpoints (
+          id, installation_id, address_kind, identity_binding_id,
+          identity_binding_source_kind, audience_kind,
+          audience_principal_id, created_at
+        ) VALUES (
+          'endpoint-forged', 'installation-1', 'remote-client', 'binding-a',
+          'mtls-client', 'private', 'principal-b', 't'
+        )
+      `));
+      database.exec(`
+        INSERT INTO local_hosts (id, installation_id, created_at)
+          VALUES ('local-host-a', 'installation-1', 't');
+        INSERT INTO identity_bindings (
+          id, installation_id, principal_id, source_kind, local_host_id,
+          subject_id, state, created_at
+        ) VALUES (
+          'local-binding-a', 'installation-1', 'principal-a', 'local-peer',
+          'local-host-a', 'uid:1000', 'active', 't'
+        );
+      `);
+      assert.throws(() => database.exec(`
+        INSERT INTO endpoints (
+          id, installation_id, address_kind, identity_binding_id,
+          identity_binding_source_kind, audience_kind,
+          audience_principal_id, created_at
+        ) VALUES (
+          'endpoint-local-binding', 'installation-1', 'remote-client',
+          'local-binding-a', 'mtls-client', 'private', 'principal-a', 't'
+        )
+      `));
+      assert.throws(() => database.exec(`
+        INSERT INTO authentication_requests (
+          id, installation_id, evidence_kind, socket_security,
+          binding_source_kind, outcome_status, principal_id,
+          identity_binding_id, assurance, decided_at
+        ) VALUES (
+          'auth-local-to-mtls', 'installation-1',
+          'local-peer-owner-socket',
+          'service-owned-0700-parent-and-0600-socket', 'local-peer',
+          'authenticated', 'principal-a', 'binding-a', 'normal', 't'
+        )
+      `));
+
+      database.exec(`
+        INSERT INTO access_grants (
+          id, kind, installation_id, principal_id, role,
+          granted_actor_kind, created_at, state
+        ) VALUES (
+          'member-b', 'installation-role', 'installation-1', 'principal-b',
+          'member', 'bootstrap', 't', 'active'
+        );
+      `);
+      assert.throws(() => database.exec(`
+        INSERT INTO access_grants (
+          id, kind, installation_id, principal_id, role,
+          granted_actor_kind, created_at, state
+        ) VALUES (
+          'admin-b', 'installation-role', 'installation-1', 'principal-b',
+          'admin', 'bootstrap', 't', 'active'
+        )
+      `));
+
+      database.prepare(`
+        INSERT INTO authentication_requests (
+          id, installation_id, evidence_kind, client_trust_root_id,
+          client_certificate_fingerprint, binding_source_kind,
+          outcome_status, principal_id, identity_binding_id, assurance,
+          decided_at
+        ) VALUES (
+          'auth-a', 'installation-1', 'mtls-client-certificate',
+          'client-ca-v1', ?, 'mtls-client', 'authenticated', 'principal-a',
+          'binding-a', 'normal', 't'
+        )
+      `).run(fingerprintA);
+      assert.throws(() => database.prepare(`
+        INSERT INTO authentication_requests (
+          id, installation_id, evidence_kind, client_trust_root_id,
+          client_certificate_fingerprint, binding_source_kind,
+          outcome_status, principal_id, identity_binding_id, assurance,
+          decided_at
+        ) VALUES (
+          'auth-forged', 'installation-1', 'mtls-client-certificate',
+          'client-ca-v1', ?, 'mtls-client', 'authenticated', 'principal-a',
+          'binding-a', 'normal', 't'
+        )
+      `).run(fingerprintB));
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally {
+      database.close();
+    }
+    });
+  },
+});
+
+mvpScenarioCase({
+  scenarioId: "V2-MVP-S02",
+  caseId: "principal-capacity-owner-correlation",
+  title: "principal capacity cannot queue or activate another owner's Turn",
+  run: async () => {
+    await withDisposableDataRoot(async (disposable) => {
     const dataRoot = disposable.resolve("state");
     openCanonicalHitchV2Database({ dataRoot }).close();
     const database = new DatabaseSync(join(dataRoot, V2_DATABASE_FILENAME));
     try {
+      database.exec(`
+        INSERT INTO installations (
+          id, service_schema_digest, hard_ceilings_json, created_at, updated_at
+        ) VALUES ('installation-a', 'sha256:x', '{}', 't', 't');
+        INSERT INTO principals (
+          id, installation_id, kind, display_name, state, created_at
+        ) VALUES
+          ('principal-a', 'installation-a', 'human', 'A', 'active', 't'),
+          ('principal-b', 'installation-a', 'human', 'B', 'active', 't');
+      `);
       seedSessionTurnSkeleton(database);
       assert.throws(() => database.exec(`
-        INSERT INTO turn_queue_entries (session_id, turn_id, queue_position, enqueued_at)
-          VALUES ('session-a', 'turn-b', 0, '2026-01-01T00:00:00.000Z')
+        INSERT INTO turn_queue_entries (principal_id, turn_id, admission_ordinal, enqueued_at)
+          VALUES ('principal-a', 'turn-b', 0, '2026-01-01T00:00:00.000Z')
       `));
       assert.throws(() => database.exec(`
-        INSERT INTO turn_queue (session_id, active_turn_id, updated_at)
-          VALUES ('session-a', 'turn-b', '2026-01-01T00:00:00.000Z')
+        INSERT INTO principal_execution_capacity (
+          principal_id, next_admission_ordinal, active_turn_id, updated_at
+        ) VALUES (
+          'principal-a', 1, 'turn-b', '2026-01-01T00:00:00.000Z'
+        )
       `));
 
       database.exec(`
-        INSERT INTO turn_queue_entries (session_id, turn_id, queue_position, enqueued_at)
-          VALUES ('session-b', 'turn-b', 0, '2026-01-01T00:00:00.000Z');
-        INSERT INTO turn_queue (session_id, active_turn_id, updated_at)
-          VALUES ('session-b', 'turn-b', '2026-01-01T00:00:00.000Z');
+        INSERT INTO principal_execution_capacity (
+          principal_id, next_admission_ordinal, active_turn_id, updated_at
+        ) VALUES (
+          'principal-a', 0, NULL, '2026-01-01T00:00:00.000Z'
+        );
+        INSERT INTO turn_queue_entries (
+          principal_id, turn_id, admission_ordinal, enqueued_at
+        ) VALUES (
+          'principal-b', 'turn-b', 0, '2026-01-01T00:00:00.000Z'
+        );
+        INSERT INTO principal_execution_capacity (
+          principal_id, next_admission_ordinal, active_turn_id, updated_at
+        ) VALUES (
+          'principal-b', 1, NULL, '2026-01-01T00:00:00.000Z'
+        );
+        DELETE FROM turn_queue_entries WHERE turn_id = 'turn-b';
+        UPDATE principal_execution_capacity SET active_turn_id = 'turn-b'
+          WHERE principal_id = 'principal-b';
       `);
       assert.deepEqual(database.prepare("PRAGMA foreign_key_check(turn_queue_entries)").all(), []);
-      assert.deepEqual(database.prepare("PRAGMA foreign_key_check(turn_queue)").all(), []);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check(principal_execution_capacity)").all(), []);
     } finally {
       database.close();
     }
-  });
+    });
+  },
 });
 
 test("selectable approval options retain their exact safe advertised or mediated disposition", async () => {

@@ -11,6 +11,8 @@ import type {
   AgentProfileId,
   AuthenticationRequestId,
   AuthenticationSubjectId,
+  ClientCertificateFingerprint,
+  ClientCertificateTrustRootId,
   ConnectorAccountId,
   ExecutionPolicyId,
   ExtensionId,
@@ -36,6 +38,7 @@ export type AuditSystemComponent =
   | "broker"
   | "delivery"
   | "local-connector"
+  | "remote-ingress"
   | "recovery"
   | "sidecar"
   | "supervisor"
@@ -75,6 +78,10 @@ export type AuthenticationSource =
   | {
       readonly kind: "local-peer";
       readonly localHostId: LocalHostId;
+    }
+  | {
+      readonly kind: "mtls-client";
+      readonly trustRootId: ClientCertificateTrustRootId;
     };
 
 /**
@@ -83,12 +90,10 @@ export type AuthenticationSource =
  * a subject revokes the old record and creates a new one; principalId is never
  * changed in place.
  */
-export interface IdentityBinding {
+interface IdentityBindingBase {
   readonly id: IdentityBindingId;
   readonly installationId: InstallationId;
   readonly principalId: PrincipalId;
-  readonly source: AuthenticationSource;
-  readonly subjectId: AuthenticationSubjectId;
   readonly state:
     | { readonly status: "active" }
     | {
@@ -97,6 +102,35 @@ export interface IdentityBinding {
         readonly revokedBy: AuditActorRef;
       };
   readonly supersedesBindingId?: IdentityBindingId;
+  readonly createdAt: IsoTimestamp;
+}
+
+/**
+ * The certificate subject is deliberately a different branded value from
+ * connector/local subjects so trusted transport evidence cannot be mixed.
+ */
+export type IdentityBinding = IdentityBindingBase &
+  (
+    | {
+        readonly source: Extract<AuthenticationSource, { readonly kind: "connector" }>;
+        readonly subjectId: AuthenticationSubjectId;
+      }
+    | {
+        readonly source: Extract<AuthenticationSource, { readonly kind: "local-peer" }>;
+        readonly subjectId: AuthenticationSubjectId;
+      }
+    | {
+        readonly source: Extract<AuthenticationSource, { readonly kind: "mtls-client" }>;
+        readonly subjectId: ClientCertificateFingerprint;
+      }
+  );
+
+/** One immutable MVP workspace assignment; replacement is deliberately absent. */
+export interface PrincipalWorkspaceBinding {
+  readonly installationId: InstallationId;
+  readonly principalId: PrincipalId;
+  readonly workspaceId: WorkspaceId;
+  readonly createdBy: AuditActorRef;
   readonly createdAt: IsoTimestamp;
 }
 

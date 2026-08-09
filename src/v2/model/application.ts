@@ -51,6 +51,7 @@ import type {
   AuthorizationDecision,
   IdentityBinding,
   InstallationRoleGrant,
+  PrincipalWorkspaceBinding,
   Principal,
   SessionConfigurationUseGrant,
 } from "./identity-access.js";
@@ -689,6 +690,7 @@ export interface BootstrapPublicationArtifactBindings {
 export interface BootstrapPublicationRecords {
   readonly installation: Installation;
   readonly owner: Principal;
+  readonly ownerWorkspaceBinding: PrincipalWorkspaceBinding;
   readonly localIdentityBinding: IdentityBinding;
   readonly localEndpoint: Endpoint;
   readonly accessGrants: readonly (
@@ -889,7 +891,7 @@ export interface TurnAdmissionUnitOfWork {
 export interface QueueHeadClaimUnitOfWork {
   claimEligibleQueueHead(input: {
     readonly context: TurnCoordinatorServiceContext;
-    readonly sessionId: SessionId;
+    readonly principalId: PrincipalId;
   }): Promise<
     | {
         readonly status: "claimed";

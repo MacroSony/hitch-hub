@@ -317,6 +317,7 @@ function projectDecodedBootstrapPublication(input: BootstrapPublicationProjectio
   const records: BootstrapPublicationRecords = freeze({
     installation: freeze({ id: r.ids.installationId, serviceSchema: freeze({ service: "hitch", generation: "v2", schemaVersion: 1, sqliteApplicationId: 0x48495432, schemaDigest: r.serviceSchemaDigest }), hardCeilings: decodeInstallationHardCeilings(config.installationHardCeilings), createdAt: timestamp, updatedAt: timestamp }),
     owner: freeze({ id: r.ids.ownerId, installationId: r.ids.installationId, kind: config.bootstrap.owner.kind, displayName: config.bootstrap.owner.displayName, state: { status: "active" }, createdAt: timestamp }),
+    ownerWorkspaceBinding: freeze({ installationId: r.ids.installationId, principalId: r.ids.ownerId, workspaceId: workspace.id, createdBy: r.auditActor, createdAt: timestamp }),
     localIdentityBinding: freeze({ id: r.ids.identityBindingId, installationId: r.ids.installationId, principalId: r.ids.ownerId, source: { kind: "local-peer", localHostId: r.ids.localHostId }, subjectId: r.ids.authenticationSubjectId, state: { status: "active" }, createdAt: timestamp }),
     localEndpoint: freeze({ id: r.ids.endpointId, installationId: r.ids.installationId, address: { kind: "local-client", localHostId: r.ids.localHostId, localEndpointId: r.ids.localEndpointId }, audience: { kind: "private", principalId: r.ids.ownerId }, createdAt: timestamp }),
     accessGrants: freeze(accessGrants),

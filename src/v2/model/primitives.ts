@@ -71,6 +71,12 @@ export type IsoTimestamp = BrandedString<"IsoTimestamp">;
 export type ConfigurationReference =
   BrandedString<"ConfigurationReference">;
 export type AuthenticationSubjectId = BrandedString<"AuthenticationSubjectId">;
+/** Lowercase SHA-256 digest of one complete DER-encoded X.509 leaf certificate. */
+export type ClientCertificateFingerprint =
+  BrandedString<"ClientCertificateFingerprint">;
+/** Exact operator-configured client-certificate trust-root reference. */
+export type ClientCertificateTrustRootId =
+  BrandedString<"ClientCertificateTrustRootId">;
 export type ExternalEndpointId = BrandedString<"ExternalEndpointId">;
 export type LocalEndpointId = BrandedString<"LocalEndpointId">;
 export type OriginMessageId = BrandedString<"OriginMessageId">;

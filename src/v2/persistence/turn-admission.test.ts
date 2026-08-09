@@ -7,6 +7,7 @@ import {
   createFirstSliceAuthorizationTrust,
   type FirstSliceAuthorizationTrust,
 } from "../application/authorization-contexts.js";
+import { mvpScenarioCase } from "../acceptance/runner.js";
 import type {
   AuthenticatedConnectorContext,
 } from "../model/application.js";
@@ -282,8 +283,12 @@ test("[V2-S04/turn-admission-idempotency] duplicate submission returns the origi
   });
 });
 
-test("[V2-S05/turn-queue-capacity] three pending turns are admitted; the fourth is rejected and sessions are independent", async () => {
-  await withDisposableDataRoot(async (root) => {
+mvpScenarioCase({
+  scenarioId: "V2-MVP-S07",
+  caseId: "principal-wide-pending-fifo",
+  title: "three pending Turns are enforced principal-wide across sessions",
+  run: async () => {
+    await withDisposableDataRoot(async (root) => {
     const database = openCanonicalHitchV2Database({
       dataRoot: root.resolve("state"),
     });
@@ -294,12 +299,23 @@ test("[V2-S05/turn-queue-capacity] three pending turns are admitted; the fourth 
         kind: "session-id" as const,
         sessionId: harness.sessionId,
       };
+      const secondSession = await createSecondSession(
+        database,
+        harness,
+        "Second session",
+        "session-two",
+      );
+      const secondSelector = {
+        kind: "session-id" as const,
+        sessionId: secondSession,
+      };
+      const selectors = [selector, secondSelector, selector] as const;
 
       const turnIds: TurnId[] = [];
       for (let index = 1; index <= 3; index += 1) {
         const result = await unitOfWork.admitTurn({
           context: harness.context,
-          session: selector,
+          session: selectors[index - 1]!,
           originMessageId: `origin-${index}` as never,
           idempotencyKey: `key-${index}` as never,
           text: `Prompt ${index}`,
@@ -313,7 +329,7 @@ test("[V2-S05/turn-queue-capacity] three pending turns are admitted; the fourth 
       }
       const rejected = await unitOfWork.admitTurn({
         context: harness.context,
-        session: selector,
+        session: secondSelector,
         originMessageId: "origin-4" as never,
         idempotencyKey: "key-4" as never,
         text: "Prompt 4",
@@ -321,28 +337,23 @@ test("[V2-S05/turn-queue-capacity] three pending turns are admitted; the fourth 
       assert.deepEqual(rejected, { status: "queue-capacity-exceeded" });
       assert.equal(countRows(database, "turns"), 3);
       assert.equal(countRows(database, "turn_queue_entries"), 3);
-
-      const secondSession = await createSecondSession(
-        database,
-        harness,
-        "Second session",
-        "session-two",
+      assert.deepEqual(
+        database.transaction((transaction) =>
+          transaction.all(
+            `SELECT q.admission_ordinal, t.session_id
+            FROM turn_queue_entries q
+            JOIN turns t ON t.id = q.turn_id
+            WHERE q.principal_id = ?
+            ORDER BY q.admission_ordinal`,
+            ["owner-v1"],
+          ),
+        ),
+        [
+          { admission_ordinal: 0, session_id: harness.sessionId },
+          { admission_ordinal: 1, session_id: secondSession },
+          { admission_ordinal: 2, session_id: harness.sessionId },
+        ],
       );
-      const other = await unitOfWork.admitTurn({
-        context: harness.context,
-        session: { kind: "session-id", sessionId: secondSession },
-        originMessageId: "origin-other" as never,
-        idempotencyKey: "key-other" as never,
-        text: "Independent session prompt",
-      });
-      assert.equal(other.status, "admitted");
-      if (other.status === "admitted") {
-        assert.equal(other.receipt.status, "queued");
-        if (other.receipt.status === "queued") {
-          assert.equal(other.receipt.queue.position, 0);
-        }
-      }
-      assert.equal(countRows(database, "turns"), 4);
 
       // A duplicate replay reports the live queue position.
       const replay = await unitOfWork.admitTurn({
@@ -372,7 +383,8 @@ test("[V2-S05/turn-queue-capacity] three pending turns are admitted; the fourth 
     } finally {
       database.close();
     }
-  });
+    });
+  },
 });
 
 test("[V2-S12/turn-admission-attachment] admission persists attachment rows exactly once and rejection leaves none", async () => {
@@ -638,15 +650,15 @@ test("[V2-S06/queued-cancellation] requester cancellation compare-removes only a
       // The survivor keeps its durable position; FIFO order is preserved.
       const remaining = database.transaction((transaction) => {
         const row = transaction.get(
-          `SELECT turn_id, queue_position FROM turn_queue_entries
-          WHERE session_id = ?`,
-          [harness.sessionId],
+          `SELECT turn_id, admission_ordinal FROM turn_queue_entries
+          WHERE principal_id = ?`,
+          ["owner-v1"],
         );
         assert.ok(row !== undefined);
         return row;
       });
       assert.equal(remaining.turn_id, second.turn.id);
-      assert.equal(remaining.queue_position, 1);
+      assert.equal(remaining.admission_ordinal, 1);
 
       const runtime = database.transaction((transaction) => {
         const row = transaction.get(

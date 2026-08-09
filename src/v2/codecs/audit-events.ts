@@ -171,6 +171,7 @@ const AUDIT_SYSTEM_COMPONENTS = [
   "broker",
   "delivery",
   "local-connector",
+  "remote-ingress",
   "recovery",
   "sidecar",
   "supervisor",

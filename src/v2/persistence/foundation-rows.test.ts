@@ -38,7 +38,7 @@ test("bootstrap foundation mapper covers every first-slice table deterministical
   );
 
   assert.deepEqual(second, first);
-  assert.equal(first.rows.length, 81);
+  assert.equal(first.rows.length, 83);
   assert.deepEqual(
     new Set(first.rows.map((row) => row.table)),
     new Set(BOOTSTRAP_FOUNDATION_TABLES),

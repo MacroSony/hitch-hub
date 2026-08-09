@@ -65,6 +65,9 @@ export interface HitchV2ServiceSchemaIdentity {
  */
 export interface InstallationHardCeilings {
   readonly maximumQueuedTurnsPerSession: number;
+  readonly maximumPendingTurnsPerPrincipal: number;
+  readonly maximumConcurrentWorkersPerPrincipal: number;
+  readonly maximumConcurrentWorkersPerInstallation: number;
   readonly maximumActiveWorkMs: number;
   readonly maximumInteractionWaitMs: number;
   readonly maximumBeforeAcceptanceAttempts: number;
