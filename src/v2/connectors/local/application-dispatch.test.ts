@@ -7,6 +7,7 @@ import type {
   ConnectorCommandResponse,
   ConnectorResponseEvent,
   FirstSliceConnectorApplication,
+  LocalAdministrationCommand,
 } from "../../model/application.js";
 import { createLocalImageIntakeVault } from "../../persistence/attachment-store.js";
 import {
@@ -338,4 +339,60 @@ test("attached stream failures close exactly once and fail the exchange", async 
     }).exchange),
     LocalProtocolApplicationDispatchError,
   );
+});
+
+test("local administration dispatch converts bounded certificate DER without invoking the user application", async () => {
+  let observed: LocalAdministrationCommand | undefined;
+  const dispatch = createLocalProtocolApplicationDispatch({
+    imageIntake: createLocalImageIntakeVault(),
+    application: application(async () => {
+      throw new Error("ordinary application must not receive administration");
+    }),
+    administration: Object.freeze({
+      async execute(
+        context: AuthenticatedConnectorContext,
+        command: LocalAdministrationCommand,
+      ) {
+        assert.equal(context, CONTEXT);
+        observed = command;
+        return {
+          status: "succeeded" as const,
+          result: {
+            kind: "client-certificate-bound" as const,
+            principalId: "principal-2" as never,
+            identityBindingId: "binding-2" as never,
+            fingerprint: `sha256:${"ab".repeat(32)}` as never,
+          },
+        };
+      },
+    }),
+  });
+  const request = exchange({
+    kind: "admin-bind-client-certificate",
+    principalReference: "user-b",
+    bindingReference: "user-b-cert-v1",
+    certificateDer: {
+      encoding: "base64",
+      byteLength: 5,
+      data: "aGVsbG8=",
+    },
+  });
+  await dispatch(request.exchange);
+  assert.deepEqual(observed, {
+    kind: "bind-client-certificate",
+    principalReference: "user-b",
+    bindingReference: "user-b-cert-v1",
+    completeDer: Buffer.from("hello"),
+  });
+  assert.deepEqual(request.responses, [
+    {
+      status: "succeeded",
+      result: {
+        kind: "client-certificate-bound",
+        principalId: "principal-2",
+        identityBindingId: "binding-2",
+        fingerprint: `sha256:${"ab".repeat(32)}`,
+      },
+    },
+  ]);
 });

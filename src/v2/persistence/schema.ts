@@ -255,8 +255,7 @@ const HITCH_V2_SCHEMA_DDL_UNQUALIFIED = [
     sandbox_path TEXT NOT NULL,
     maximum_access TEXT NOT NULL CHECK (maximum_access = 'read-write'),
     created_at TEXT NOT NULL,
-    UNIQUE (installation_id, canonical_host_path),
-    UNIQUE (installation_id, sandbox_path)
+    UNIQUE (installation_id, canonical_host_path)
   )`,
   `CREATE TABLE workspace_revisions (
     id TEXT PRIMARY KEY,
@@ -1125,9 +1124,10 @@ const HITCH_V2_SCHEMA_DDL_UNQUALIFIED = [
     actor_principal_id TEXT REFERENCES principals(id),
     system_component TEXT CHECK (system_component IN ('application', 'authorization', 'bootstrap', 'broker', 'delivery', 'local-connector', 'remote-ingress', 'recovery', 'sidecar', 'supervisor', 'turn-coordinator')),
     outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'denied', 'failed')),
-    action TEXT NOT NULL CHECK (action IN ('installation-published', 'authentication-recorded', 'identity-binding-state-changed', 'configuration-grant-state-changed', 'session-created', 'session-creation-denied', 'session-runtime-stop-recorded', 'session-lifecycle-state-changed', 'attachment-admitted', 'turn-admitted', 'turn-state-transitioned', 'turn-queue-handoff-recorded', 'turn-dispatched', 'turn-recovery-recorded', 'turn-message-finalized', 'interaction-recorded', 'interaction-resolved', 'interaction-response-dispatch-recorded', 'worker-lease-state-changed', 'credential-lease-state-changed', 'resume-handle-state-changed', 'inference-reserved', 'inference-reservation-denied', 'inference-forwarding-recorded', 'inference-forwarding-denied', 'inference-send-started', 'inference-send-completed', 'inference-send-outcome-unknown', 'inference-settled', 'inference-charged-reservation', 'inference-released', 'inference-release-denied', 'turn-terminalized', 'response-delivery-created', 'response-delivery-attempt-recorded', 'response-delivery-expired')),
+    action TEXT NOT NULL CHECK (action IN ('installation-published', 'authentication-recorded', 'principal-created', 'principal-state-changed', 'identity-binding-state-changed', 'configuration-grant-state-changed', 'session-created', 'session-creation-denied', 'session-runtime-stop-recorded', 'session-lifecycle-state-changed', 'attachment-admitted', 'turn-admitted', 'turn-state-transitioned', 'turn-queue-handoff-recorded', 'turn-dispatched', 'turn-recovery-recorded', 'turn-message-finalized', 'interaction-recorded', 'interaction-resolved', 'interaction-response-dispatch-recorded', 'worker-lease-state-changed', 'credential-lease-state-changed', 'resume-handle-state-changed', 'inference-reserved', 'inference-reservation-denied', 'inference-forwarding-recorded', 'inference-forwarding-denied', 'inference-send-started', 'inference-send-completed', 'inference-send-outcome-unknown', 'inference-settled', 'inference-charged-reservation', 'inference-released', 'inference-release-denied', 'turn-terminalized', 'response-delivery-created', 'response-delivery-attempt-recorded', 'response-delivery-expired')),
     authentication_request_id TEXT REFERENCES authentication_requests(id),
     identity_binding_id TEXT REFERENCES identity_bindings(id),
+    subject_principal_id TEXT REFERENCES principals(id),
     access_grant_id TEXT REFERENCES access_grants(id),
     session_id TEXT REFERENCES sessions(id),
     session_spec_id TEXT REFERENCES session_specs(id),

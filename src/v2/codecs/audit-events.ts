@@ -43,6 +43,12 @@ const AUDIT_EVENT_FIELDS = {
   "authentication-recorded": [
     { field: "authenticationRequestId", kind: "AuthenticationRequest" },
   ],
+  "principal-created": [
+    { field: "subjectPrincipalId", kind: "Principal" },
+  ],
+  "principal-state-changed": [
+    { field: "subjectPrincipalId", kind: "Principal" },
+  ],
   "identity-binding-state-changed": [
     { field: "identityBindingId", kind: "IdentityBinding" },
   ],

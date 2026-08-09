@@ -9,6 +9,7 @@ import {
 import { once } from "node:events";
 import test from "node:test";
 
+import { TEST_CLIENT_CERTIFICATE_PEM } from "../connectors/remote/test-certificates.js";
 import { withDisposableDataRoot } from "../test-support/disposable-data-root.js";
 import {
   WalkingSkeletonConfigurationError,
@@ -296,6 +297,95 @@ test("[V2-S04/two-process-cli-idempotency] separate daemon and CLI preserve rest
       assert.equal(
         (shownAfterRestart.result as Record<string, unknown>).state,
         "dispatching",
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+test("local CLI provisions, disables, binds, and revokes one static remote principal without opening SQLite", { timeout: 30_000 }, async () => {
+  await withDisposableDataRoot(async (root) => {
+    const ownerWorkspace = root.resolve("workspace-owner");
+    const userWorkspace = root.resolve("workspace-user-b");
+    mkdirSync(ownerWorkspace, { mode: 0o700 });
+    mkdirSync(userWorkspace, { mode: 0o700 });
+    const certificatePath = root.resolve("user-b-cert.pem");
+    writeFileSync(certificatePath, TEST_CLIENT_CERTIFICATE_PEM, { mode: 0o600 });
+    const configPath = root.resolve("v2.yaml");
+    writeConfiguration(
+      configPath,
+      root.resolve("state"),
+      ownerWorkspace,
+      "clientCertificateTrustRootId: private-alpha-client-ca-v1",
+    );
+    assert.equal(
+      loadWalkingSkeletonStartupConfiguration(configPath)
+        .clientCertificateTrustRootId,
+      "private-alpha-client-ca-v1",
+    );
+    const daemon = await startDaemon(configPath);
+    try {
+      const created = firstOutcome(await runCli([
+        "principal",
+        "create",
+        "--config",
+        configPath,
+        "--reference",
+        "user-b",
+        "--name",
+        "User B",
+        "--role",
+        "member",
+        "--workspace",
+        "workspace-b",
+        "--workspace-root",
+        userWorkspace,
+      ]));
+      assert.equal(created.status, "succeeded");
+      assert.equal(
+        (created.result as Record<string, unknown>).kind,
+        "principal-created",
+      );
+      const bound = firstOutcome(await runCli([
+        "certificate",
+        "bind",
+        "--config",
+        configPath,
+        "--principal",
+        "user-b",
+        "--reference",
+        "user-b-cert-v1",
+        "--certificate",
+        certificatePath,
+      ]));
+      assert.equal(
+        (bound.result as Record<string, unknown>).kind,
+        "client-certificate-bound",
+      );
+      const disabled = firstOutcome(await runCli([
+        "principal",
+        "disable",
+        "--config",
+        configPath,
+        "--reference",
+        "user-b",
+      ]));
+      assert.equal(
+        (disabled.result as Record<string, unknown>).kind,
+        "principal-disabled",
+      );
+      const revoked = firstOutcome(await runCli([
+        "certificate",
+        "revoke",
+        "--config",
+        configPath,
+        "--reference",
+        "user-b-cert-v1",
+      ]));
+      assert.equal(
+        (revoked.result as Record<string, unknown>).kind,
+        "client-certificate-revoked",
       );
     } finally {
       await daemon.stop();

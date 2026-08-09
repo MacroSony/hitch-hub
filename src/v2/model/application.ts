@@ -14,6 +14,7 @@ import type {
   AgentResumeHandleId,
   AuthenticationSubjectId,
   AuthenticationRequestId,
+  ClientCertificateFingerprint,
   ConfigurationReference,
   CredentialLeaseId,
   EndpointId,
@@ -126,6 +127,7 @@ import type {
 } from "./provider-broker.js";
 
 declare const acceptedLocalConnectorBrand: unique symbol;
+declare const verifiedClientCertificateEvidenceBrand: unique symbol;
 declare const authenticatedConnectorContextBrand: unique symbol;
 declare const trustedServiceAuthorizationContextBrand: unique symbol;
 declare const boundedConnectorImageUploadBrand: unique symbol;
@@ -222,6 +224,15 @@ export interface AcceptedLocalConnectorConnection {
 }
 
 /**
+ * One-shot transport evidence minted only after Hitch has verified the mTLS
+ * connection and its complete leaf certificate. Protocol data cannot
+ * construct or populate this value.
+ */
+export interface VerifiedClientCertificateEvidence {
+  readonly [verifiedClientCertificateEvidenceBrand]: true;
+}
+
+/**
  * Trusted request context minted by authentication. Its public principal is
  * useful for audit attribution, but the unforgeable brand is the authority
  * accepted by application entry points.
@@ -272,6 +283,13 @@ export type ConnectorAuthenticationResult =
 export interface LocalConnectorAuthenticationPort {
   authenticate(
     connection: AcceptedLocalConnectorConnection,
+  ): Promise<ConnectorAuthenticationResult>;
+}
+
+/** Remote authentication consumes only verifier-minted transport evidence. */
+export interface RemoteConnectorAuthenticationPort {
+  authenticate(
+    evidence: VerifiedClientCertificateEvidence,
   ): Promise<ConnectorAuthenticationResult>;
 }
 
@@ -449,6 +467,65 @@ export type ConnectorCommandFailureCode =
   | "queue-capacity-exceeded"
   | "conflict"
   | "temporarily-unavailable";
+
+export type LocalAdministrationCommand =
+  | {
+      readonly kind: "create-principal";
+      readonly principalReference: string;
+      readonly displayName: string;
+      readonly role: "admin" | "member";
+      readonly workspaceReference: string;
+      readonly canonicalWorkspaceRoot: string;
+    }
+  | {
+      readonly kind: "disable-principal";
+      readonly principalReference: string;
+    }
+  | {
+      readonly kind: "bind-client-certificate";
+      readonly principalReference: string;
+      readonly bindingReference: string;
+      readonly completeDer: Uint8Array;
+    }
+  | {
+      readonly kind: "revoke-client-certificate";
+      readonly bindingReference: string;
+    };
+
+export type LocalAdministrationSuccess =
+  | {
+      readonly kind: "principal-created";
+      readonly principalId: PrincipalId;
+      readonly workspaceId: WorkspaceId;
+    }
+  | {
+      readonly kind: "principal-disabled" | "principal-already-disabled";
+      readonly principalId: PrincipalId;
+    }
+  | {
+      readonly kind: "client-certificate-bound";
+      readonly principalId: PrincipalId;
+      readonly identityBindingId: IdentityBindingId;
+      readonly fingerprint: ClientCertificateFingerprint;
+    }
+  | {
+      readonly kind:
+        | "client-certificate-revoked"
+        | "client-certificate-already-revoked";
+      readonly identityBindingId: IdentityBindingId;
+    };
+
+export type LocalAdministrationResponse =
+  | { readonly status: "succeeded"; readonly result: LocalAdministrationSuccess }
+  | { readonly status: "rejected"; readonly code: ConnectorCommandFailureCode };
+
+/** Elevated owner-private administration; never passed to remote ingress. */
+export interface LocalAdministrationPort {
+  execute(
+    context: AuthenticatedConnectorContext,
+    command: LocalAdministrationCommand,
+  ): Promise<LocalAdministrationResponse>;
+}
 
 export type ConnectorCommandResponse<Command extends ConnectorCommand> =
   | {

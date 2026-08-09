@@ -25,7 +25,7 @@ function assertIssue(
 }
 
 test("audit actions are a closed exhaustive allowlist", () => {
-  assert.equal(AUDIT_ACTIONS.length, 36);
+  assert.equal(AUDIT_ACTIONS.length, 38);
   assert.deepEqual(decodeAuditEvent({ action: "installation-published" }), {
     action: "installation-published",
   });

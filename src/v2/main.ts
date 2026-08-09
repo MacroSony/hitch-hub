@@ -7,6 +7,7 @@ import {
 import {
   executeLocalProtocolCommand,
   loadWalkingSkeletonStartupConfiguration,
+  readBoundedCliClientCertificate,
   readBoundedCliImage,
   startWalkingSkeletonService,
 } from "./cli/index.js";
@@ -235,6 +236,79 @@ async function showTurn(args: readonly string[]): Promise<number> {
   });
 }
 
+async function createPrincipal(args: readonly string[]): Promise<number> {
+  const parsed = parseArguments(args, [
+    "--config",
+    "--reference",
+    "--name",
+    "--role",
+    "--workspace",
+    "--workspace-root",
+  ]);
+  if (parsed.positionals.length !== 0) {
+    throw new CliUsageError("principal create accepts no positional arguments");
+  }
+  const role = requiredOption(parsed, "--role");
+  if (role !== "admin" && role !== "member") {
+    throw new CliUsageError("--role must be admin or member");
+  }
+  return await runClientCommand(requiredOption(parsed, "--config"), {
+    kind: "admin-create-principal",
+    principalReference: requiredOption(parsed, "--reference"),
+    displayName: requiredOption(parsed, "--name"),
+    role,
+    workspaceReference: requiredOption(parsed, "--workspace"),
+    workspaceRoot: requiredOption(parsed, "--workspace-root"),
+  });
+}
+
+async function disablePrincipal(args: readonly string[]): Promise<number> {
+  const parsed = parseArguments(args, ["--config", "--reference"]);
+  if (parsed.positionals.length !== 0) {
+    throw new CliUsageError("principal disable accepts no positional arguments");
+  }
+  return await runClientCommand(requiredOption(parsed, "--config"), {
+    kind: "admin-disable-principal",
+    principalReference: requiredOption(parsed, "--reference"),
+  });
+}
+
+async function bindCertificate(args: readonly string[]): Promise<number> {
+  const parsed = parseArguments(args, [
+    "--config",
+    "--principal",
+    "--reference",
+    "--certificate",
+  ]);
+  if (parsed.positionals.length !== 0) {
+    throw new CliUsageError("certificate bind accepts no positional arguments");
+  }
+  const completeDer = readBoundedCliClientCertificate(
+    requiredOption(parsed, "--certificate"),
+  );
+  return await runClientCommand(requiredOption(parsed, "--config"), {
+    kind: "admin-bind-client-certificate",
+    principalReference: requiredOption(parsed, "--principal"),
+    bindingReference: requiredOption(parsed, "--reference"),
+    certificateDer: {
+      encoding: "base64",
+      byteLength: completeDer.byteLength,
+      data: Buffer.from(completeDer).toString("base64"),
+    },
+  });
+}
+
+async function revokeCertificate(args: readonly string[]): Promise<number> {
+  const parsed = parseArguments(args, ["--config", "--reference"]);
+  if (parsed.positionals.length !== 0) {
+    throw new CliUsageError("certificate revoke accepts no positional arguments");
+  }
+  return await runClientCommand(requiredOption(parsed, "--config"), {
+    kind: "admin-revoke-client-certificate",
+    bindingReference: requiredOption(parsed, "--reference"),
+  });
+}
+
 async function main(args: readonly string[]): Promise<number> {
   const [command, subcommand, ...rest] = args;
   if (command === "serve") return await serve(args.slice(1));
@@ -245,8 +319,20 @@ async function main(args: readonly string[]): Promise<number> {
   if (command === "turn" && subcommand === "show") {
     return await showTurn(rest);
   }
+  if (command === "principal" && subcommand === "create") {
+    return await createPrincipal(rest);
+  }
+  if (command === "principal" && subcommand === "disable") {
+    return await disablePrincipal(rest);
+  }
+  if (command === "certificate" && subcommand === "bind") {
+    return await bindCertificate(rest);
+  }
+  if (command === "certificate" && subcommand === "revoke") {
+    return await revokeCertificate(rest);
+  }
   throw new CliUsageError(
-    "usage: hitch-v2 serve|session create|prompt|turn show (all commands require --config)",
+    "usage: hitch-v2 serve|session create|prompt|turn show|principal create|principal disable|certificate bind|certificate revoke (all commands require --config)",
   );
 }
 

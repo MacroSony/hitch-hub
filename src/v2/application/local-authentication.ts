@@ -248,7 +248,8 @@ function readUniqueCandidate(
     transaction,
     `SELECT COUNT(*) AS count
       FROM identity_bindings
-      WHERE installation_id = ?`,
+      WHERE installation_id = ?
+        AND source_kind = 'local-peer'`,
     [installationId],
   );
   if (bindingCount === 0) return undefined;
@@ -272,7 +273,8 @@ function readUniqueCandidate(
     JOIN local_hosts
       ON local_hosts.id = identity_bindings.local_host_id
       AND local_hosts.installation_id = identity_bindings.installation_id
-    WHERE identity_bindings.installation_id = ?`,
+    WHERE identity_bindings.installation_id = ?
+      AND identity_bindings.source_kind = 'local-peer'`,
     [installationId],
   );
   if (rows.length !== 1) {
@@ -369,7 +371,7 @@ function insertAuthenticationRequest(
       decision.outcome.status,
       authenticated?.principalId ?? null,
       authenticated?.identityBindingId ?? null,
-      authenticated === undefined ? null : "normal",
+      authenticated === undefined ? null : "elevated",
       rejected?.reason ?? null,
       decision.decidedAt,
     ],
@@ -468,7 +470,7 @@ function mintContext(
     principalId: decision.outcome.principalId,
     identityBindingId: decision.outcome.identityBindingId,
     method: "local-peer",
-    assurance: "normal",
+    assurance: "elevated",
     requestId: decision.requestId,
     authenticatedAt: decision.decidedAt,
   });

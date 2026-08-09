@@ -14,6 +14,7 @@ function correlation(
   field:
     | "authenticationRequestId"
     | "identityBindingId"
+    | "subjectPrincipalId"
     | "accessGrantId"
     | "sessionId"
     | "sessionSpecId"
@@ -60,15 +61,15 @@ export function insertAuditEnvelope(
     `INSERT INTO audit_envelopes (
       id, installation_id, actor_kind, actor_principal_id, system_component,
       outcome, action, authentication_request_id, identity_binding_id,
-      access_grant_id, session_id, session_spec_id, endpoint_binding_id,
-      attachment_id,
+      subject_principal_id, access_grant_id, session_id, session_spec_id,
+      endpoint_binding_id, attachment_id,
       turn_id, attempt_id, turn_message_id, interaction_id,
       interaction_response_id, worker_lease_id, credential_lease_id,
       resume_handle_id, reservation_id, forwarding_attempt_id, delivery_id,
       delivery_attempt_id, occurred_at
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?
+      ?, ?, ?, ?, ?
     )`,
     [
       envelope.id,
@@ -80,6 +81,7 @@ export function insertAuditEnvelope(
       envelope.action,
       correlation(envelope, "authenticationRequestId"),
       correlation(envelope, "identityBindingId"),
+      correlation(envelope, "subjectPrincipalId"),
       correlation(envelope, "accessGrantId"),
       correlation(envelope, "sessionId"),
       correlation(envelope, "sessionSpecId"),

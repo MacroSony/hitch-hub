@@ -1,4 +1,7 @@
-import { createFirstSliceAuthorizationTrust } from "../application/authorization-contexts.js";
+import {
+  createFirstSliceAuthorizationTrust,
+  createMultiUserAuthorizationTrust,
+} from "../application/authorization-contexts.js";
 import {
   SQLiteDevelopmentNoOpCoordinator,
   SQLiteWalkingSkeletonTurnResultQuery,
@@ -20,6 +23,7 @@ import type { V2Database } from "../persistence/database.js";
 import { openCanonicalHitchV2Database } from "../persistence/initialize.js";
 import { HITCH_V2_SCHEMA_DIGEST } from "../persistence/schema.js";
 import { SQLiteSessionCreationUnitOfWork } from "../persistence/session-creation.js";
+import { SQLiteLocalAdministration } from "../persistence/local-administration.js";
 import {
   SQLiteTurnAdmissionUnitOfWork,
   SQLiteTurnCancellationUnitOfWork,
@@ -147,7 +151,26 @@ export async function startWalkingSkeletonService(
       clock,
       ids,
     }).publishBootstrap(projectDevelopmentBootstrap(options.configuration));
-    const trust = createFirstSliceAuthorizationTrust({ database, clock, ids });
+    const trust = options.configuration.clientCertificateTrustRootId === undefined
+      ? createFirstSliceAuthorizationTrust({ database, clock, ids })
+      : createMultiUserAuthorizationTrust({
+          database,
+          clock,
+          ids,
+          clientCertificateTrustRootId:
+            options.configuration.clientCertificateTrustRootId,
+        });
+    const administration =
+      options.configuration.clientCertificateTrustRootId === undefined
+        ? undefined
+        : new SQLiteLocalAdministration({
+            database,
+            clock,
+            ids,
+            contextVerifier: trust.contextVerifier,
+            clientCertificateTrustRootId:
+              options.configuration.clientCertificateTrustRootId,
+          });
     const intake = createLocalImageIntakeVault();
     const attachmentStorage = new LocalPrivateAttachmentStore({
       database,
@@ -195,6 +218,7 @@ export async function startWalkingSkeletonService(
       handle: createLocalProtocolApplicationDispatch({
         application,
         imageIntake: intake,
+        ...(administration === undefined ? {} : { administration }),
       }),
       ...(options.onConnectionError === undefined
         ? {}

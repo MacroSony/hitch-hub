@@ -205,6 +205,7 @@ function authenticationAuditCount(
   transaction: V2RepositoryTransaction,
   installationId: InstallationId,
   authenticationRequestId: string,
+  component: "local-connector" | "remote-ingress",
 ): number {
   return requiredCount(
     transaction,
@@ -212,11 +213,11 @@ function authenticationAuditCount(
       FROM audit_envelopes
       WHERE installation_id = ?
         AND actor_kind = 'system'
-        AND system_component = 'local-connector'
+        AND system_component = ?
         AND outcome = 'succeeded'
         AND action = 'authentication-recorded'
         AND authentication_request_id = ?`,
-    [installationId, authenticationRequestId],
+    [installationId, component, authenticationRequestId],
   );
 }
 
@@ -371,8 +372,9 @@ export class SQLiteFoundationalAuthorizationReads {
     );
     const request = transaction.get(
       `SELECT installation_id, evidence_kind, socket_security,
-        outcome_status, principal_id, identity_binding_id, assurance,
-        rejection_reason, decided_at
+        client_trust_root_id, client_certificate_fingerprint,
+        binding_source_kind, outcome_status, principal_id,
+        identity_binding_id, assurance, rejection_reason, decided_at
       FROM authentication_requests
       WHERE id = ?`,
       [authenticationRequestId],
@@ -390,22 +392,42 @@ export class SQLiteFoundationalAuthorizationReads {
         "authentication installation",
       ),
     );
+    const isLocalEvidence =
+      actor.method === "local-peer" &&
+      actor.assurance === "elevated" &&
+      request.evidence_kind === "local-peer-owner-socket" &&
+      request.socket_security ===
+        "service-owned-0700-parent-and-0600-socket" &&
+      request.client_trust_root_id === null &&
+      request.client_certificate_fingerprint === null &&
+      request.binding_source_kind === "local-peer";
+    const isRemoteEvidence =
+      actor.method === "mtls-client" &&
+      actor.assurance === "normal" &&
+      request.evidence_kind === "mtls-client-certificate" &&
+      request.socket_security === null &&
+      typeof request.client_trust_root_id === "string" &&
+      typeof request.client_certificate_fingerprint === "string" &&
+      request.binding_source_kind === "mtls-client";
+    const auditComponent = actor.method === "local-peer"
+      ? "local-connector" as const
+      : actor.method === "mtls-client"
+        ? "remote-ingress" as const
+        : undefined;
     if (
-      request.evidence_kind !== "local-peer-owner-socket" ||
-      request.socket_security !==
-        "service-owned-0700-parent-and-0600-socket" ||
+      (!isLocalEvidence && !isRemoteEvidence) ||
+      auditComponent === undefined ||
       request.outcome_status !== "authenticated" ||
       request.principal_id !== actor.principalId ||
       request.identity_binding_id !== actor.identityBindingId ||
       request.assurance !== actor.assurance ||
       request.rejection_reason !== null ||
       request.decided_at !== actor.authenticatedAt ||
-      actor.method !== "local-peer" ||
-      actor.assurance !== "normal" ||
       authenticationAuditCount(
         transaction,
         installationId,
         authenticationRequestId,
+        auditComponent,
       ) !== 1 ||
       totalAuthenticationAuditCount(
         transaction,
@@ -432,13 +454,15 @@ export class SQLiteFoundationalAuthorizationReads {
       [principalId],
     );
     const binding = transaction.get(
-      `SELECT installation_id, principal_id, source_kind, local_host_id, state
+      `SELECT installation_id, principal_id, source_kind, local_host_id,
+        client_trust_root_id, subject_id, state
       FROM identity_bindings
       WHERE id = ?`,
       [identityBindingId],
     );
     const endpoint = transaction.get(
       `SELECT installation_id, address_kind, local_host_id,
+        identity_binding_id, identity_binding_source_kind,
         audience_kind, audience_principal_id
       FROM endpoints
       WHERE id = ?`,
@@ -453,12 +477,7 @@ export class SQLiteFoundationalAuthorizationReads {
             [binding.local_host_id],
           )
         : undefined;
-    if (
-      principal === undefined ||
-      binding === undefined ||
-      endpoint === undefined ||
-      localHost === undefined
-    ) {
+    if (principal === undefined || binding === undefined || endpoint === undefined) {
       return Object.freeze({
         status: "denied" as const,
         installationId,
@@ -472,38 +491,47 @@ export class SQLiteFoundationalAuthorizationReads {
       [installationId],
       "installation",
     );
-    assertPublishedRow(
-      transaction,
-      installationId,
-      "principals",
-      [principalId],
-      "principal",
-    );
-    assertPublishedRow(
-      transaction,
-      installationId,
-      "identity_bindings",
-      [identityBindingId],
-      "identity binding",
-    );
-    const localHostId = decodeServiceId(
-      "LocalHost",
-      binding.local_host_id,
-    );
-    assertPublishedRow(
-      transaction,
-      installationId,
-      "local_hosts",
-      [localHostId],
-      "local host",
-    );
-    assertPublishedRow(
-      transaction,
-      installationId,
-      "endpoints",
-      [endpointId],
-      "endpoint",
-    );
+    if (actor.method === "local-peer") {
+      if (localHost === undefined) {
+        return Object.freeze({
+          status: "denied" as const,
+          installationId,
+          reason: "binding-inactive" as const,
+        });
+      }
+      assertPublishedRow(
+        transaction,
+        installationId,
+        "principals",
+        [principalId],
+        "principal",
+      );
+      assertPublishedRow(
+        transaction,
+        installationId,
+        "identity_bindings",
+        [identityBindingId],
+        "identity binding",
+      );
+      const localHostId = decodeServiceId(
+        "LocalHost",
+        binding.local_host_id,
+      );
+      assertPublishedRow(
+        transaction,
+        installationId,
+        "local_hosts",
+        [localHostId],
+        "local host",
+      );
+      assertPublishedRow(
+        transaction,
+        installationId,
+        "endpoints",
+        [endpointId],
+        "endpoint",
+      );
+    }
 
     const principalState = requiredText(
       principal,
@@ -523,16 +551,38 @@ export class SQLiteFoundationalAuthorizationReads {
         "durable connector identity state is unsupported",
       );
     }
+    const localGraphMatches =
+      actor.method === "local-peer" &&
+      localHost !== undefined &&
+      binding.installation_id === installationId &&
+      binding.principal_id === principalId &&
+      binding.source_kind === "local-peer" &&
+      binding.client_trust_root_id === null &&
+      localHost.installation_id === installationId &&
+      endpoint.installation_id === installationId &&
+      endpoint.address_kind === "local-client" &&
+      endpoint.local_host_id === binding.local_host_id &&
+      endpoint.identity_binding_id === null &&
+      endpoint.identity_binding_source_kind === null &&
+      endpoint.audience_kind === "private" &&
+      endpoint.audience_principal_id === principalId;
+    const remoteGraphMatches =
+      actor.method === "mtls-client" &&
+      binding.installation_id === installationId &&
+      binding.principal_id === principalId &&
+      binding.source_kind === "mtls-client" &&
+      binding.local_host_id === null &&
+      binding.client_trust_root_id === request.client_trust_root_id &&
+      binding.subject_id === request.client_certificate_fingerprint &&
+      endpoint.installation_id === installationId &&
+      endpoint.address_kind === "remote-client" &&
+      endpoint.local_host_id === null &&
+      endpoint.identity_binding_id === identityBindingId &&
+      endpoint.identity_binding_source_kind === "mtls-client" &&
+      endpoint.audience_kind === "private" &&
+      endpoint.audience_principal_id === principalId;
     if (
-      binding.installation_id !== installationId ||
-      binding.principal_id !== principalId ||
-      binding.source_kind !== "local-peer" ||
-      localHost.installation_id !== installationId ||
-      endpoint.installation_id !== installationId ||
-      endpoint.address_kind !== "local-client" ||
-      endpoint.local_host_id !== binding.local_host_id ||
-      endpoint.audience_kind !== "private" ||
-      endpoint.audience_principal_id !== principalId ||
+      (!localGraphMatches && !remoteGraphMatches) ||
       principal.installation_id !== installationId ||
       bindingState === "revoked"
     ) {

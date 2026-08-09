@@ -14,6 +14,7 @@ import type {
   ConnectorCommandFailureCode,
   FirstSliceConnectorApplication,
   GetTurnConnectorCommand,
+  LocalAdministrationPort,
 } from "../../model/application.js";
 import type { LocalImageIntakeVault } from "../../persistence/attachment-store.js";
 import type { AuthenticatedLocalProtocolExchange } from "./socket.js";
@@ -25,6 +26,7 @@ import type {
 export interface LocalProtocolApplicationDispatchOptions {
   readonly application: FirstSliceConnectorApplication;
   readonly imageIntake: LocalImageIntakeVault;
+  readonly administration?: LocalAdministrationPort;
 }
 
 export class LocalProtocolApplicationDispatchError extends Error {
@@ -125,7 +127,7 @@ function projectTurnQueryResult(
 export function createLocalProtocolApplicationDispatch(
   options: LocalProtocolApplicationDispatchOptions,
 ): (exchange: AuthenticatedLocalProtocolExchange) => Promise<void> {
-  const { application, imageIntake } = options;
+  const { application, imageIntake, administration } = options;
 
   return async (exchange): Promise<void> => {
     if (exchange.signal.aborted) throw abortReason(exchange.signal);
@@ -212,6 +214,53 @@ export function createLocalProtocolApplicationDispatch(
         const response = await application.execute(
           exchange.context,
           command,
+        );
+        await exchange.respond(
+          response.status === "rejected"
+            ? rejected(response.code)
+            : succeeded(response.result),
+        );
+        return;
+      }
+
+      case "admin-create-principal":
+      case "admin-disable-principal":
+      case "admin-bind-client-certificate":
+      case "admin-revoke-client-certificate": {
+        if (administration === undefined) {
+          // A walking-skeleton composition without the explicit local
+          // administration boundary fails closed.
+          await exchange.respond(rejected("invalid-request"));
+          return;
+        }
+        const adminCommand = command.kind === "admin-create-principal"
+          ? Object.freeze({
+              kind: "create-principal" as const,
+              principalReference: command.principalReference,
+              displayName: command.displayName,
+              role: command.role,
+              workspaceReference: command.workspaceReference,
+              canonicalWorkspaceRoot: command.workspaceRoot,
+            })
+          : command.kind === "admin-disable-principal"
+            ? Object.freeze({
+                kind: "disable-principal" as const,
+                principalReference: command.principalReference,
+              })
+            : command.kind === "admin-bind-client-certificate"
+              ? Object.freeze({
+                  kind: "bind-client-certificate" as const,
+                  principalReference: command.principalReference,
+                  bindingReference: command.bindingReference,
+                  completeDer: Buffer.from(command.certificateDer.data, "base64"),
+                })
+              : Object.freeze({
+                  kind: "revoke-client-certificate" as const,
+                  bindingReference: command.bindingReference,
+                });
+        const response = await administration.execute(
+          exchange.context,
+          adminCommand,
         );
         await exchange.respond(
           response.status === "rejected"

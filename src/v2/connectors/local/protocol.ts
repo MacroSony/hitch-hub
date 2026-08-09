@@ -3,11 +3,15 @@ import type {
   ConnectorResponseEvent,
 } from "../../model/application.js";
 import type {
+  ClientCertificateFingerprint,
+  IdentityBindingId,
   IsoTimestamp,
+  PrincipalId,
   SessionId,
   TurnId,
   TurnIdempotencyKey,
   TurnInteractionId,
+  WorkspaceId,
 } from "../../model/primitives.js";
 import type { TurnTerminalResponse } from "../../model/records.js";
 import type {
@@ -19,6 +23,7 @@ import { codecFail, type CodecPath } from "../../codecs/errors.js";
 import {
   decodeBoundedArray,
   decodeBoundedString,
+  decodeClientCertificateFingerprint,
   decodeIsoTimestamp,
   decodeNonNegativeSafeInteger,
   decodePositiveSafeInteger,
@@ -39,6 +44,7 @@ import {
   decodeTurnInteractionRequest,
   decodeTurnResult,
 } from "../../codecs/turn-events.js";
+import { decodeCanonicalHostPath } from "../../bootstrap/records.js";
 
 export const LOCAL_PROTOCOL_NAME = "hitch.local" as const;
 export const LOCAL_PROTOCOL_VERSION = 1 as const;
@@ -50,6 +56,7 @@ export const LOCAL_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_PROTOCOL_LIMITS = Object.freeze({
   maximumFrameBytes: 16 * 1024 * 1024,
   maximumImageBytes: 8 * 1024 * 1024,
+  maximumClientCertificateDerBytes: 64 * 1024,
   maximumPromptCharacters: 65_536,
   maximumShortTextCharacters: 4_096,
   maximumReferenceCharacters: 128,
@@ -72,6 +79,12 @@ export interface LocalProtocolImage {
   readonly data: string;
 }
 
+export interface LocalProtocolClientCertificateDer {
+  readonly encoding: "base64";
+  readonly byteLength: number;
+  readonly data: string;
+}
+
 export type LocalProtocolSessionSelector =
   | {
       readonly kind: "session-id";
@@ -82,7 +95,7 @@ export type LocalProtocolSessionSelector =
       readonly name: string;
     };
 
-export type LocalProtocolCommand =
+export type LocalApplicationProtocolCommand =
   | {
       readonly kind: "create-session";
       readonly profileReference: string;
@@ -113,6 +126,35 @@ export type LocalProtocolCommand =
       readonly interactionId: TurnInteractionId;
       readonly decision: "approve" | "deny";
     };
+
+/** Commands exposed only by the owner-private elevated local boundary. */
+export type LocalAdministrationProtocolCommand =
+  | {
+      readonly kind: "admin-create-principal";
+      readonly principalReference: string;
+      readonly displayName: string;
+      readonly role: "admin" | "member";
+      readonly workspaceReference: string;
+      readonly workspaceRoot: string;
+    }
+  | {
+      readonly kind: "admin-disable-principal";
+      readonly principalReference: string;
+    }
+  | {
+      readonly kind: "admin-bind-client-certificate";
+      readonly principalReference: string;
+      readonly bindingReference: string;
+      readonly certificateDer: LocalProtocolClientCertificateDer;
+    }
+  | {
+      readonly kind: "admin-revoke-client-certificate";
+      readonly bindingReference: string;
+    };
+
+export type LocalProtocolCommand =
+  | LocalApplicationProtocolCommand
+  | LocalAdministrationProtocolCommand;
 
 export interface LocalProtocolClientFrame {
   readonly protocol: typeof LOCAL_PROTOCOL_NAME;
@@ -167,6 +209,27 @@ export type LocalProtocolCommandResult =
         | "interaction-resolved"
         | "interaction-not-pending";
       readonly interactionId: TurnInteractionId;
+    }
+  | {
+      readonly kind: "principal-created";
+      readonly principalId: PrincipalId;
+      readonly workspaceId: WorkspaceId;
+    }
+  | {
+      readonly kind: "principal-disabled" | "principal-already-disabled";
+      readonly principalId: PrincipalId;
+    }
+  | {
+      readonly kind: "client-certificate-bound";
+      readonly principalId: PrincipalId;
+      readonly identityBindingId: IdentityBindingId;
+      readonly fingerprint: ClientCertificateFingerprint;
+    }
+  | {
+      readonly kind:
+        | "client-certificate-revoked"
+        | "client-certificate-already-revoked";
+      readonly identityBindingId: IdentityBindingId;
     };
 
 export type LocalProtocolCommandOutcome =
@@ -380,9 +443,63 @@ function decodeImage(
   return { encoding: "base64", byteLength, data };
 }
 
-function decodeCommand(
+function decodeClientCertificateDer(
   input: unknown,
   path: CodecPath,
+): LocalProtocolClientCertificateDer {
+  const object = decodePlainObject(input, path);
+  requireExactFields(object, ["encoding", "byteLength", "data"], [], path);
+  decodeLiteral(object.encoding, "base64", at(path, "encoding"));
+  const byteLength = decodePositiveSafeInteger(
+    object.byteLength,
+    at(path, "byteLength"),
+  );
+  if (byteLength > LOCAL_PROTOCOL_LIMITS.maximumClientCertificateDerBytes) {
+    codecFail(
+      at(path, "byteLength"),
+      "out-of-range",
+      "client certificate exceeds the DER byte limit",
+    );
+  }
+  const data = decodeBoundedString(
+    object.data,
+    {
+      minimumLength: 4,
+      maximumLength:
+        Math.ceil(
+          LOCAL_PROTOCOL_LIMITS.maximumClientCertificateDerBytes / 3,
+        ) * 4,
+      pattern: BASE64,
+      label: "client certificate DER base64",
+    },
+    at(path, "data"),
+  );
+  const decoded = Buffer.from(data, "base64");
+  if (
+    decoded.length !== byteLength ||
+    decoded.length >
+      LOCAL_PROTOCOL_LIMITS.maximumClientCertificateDerBytes ||
+    decoded.toString("base64") !== data
+  ) {
+    codecFail(
+      at(path, "data"),
+      "invalid-format",
+      "client certificate byte length and canonical base64 must agree",
+    );
+  }
+  return { encoding: "base64", byteLength, data };
+}
+
+function decodeCanonicalAbsolutePath(
+  input: unknown,
+  path: CodecPath,
+): string {
+  return decodeCanonicalHostPath(input, path);
+}
+
+export function decodeLocalProtocolCommand(
+  input: unknown,
+  path: CodecPath = [],
 ): LocalProtocolCommand {
   const object = decodePlainObject(input, path);
   const kind = decodeString(object.kind, at(path, "kind"));
@@ -496,6 +613,85 @@ function decodeCommand(
           object.decision,
           ["approve", "deny"] as const,
           at(path, "decision"),
+        ),
+      };
+    case "admin-create-principal":
+      requireExactFields(
+        object,
+        [
+          "kind",
+          "principalReference",
+          "displayName",
+          "role",
+          "workspaceReference",
+          "workspaceRoot",
+        ],
+        [],
+        path,
+      );
+      return {
+        kind,
+        principalReference: decodeConfigurationReference(
+          object.principalReference,
+          at(path, "principalReference"),
+        ),
+        displayName: decodeUserLabel(
+          object.displayName,
+          at(path, "displayName"),
+          "principal display name",
+        ),
+        role: decodeEnum(
+          object.role,
+          ["admin", "member"] as const,
+          at(path, "role"),
+        ),
+        workspaceReference: decodeConfigurationReference(
+          object.workspaceReference,
+          at(path, "workspaceReference"),
+        ),
+        workspaceRoot: decodeCanonicalAbsolutePath(
+          object.workspaceRoot,
+          at(path, "workspaceRoot"),
+        ),
+      };
+    case "admin-disable-principal":
+      requireExactFields(object, ["kind", "principalReference"], [], path);
+      return {
+        kind,
+        principalReference: decodeConfigurationReference(
+          object.principalReference,
+          at(path, "principalReference"),
+        ),
+      };
+    case "admin-bind-client-certificate":
+      requireExactFields(
+        object,
+        ["kind", "principalReference", "bindingReference", "certificateDer"],
+        [],
+        path,
+      );
+      return {
+        kind,
+        principalReference: decodeConfigurationReference(
+          object.principalReference,
+          at(path, "principalReference"),
+        ),
+        bindingReference: decodeConfigurationReference(
+          object.bindingReference,
+          at(path, "bindingReference"),
+        ),
+        certificateDer: decodeClientCertificateDer(
+          object.certificateDer,
+          at(path, "certificateDer"),
+        ),
+      };
+    case "admin-revoke-client-certificate":
+      requireExactFields(object, ["kind", "bindingReference"], [], path);
+      return {
+        kind,
+        bindingReference: decodeConfigurationReference(
+          object.bindingReference,
+          at(path, "bindingReference"),
         ),
       };
     default:
@@ -776,6 +972,77 @@ function decodeCommandResult(
           at(path, "interactionId"),
         ),
       };
+    case "principal-created":
+      requireExactFields(
+        object,
+        ["kind", "principalId", "workspaceId"],
+        [],
+        path,
+      );
+      return {
+        kind,
+        principalId: decodeServiceId(
+          "Principal",
+          object.principalId,
+          at(path, "principalId"),
+        ),
+        workspaceId: decodeServiceId(
+          "Workspace",
+          object.workspaceId,
+          at(path, "workspaceId"),
+        ),
+      };
+    case "principal-disabled":
+    case "principal-already-disabled":
+      requireExactFields(object, ["kind", "principalId"], [], path);
+      return {
+        kind,
+        principalId: decodeServiceId(
+          "Principal",
+          object.principalId,
+          at(path, "principalId"),
+        ),
+      };
+    case "client-certificate-bound":
+      requireExactFields(
+        object,
+        ["kind", "principalId", "identityBindingId", "fingerprint"],
+        [],
+        path,
+      );
+      return {
+        kind,
+        principalId: decodeServiceId(
+          "Principal",
+          object.principalId,
+          at(path, "principalId"),
+        ),
+        identityBindingId: decodeServiceId(
+          "IdentityBinding",
+          object.identityBindingId,
+          at(path, "identityBindingId"),
+        ),
+        fingerprint: decodeClientCertificateFingerprint(
+          object.fingerprint,
+          at(path, "fingerprint"),
+        ),
+      };
+    case "client-certificate-revoked":
+    case "client-certificate-already-revoked":
+      requireExactFields(
+        object,
+        ["kind", "identityBindingId"],
+        [],
+        path,
+      );
+      return {
+        kind,
+        identityBindingId: decodeServiceId(
+          "IdentityBinding",
+          object.identityBindingId,
+          at(path, "identityBindingId"),
+        ),
+      };
     default:
       codecFail(
         at(path, "kind"),
@@ -995,7 +1262,7 @@ export function decodeLocalProtocolClientFrame(
     version: LOCAL_PROTOCOL_VERSION,
     frame: "request",
     requestId: decodeRequestId(envelope.requestId, ["requestId"]),
-    command: decodeCommand(envelope.command, ["command"]),
+    command: decodeLocalProtocolCommand(envelope.command, ["command"]),
   });
 }
 

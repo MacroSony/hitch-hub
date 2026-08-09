@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, X509Certificate } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -86,6 +86,79 @@ export function readBoundedCliImage(path: string): Uint8Array {
       );
     }
     return bytes;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/** Reads a local PEM or DER leaf and emits only its complete DER bytes. */
+export function readBoundedCliClientCertificate(path: string): Uint8Array {
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      path,
+      constants.O_RDONLY |
+        (process.platform === "linux" ? constants.O_NOFOLLOW : 0),
+    );
+  } catch (error) {
+    throw new WalkingSkeletonClientError(
+      "unable to open the CLI client certificate source",
+      { cause: error },
+    );
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (
+      !stat.isFile() ||
+      stat.size < 1 ||
+      stat.size >
+        LOCAL_PROTOCOL_LIMITS.maximumClientCertificateDerBytes * 2
+    ) {
+      throw new WalkingSkeletonClientError(
+        "CLI client certificate must be a bounded non-empty regular file",
+      );
+    }
+    const bytes = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(
+        descriptor,
+        bytes,
+        offset,
+        bytes.length - offset,
+        offset,
+      );
+      if (read === 0) {
+        throw new WalkingSkeletonClientError(
+          "CLI client certificate changed or ended while being read",
+        );
+      }
+      offset += read;
+    }
+    if (fstatSync(descriptor).size !== stat.size) {
+      throw new WalkingSkeletonClientError(
+        "CLI client certificate changed while being read",
+      );
+    }
+    let raw: Buffer;
+    try {
+      raw = new X509Certificate(bytes).raw;
+    } catch (error) {
+      throw new WalkingSkeletonClientError(
+        "CLI client certificate must contain one parseable X.509 leaf",
+        { cause: error },
+      );
+    }
+    if (
+      raw.byteLength < 1 ||
+      raw.byteLength >
+        LOCAL_PROTOCOL_LIMITS.maximumClientCertificateDerBytes
+    ) {
+      throw new WalkingSkeletonClientError(
+        "CLI client certificate DER exceeds the protocol byte limit",
+      );
+    }
+    return Buffer.from(raw);
   } finally {
     closeSync(descriptor);
   }

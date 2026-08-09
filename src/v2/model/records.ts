@@ -314,6 +314,10 @@ export type AuditEvent =
       readonly authenticationRequestId: AuthenticationRequestId;
     }
   | {
+      readonly action: "principal-created" | "principal-state-changed";
+      readonly subjectPrincipalId: PrincipalId;
+    }
+  | {
       readonly action: "identity-binding-state-changed";
       readonly identityBindingId: IdentityBindingId;
     }

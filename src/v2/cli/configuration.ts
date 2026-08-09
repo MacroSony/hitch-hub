@@ -8,6 +8,7 @@ import { isAbsolute, normalize, resolve } from "node:path";
 import { parseDocument } from "yaml";
 
 import { decodeIsoTimestamp } from "../codecs/primitives.js";
+import { decodeClientCertificateTrustRootId } from "../codecs/primitives.js";
 import type { IsoTimestamp } from "../model/primitives.js";
 
 const MAXIMUM_STARTUP_CONFIGURATION_BYTES = 64 * 1024;
@@ -18,6 +19,8 @@ export interface WalkingSkeletonStartupConfiguration {
   readonly dataRoot: string;
   readonly workspaceRoot: string;
   readonly bootstrapPublishedAt: IsoTimestamp;
+  /** Enables V2-M02 local enrollment; remote listening is composed later. */
+  readonly clientCertificateTrustRootId?: string;
 }
 
 export class WalkingSkeletonConfigurationError extends Error {
@@ -84,17 +87,18 @@ function exactObject(input: unknown): Record<string, unknown> {
     );
   }
   const object = input as Record<string, unknown>;
-  const expected = [
+  const required = [
     "version",
     "mode",
     "dataRoot",
     "workspaceRoot",
     "bootstrapPublishedAt",
   ];
+  const allowed = [...required, "clientCertificateTrustRootId"];
   const actual = Object.keys(object).sort();
   if (
-    actual.length !== expected.length ||
-    expected.some((field) => !Object.hasOwn(object, field))
+    required.some((field) => !Object.hasOwn(object, field)) ||
+    actual.some((field) => !allowed.includes(field))
   ) {
     throw new WalkingSkeletonConfigurationError(
       "v2 startup configuration fields do not match the walking-skeleton contract",
@@ -191,5 +195,12 @@ export function loadWalkingSkeletonStartupConfiguration(
     dataRoot,
     workspaceRoot,
     bootstrapPublishedAt,
+    ...(Object.hasOwn(object, "clientCertificateTrustRootId")
+      ? {
+          clientCertificateTrustRootId: decodeClientCertificateTrustRootId(
+            object.clientCertificateTrustRootId,
+          ),
+        }
+      : {}),
   });
 }

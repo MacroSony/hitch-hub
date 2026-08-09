@@ -39,9 +39,16 @@ what is blocked.
   bindings, and durable per-principal execution capacity; preserves additional
   enrolled users across bootstrap replay while keeping provider authority
   exact; and makes admission/claim use one atomic principal-wide FIFO across
-  sessions. Remote authentication and user administration remain V2-M02 work,
-  and the application still authenticates only through the committed local
-  owner socket until then.
+  sessions.
+- V2-M02 is an independently checkpoint-reviewed working-tree candidate. It
+  adds exact TLS 1.3 client-certificate verification and durable fingerprint
+  authentication, a strict one-request/one-response remote JSONL ingress,
+  local-only principal create/disable and certificate bind/revoke commands,
+  and CLI coverage that still reaches administration only through the
+  owner-private socket. The transport has real mTLS handshake tests, but it is
+  not composed into production `serve`; V2-M07 owns that configuration and
+  lifecycle. Existing session/Turn services still require V2-M03
+  principal-generalized authorization before remote multi-user use is claimed.
 - The multi-user agentic MVP boundary, explicit deferrals, seven-slice mapping,
   and source-of-truth transition were independently reviewed and committed in
   `f7e9669`.
@@ -91,7 +98,7 @@ what is blocked.
   hardens replay ordering, attachment authentication provenance, invalid-ID
   cancellation, system cancellation attribution, and queue timestamps.
 - `npm run typecheck`, `npm run build`, and `npm run test:v2` pass against the
-  current working tree. The v2 suite currently has 285 passing tests.
+  current working tree. The v2 suite currently has 313 passing tests.
 - V2-E01 is committed after two-pass independent review. The Pi sidecar
   receives an empty Bubblewrap network namespace, an exact three-entry
   environment, and a fixed
@@ -162,16 +169,19 @@ what is blocked.
 
 ## Working-tree review candidates
 
-None. Passing deterministic tests remains necessary but does not by itself
-move future work to `Committed`; each bounded substep still requires review,
-verification, and its own commit.
+| Task | State | Evidence |
+| --- | --- | --- |
+| V2-M02 — mTLS ingress and local administration | Review candidate | Contract, authentication, administration, and real-TLS ingress checkpoints independently approved; final whole-change review and commit remain |
+
+Passing deterministic tests remains necessary but does not by itself move a
+candidate to `Committed`.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
-| V2-M02 — mTLS ingress and local administration | Ready | V2-M01 certificate-binding and principal contracts are committed |
+| V2-M02 — mTLS ingress and local administration | Review candidate | All bounded checkpoints pass; final whole-change review and commit remain |
 | V2-M03 — multi-user application enforcement | Waiting | V2-M01 and V2-M02 trusted authentication context |
 | V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
 | V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
@@ -228,9 +238,10 @@ should expose integration problems earlier than the original wave ordering.
    active human principals, certificate identity bindings, `admin`/`member`,
    private owner-only endpoints, fixed per-principal workspaces, and
    principal-wide execution capacity.
-5. Complete V2-M02 and V2-M03: private-network mTLS ingress, local-only user
-   administration, and cross-principal application enforcement. No runtime is
-   connected until the two-principal denial matrix passes.
+5. V2-M02 private-network mTLS ingress and local-only user administration are a
+   fully verified review candidate. After commit, complete V2-M03
+   cross-principal application enforcement. No runtime is connected until the
+   two-principal denial matrix passes.
 6. Complete V2-M04 and V2-M05: the minimal Pi driver, one fresh bounded
    Bubblewrap worker per Turn, verified E01 sidecar, one-shot broker authority,
    and secure launch composition.
@@ -247,13 +258,15 @@ for 16 of the original 21 single-owner scenarios, and the current suite remains
 required. It does not define completion of the revised MVP.
 
 V2-M01 adds a separate focused ten-scenario multi-user MVP registry without
-relabeling the historical cases. Current M01 evidence marks certificate
-identity (`V2-MVP-S01`), ownership/capacity correlation (`V2-MVP-S02`), and
-principal-wide queue ceilings (`V2-MVP-S07`) in progress. It does not claim
-completion of cross-principal application denial, content-blind
-administration, live revocation, workspace/sandbox isolation, full resource
+relabeling the historical cases. Current M01/M02 evidence marks exact
+certificate identity and real mTLS ingress (`V2-MVP-S01`), ownership/capacity
+correlation (`V2-MVP-S02`), fresh-authentication denial after disable/revoke
+(`V2-MVP-S04`), and principal-wide queue ceilings (`V2-MVP-S07`) in progress.
+It does not claim completion of cross-principal application denial,
+content-blind containment beyond the bounded local lifecycle commands,
+dispatch/result revocation, workspace/sandbox isolation, full resource
 ceilings, one-shot provider invocation, cleanup, uncertain-send non-replay, or
-the two-principal end-to-end Turn; those remain M02-M07 gates. Exhaustive crash
+the two-principal end-to-end Turn; those remain M03-M07 gates. Exhaustive crash
 permutations, provider/OS breadth, soak/load work, and the complete original
 21-scenario matrix are explicitly deferred.
 

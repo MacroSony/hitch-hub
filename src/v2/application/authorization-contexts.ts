@@ -2,14 +2,21 @@ import type {
   AuthenticatedConnectorContext,
   BackgroundServiceAuthorizationComponent,
   LocalConnectorAuthenticationPort,
+  RemoteConnectorAuthenticationPort,
   ServiceAuthorizationContextPort,
   TrustedServiceAuthorizationContext,
 } from "../model/application.js";
+import type { ClientCertificateVerificationPort } from "../connectors/remote/certificate-verification.js";
+import { createClientCertificateTrust } from "../connectors/remote/certificate-verification.js";
 import {
   createLocalConnectorAuthentication,
   type LocalConnectorAuthenticationOptions,
   type LocalConnectorConnectionIssuer,
 } from "./local-authentication.js";
+import {
+  createRemoteConnectorAuthentication,
+  type RemoteConnectorAuthenticationBundle,
+} from "./remote-authentication.js";
 
 const BACKGROUND_COMPONENTS = Object.freeze({
   "turn-coordinator": true,
@@ -54,6 +61,14 @@ export interface FirstSliceAuthorizationTrust {
   readonly contextVerifier: TrustedAuthorizationContextVerifier;
 }
 
+export interface MultiUserAuthorizationTrust
+  extends FirstSliceAuthorizationTrust {
+  /** Passed only to the mTLS listener after its OpenSSL handshake. */
+  readonly remoteCertificateVerifier: ClientCertificateVerificationPort;
+  /** Passed only to the bounded remote connector. */
+  readonly remoteAuthentication: RemoteConnectorAuthenticationPort;
+}
+
 export class ServiceAuthorizationTrustError extends Error {
   constructor(message: string) {
     super(message);
@@ -75,9 +90,13 @@ function isBackgroundComponent(
  * returned narrow capabilities; callers cannot recreate trusted contexts from
  * persisted actors, component strings, structural casts, or cloned values.
  */
-export function createFirstSliceAuthorizationTrust(
+function createAuthorizationTrust(
   options: LocalConnectorAuthenticationOptions,
-): FirstSliceAuthorizationTrust {
+  remote?: {
+    readonly certificateVerifier: ClientCertificateVerificationPort;
+    readonly authentication: RemoteConnectorAuthenticationBundle;
+  },
+): FirstSliceAuthorizationTrust | MultiUserAuthorizationTrust {
   const local = createLocalConnectorAuthentication(options);
   const serviceContexts =
     new WeakMap<object, BackgroundServiceAuthorizationComponent>();
@@ -114,7 +133,10 @@ export function createFirstSliceAuthorizationTrust(
         if (
           local.contextVerifier.isAuthentic(
             context as AuthenticatedConnectorContext,
-          )
+          ) ||
+          remote?.authentication.contextVerifier.isAuthentic(
+            context as AuthenticatedConnectorContext,
+          ) === true
         ) {
           return Object.freeze({
             kind: "connector" as const,
@@ -134,10 +156,47 @@ export function createFirstSliceAuthorizationTrust(
       },
     });
 
-  return Object.freeze({
+  const base = {
     localConnectionIssuer: local.connectionIssuer,
     localAuthentication: local.authentication,
     serviceContextIssuer,
     contextVerifier,
+  };
+  return Object.freeze(
+    remote === undefined
+      ? base
+      : {
+          ...base,
+          remoteCertificateVerifier: remote.certificateVerifier,
+          remoteAuthentication: remote.authentication.authentication,
+        },
+  );
+}
+
+export function createFirstSliceAuthorizationTrust(
+  options: LocalConnectorAuthenticationOptions,
+): FirstSliceAuthorizationTrust {
+  return createAuthorizationTrust(options) as FirstSliceAuthorizationTrust;
+}
+
+/** Creates one authority domain spanning the elevated local and mTLS paths. */
+export function createMultiUserAuthorizationTrust(
+  options: LocalConnectorAuthenticationOptions & {
+    readonly clientCertificateTrustRootId: string;
+  },
+): MultiUserAuthorizationTrust {
+  const certificate = createClientCertificateTrust({
+    trustRootId: options.clientCertificateTrustRootId,
+    clock: options.clock,
   });
+  const remote = createRemoteConnectorAuthentication({
+    database: options.database,
+    clock: options.clock,
+    ids: options.ids,
+    evidenceConsumer: certificate.evidenceConsumer,
+  });
+  return createAuthorizationTrust(options, {
+    certificateVerifier: certificate.verifier,
+    authentication: remote,
+  }) as MultiUserAuthorizationTrust;
 }

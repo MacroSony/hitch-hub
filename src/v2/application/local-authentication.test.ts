@@ -67,7 +67,7 @@ test("local connection authentication records one request and audit before minti
           principalId: "owner-v1",
           identityBindingId: "owner-binding-v1",
           method: "local-peer",
-          assurance: "normal",
+          assurance: "elevated",
           requestId: "local-auth:AuthenticationRequest:0001",
           authenticatedAt: "2026-07-29T12:03:00.000Z",
         },
@@ -92,7 +92,7 @@ test("local connection authentication records one request and audit before minti
           outcome_status: "authenticated",
           principal_id: "owner-v1",
           identity_binding_id: "owner-binding-v1",
-          assurance: "normal",
+          assurance: "elevated",
           rejection_reason: null,
           decided_at: "2026-07-29T12:03:00.000Z",
         },
@@ -380,6 +380,62 @@ test("local authentication rejects ambiguous binding state without recording a d
       );
       assert.equal(count(database, "authentication_requests"), 0);
       assert.equal(count(database, "audit_envelopes"), 1);
+    } finally {
+      database.close();
+    }
+  });
+});
+
+test("remote identity bindings do not make the bootstrap local peer ambiguous", async () => {
+  await withDisposableDataRoot(async (root) => {
+    const database = openCanonicalHitchV2Database({
+      dataRoot: root.resolve("state"),
+    });
+    try {
+      await publish(database);
+      database.transaction((transaction) => {
+        transaction.run(
+          `INSERT INTO identity_bindings (
+            id, installation_id, principal_id, source_kind,
+            client_trust_root_id, subject_id, state, created_at
+          ) VALUES (?, ?, ?, 'mtls-client', ?, ?, 'active', ?)`,
+          [
+            "owner-remote-binding-v1",
+            "installation-v1",
+            "owner-v1",
+            "private-alpha-client-ca-v1",
+            `sha256:${"ab".repeat(32)}`,
+            "2026-07-29T12:02:00.000Z",
+          ],
+        );
+        transaction.run(
+          `INSERT INTO endpoints (
+            id, installation_id, address_kind, identity_binding_id,
+            identity_binding_source_kind, audience_kind,
+            audience_principal_id, created_at
+          ) VALUES (?, ?, 'remote-client', ?, 'mtls-client', 'private', ?, ?)`,
+          [
+            "owner-remote-endpoint-v1",
+            "installation-v1",
+            "owner-remote-binding-v1",
+            "owner-v1",
+            "2026-07-29T12:02:00.000Z",
+          ],
+        );
+      });
+      const trust = createLocalConnectorAuthentication({
+        database,
+        clock: new DeterministicClock("2026-07-29T12:03:00.000Z"),
+        ids: new DeterministicIdSource("local-with-remote"),
+      });
+      const result = await trust.authentication.authenticate(
+        trust.connectionIssuer.issueAcceptedConnection(),
+      );
+      assert.equal(result.status, "authenticated");
+      if (result.status === "authenticated") {
+        assert.equal(result.context.actor.method, "local-peer");
+        assert.equal(result.context.actor.assurance, "elevated");
+      }
     } finally {
       database.close();
     }

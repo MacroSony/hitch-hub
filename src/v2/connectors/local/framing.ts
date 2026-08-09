@@ -51,6 +51,10 @@ function commandSubjectId(
       return command.interactionId;
     case "create-session":
     case "submit-turn":
+    case "admin-create-principal":
+    case "admin-disable-principal":
+    case "admin-bind-client-certificate":
+    case "admin-revoke-client-certificate":
       return undefined;
   }
 }
@@ -72,11 +76,17 @@ function resultSubjectId(
       return result.interactionId;
     case "session-created":
     case "turn-submitted":
+    case "principal-created":
+    case "principal-disabled":
+    case "principal-already-disabled":
+    case "client-certificate-bound":
+    case "client-certificate-revoked":
+    case "client-certificate-already-revoked":
       return undefined;
   }
 }
 
-function parseStrictJson(input: string): unknown {
+function parseStrictJson(input: string, protocol: "local" | "remote"): unknown {
   let index = 0;
   let nodes = 0;
 
@@ -95,7 +105,7 @@ function parseStrictJson(input: string): unknown {
     codecFail(
       [],
       "invalid-format",
-      `invalid local protocol JSON: ${message}`,
+      `invalid ${protocol} protocol JSON: ${message}`,
     );
 
   const string = (): string => {
@@ -158,7 +168,7 @@ function parseStrictJson(input: string): unknown {
           codecFail(
             [key],
             "duplicate-item",
-            "duplicate local protocol JSON object field",
+            `duplicate ${protocol} protocol JSON object field`,
           );
         }
         seen.add(key);
@@ -241,9 +251,12 @@ function parseStrictJson(input: string): unknown {
   return parsed;
 }
 
-function decodeJsonlText(bytes: Uint8Array): string {
+function decodeJsonlText(
+  bytes: Uint8Array,
+  protocol: "local" | "remote",
+): string {
   if (!(bytes instanceof Uint8Array)) {
-    codecFail([], "invalid-type", "local JSONL frame must be bytes");
+    codecFail([], "invalid-type", `${protocol} JSONL frame must be bytes`);
   }
   if (
     bytes.length <= 1 ||
@@ -252,14 +265,14 @@ function decodeJsonlText(bytes: Uint8Array): string {
     codecFail(
       [],
       "too-long",
-      "local JSONL frame violates the byte limit",
+      `${protocol} JSONL frame violates the byte limit`,
     );
   }
   if (bytes[bytes.length - 1] !== 0x0a) {
     codecFail(
       [],
       "invalid-format",
-      "local JSONL requires one non-blank LF-terminated frame",
+      `${protocol} JSONL requires one non-blank LF-terminated frame`,
     );
   }
   for (let byteIndex = 0; byteIndex < bytes.length - 1; byteIndex += 1) {
@@ -268,7 +281,7 @@ function decodeJsonlText(bytes: Uint8Array): string {
       codecFail(
         [],
         "invalid-format",
-        "local JSONL forbids embedded or CR line breaks",
+        `${protocol} JSONL forbids embedded or CR line breaks`,
       );
     }
   }
@@ -280,7 +293,7 @@ function decodeJsonlText(bytes: Uint8Array): string {
     codecFail(
       [],
       "invalid-format",
-      "local JSONL forbids a UTF-8 byte-order mark",
+      `${protocol} JSONL forbids a UTF-8 byte-order mark`,
     );
   }
   try {
@@ -288,39 +301,65 @@ function decodeJsonlText(bytes: Uint8Array): string {
       bytes.subarray(0, -1),
     );
   } catch {
-    codecFail([], "invalid-format", "local JSONL is not valid UTF-8");
+    codecFail([], "invalid-format", `${protocol} JSONL is not valid UTF-8`);
   }
 }
 
-function encodeJsonl(encoded: string): Uint8Array {
+function encodeJsonl(
+  encoded: string,
+  protocol: "local" | "remote",
+): Uint8Array {
   const bytes = new TextEncoder().encode(`${encoded}\n`);
   if (bytes.length > LOCAL_PROTOCOL_LIMITS.maximumFrameBytes) {
     codecFail(
       [],
       "too-long",
-      "encoded local JSONL frame exceeds the byte limit",
+      `encoded ${protocol} JSONL frame exceeds the byte limit`,
     );
   }
   return bytes;
 }
 
+/**
+ * Shared strict JSONL substrate for the local and deliberately narrower remote
+ * protocols. Both wire contracts use the same absolute frame/parser limits;
+ * their semantic codecs remain separate and closed.
+ */
+export function decodeStrictBoundedProtocolJsonl(
+  bytes: Uint8Array,
+  protocol: "local" | "remote" = "local",
+): unknown {
+  return parseStrictJson(decodeJsonlText(bytes, protocol), protocol);
+}
+
+export function encodeBoundedProtocolJsonl(
+  encoded: string,
+  protocol: "local" | "remote" = "local",
+): Uint8Array {
+  return encodeJsonl(encoded, protocol);
+}
+
 export function encodeLocalProtocolClientJsonlFrame(
   input: unknown,
 ): Uint8Array {
-  return encodeJsonl(encodeCanonicalLocalProtocolClientFrame(input));
+  return encodeBoundedProtocolJsonl(
+    encodeCanonicalLocalProtocolClientFrame(input),
+  );
 }
 
 export function encodeLocalProtocolServerJsonlFrame(
   input: unknown,
 ): Uint8Array {
-  return encodeJsonl(encodeCanonicalLocalProtocolServerFrame(input));
+  return encodeBoundedProtocolJsonl(
+    encodeCanonicalLocalProtocolServerFrame(input),
+  );
 }
 
 export function decodeLocalProtocolClientJsonlFrame(
   bytes: Uint8Array,
 ): LocalProtocolClientFrame {
   return decodeLocalProtocolClientFrame(
-    parseStrictJson(decodeJsonlText(bytes)),
+    decodeStrictBoundedProtocolJsonl(bytes),
   );
 }
 
@@ -328,7 +367,7 @@ export function decodeLocalProtocolServerJsonlFrame(
   bytes: Uint8Array,
 ): LocalProtocolServerFrame {
   return decodeLocalProtocolServerFrame(
-    parseStrictJson(decodeJsonlText(bytes)),
+    decodeStrictBoundedProtocolJsonl(bytes),
   );
 }
 
@@ -358,6 +397,20 @@ function resultMatchesCommand(
       return (
         result.kind === "interaction-resolved" ||
         result.kind === "interaction-not-pending"
+      );
+    case "admin-create-principal":
+      return result.kind === "principal-created";
+    case "admin-disable-principal":
+      return (
+        result.kind === "principal-disabled" ||
+        result.kind === "principal-already-disabled"
+      );
+    case "admin-bind-client-certificate":
+      return result.kind === "client-certificate-bound";
+    case "admin-revoke-client-certificate":
+      return (
+        result.kind === "client-certificate-revoked" ||
+        result.kind === "client-certificate-already-revoked"
       );
   }
 }
