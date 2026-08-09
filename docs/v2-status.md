@@ -40,7 +40,7 @@ what is blocked.
   enrolled users across bootstrap replay while keeping provider authority
   exact; and makes admission/claim use one atomic principal-wide FIFO across
   sessions.
-- V2-M02 is an independently checkpoint-reviewed working-tree candidate. It
+- V2-M02 is independently reviewed and committed in `e69f0c9`. It
   adds exact TLS 1.3 client-certificate verification and durable fingerprint
   authentication, a strict one-request/one-response remote JSONL ingress,
   local-only principal create/disable and certificate bind/revoke commands,
@@ -166,23 +166,21 @@ what is blocked.
 | V2-014A — development CLI walking skeleton | Committed | `7140382` |
 | V2-E01 — production sidecar egress containment | Committed | `404e5a3` |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
+| V2-M02 — mTLS ingress and local administration | Committed | `e69f0c9` |
 
 ## Working-tree review candidates
 
-| Task | State | Evidence |
-| --- | --- | --- |
-| V2-M02 — mTLS ingress and local administration | Review candidate | Contract, authentication, administration, and real-TLS ingress checkpoints independently approved; final whole-change review and commit remain |
-
-Passing deterministic tests remains necessary but does not by itself move a
-candidate to `Committed`.
+None. Passing deterministic tests remains necessary but does not by itself
+move future work to `Committed`; each bounded substep still requires review,
+verification, and its own commit.
 
 ## Remaining task inventory
 
 | Task | State | Next dependency or gate |
 | --- | --- | --- |
 | V2-M01 — multi-principal contract and schema | Committed | `ec0735f` |
-| V2-M02 — mTLS ingress and local administration | Review candidate | All bounded checkpoints pass; final whole-change review and commit remain |
-| V2-M03 — multi-user application enforcement | Waiting | V2-M01 and V2-M02 trusted authentication context |
+| V2-M02 — mTLS ingress and local administration | Committed | `e69f0c9` |
+| V2-M03 — multi-user application enforcement | Ready | V2-M01 and V2-M02 trusted authentication contexts are committed |
 | V2-M04 — minimal Pi driver and ephemeral sandbox | Ready | Pure driver/mount work may proceed without singleton-owner assumptions |
 | V2-M05 — sidecar, one-shot broker, and launch composition | Waiting | V2-M01, V2-M04, V2-006B, and the committed E01/V2-006A foundation |
 | V2-M06 — thin coordinator and durable query | Waiting | V2-M03 through V2-M05 |
@@ -238,10 +236,10 @@ should expose integration problems earlier than the original wave ordering.
    active human principals, certificate identity bindings, `admin`/`member`,
    private owner-only endpoints, fixed per-principal workspaces, and
    principal-wide execution capacity.
-5. V2-M02 private-network mTLS ingress and local-only user administration are a
-   fully verified review candidate. After commit, complete V2-M03
-   cross-principal application enforcement. No runtime is connected until the
-   two-principal denial matrix passes.
+5. V2-M02 private-network mTLS ingress and local-only user administration are
+   independently reviewed and committed in `e69f0c9`. Complete V2-M03
+   cross-principal application enforcement next. No runtime is connected until
+   the two-principal denial matrix passes.
 6. Complete V2-M04 and V2-M05: the minimal Pi driver, one fresh bounded
    Bubblewrap worker per Turn, verified E01 sidecar, one-shot broker authority,
    and secure launch composition.
